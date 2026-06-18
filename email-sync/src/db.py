@@ -222,6 +222,7 @@ def upsert_sync_map(
     source_provider_id: str,
     mirror_account_id: Optional[int] = None,
     mirror_provider_id: Optional[str] = None,
+    target_cal_provider_id: Optional[str] = None,
     sync_status: str = "synced",
     etag: Optional[str] = None,
 ) -> None:
@@ -231,16 +232,20 @@ def upsert_sync_map(
                 """
                 INSERT INTO personal.calendar_sync_map
                     (event_id, source_account_id, source_provider_id,
-                     mirror_account_id, mirror_provider_id, sync_status, last_synced_at, etag)
-                VALUES (%s, %s, %s, %s, %s, %s, now(), %s)
+                     mirror_account_id, mirror_provider_id, target_cal_provider_id,
+                     sync_status, last_synced_at, etag, last_etag)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now(), %s, %s)
                 ON CONFLICT (source_account_id, source_provider_id) DO UPDATE
-                    SET mirror_account_id  = COALESCE(EXCLUDED.mirror_account_id, calendar_sync_map.mirror_account_id),
-                        mirror_provider_id = COALESCE(EXCLUDED.mirror_provider_id, calendar_sync_map.mirror_provider_id),
-                        sync_status        = EXCLUDED.sync_status,
-                        last_synced_at     = now(),
-                        etag               = COALESCE(EXCLUDED.etag, calendar_sync_map.etag)
+                    SET mirror_account_id       = COALESCE(EXCLUDED.mirror_account_id, calendar_sync_map.mirror_account_id),
+                        mirror_provider_id      = COALESCE(EXCLUDED.mirror_provider_id, calendar_sync_map.mirror_provider_id),
+                        target_cal_provider_id  = COALESCE(EXCLUDED.target_cal_provider_id, calendar_sync_map.target_cal_provider_id),
+                        sync_status             = EXCLUDED.sync_status,
+                        last_synced_at          = now(),
+                        etag                    = COALESCE(EXCLUDED.etag, calendar_sync_map.etag),
+                        last_etag               = COALESCE(EXCLUDED.last_etag, calendar_sync_map.last_etag)
                 """,
                 (event_id, source_account_id, source_provider_id,
-                 mirror_account_id, mirror_provider_id, sync_status, etag),
+                 mirror_account_id, mirror_provider_id, target_cal_provider_id,
+                 sync_status, etag, etag if target_cal_provider_id else None),
             )
         c.commit()

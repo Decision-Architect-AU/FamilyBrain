@@ -426,11 +426,25 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
             event_type = _classify_event(summary)  # keep existing DB event_type
             cal_key    = f"gmail:{account['email_address']}:{provider_id}"
 
-            # Write to target calendar (Bills/Holidays/Family/default)
+            existing = db.get_sync_map(account_id, provider_id)
+            etag_changed = not existing or existing.get("last_etag") != etag
+
+            # Write/update routed calendar (Bills/Holidays/Family/default)
             target_cal = target_calendar_id(ac, route)
+            target_cal_id_stored = None
             if target_cal != ac.default_cal_id:
+                existing_target_id = (existing or {}).get("target_cal_provider_id")
                 try:
-                    _write_event_to_calendar(svc, target_cal, summary, starts_at, ends_at, description)
+                    if existing_target_id and not etag_changed:
+                        target_cal_id_stored = existing_target_id  # no change, keep as-is
+                    elif existing_target_id:
+                        # Event was updated — patch the existing target-cal copy
+                        _patch_event_in_calendar(svc, target_cal, existing_target_id,
+                                                 summary, starts_at, ends_at, description)
+                        target_cal_id_stored = existing_target_id
+                    else:
+                        target_cal_id_stored = _write_event_to_calendar(
+                            svc, target_cal, summary, starts_at, ends_at, description)
                 except Exception as e:
                     print(f"[gmail] failed to write to {route} calendar for '{summary}': {e}")
 
@@ -445,9 +459,8 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                 ingestor_url=ingestor_url,
             )
 
-            # Mirror to other accounts per routing rules
-            existing = db.get_sync_map(account_id, provider_id)
-            if not (existing and existing.get("mirror_provider_id")):
+            # Mirror to other accounts (only if not yet mirrored, or event changed)
+            if not (existing and existing.get("mirror_provider_id") and not etag_changed):
                 for (mirror_acct_id, mirror_slot) in ac.mirror_to:
                     mirror_acct = mirror_by_id.get(mirror_acct_id)
                     if not mirror_acct or not mirror_acct.get("sync_calendar"):
@@ -455,25 +468,40 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     mirror_ac = routing.get(mirror_acct_id)
                     effective_slot = route if mirror_slot == "route" else mirror_slot
                     mirror_cal = target_calendar_id(mirror_ac, effective_slot) if mirror_ac else None
+                    existing_mirror_id = (existing or {}).get("mirror_provider_id")
                     try:
                         if mirror_acct["provider"] == "outlook":
                             mirror_id = create_outlook_event(mirror_acct, summary, starts_at, ends_at, description)
-                        else:
+                        elif existing_mirror_id and etag_changed:
+                            mirror_svc = _calendar_service(mirror_acct)
+                            _patch_event_in_calendar(mirror_svc, mirror_cal or "primary",
+                                                     existing_mirror_id, summary, starts_at, ends_at, description)
+                            mirror_id = existing_mirror_id
+                        elif not existing_mirror_id:
                             mirror_svc = _calendar_service(mirror_acct)
                             mirror_id = _write_event_to_calendar(
                                 mirror_svc, mirror_cal or "primary",
-                                summary, starts_at, ends_at, description
-                            )
+                                summary, starts_at, ends_at, description)
+                        else:
+                            continue  # mirror exists, event unchanged — skip
                         db.upsert_sync_map(
                             event_id, account_id, provider_id,
                             mirror_account_id=mirror_acct_id,
                             mirror_provider_id=mirror_id,
+                            target_cal_provider_id=target_cal_id_stored,
                             sync_status="synced", etag=etag,
                         )
                     except Exception as e:
                         print(f"[gmail] mirror to {mirror_acct['email_address']} failed for '{summary}': {e}")
                         db.upsert_sync_map(event_id, account_id, provider_id,
                                            sync_status="error", etag=etag)
+            elif target_cal_id_stored:
+                # No mirror needed but store target_cal_provider_id if we just created/updated it
+                db.upsert_sync_map(
+                    event_id, account_id, provider_id,
+                    target_cal_provider_id=target_cal_id_stored,
+                    sync_status="synced", etag=etag,
+                )
 
             synced += 1
 
@@ -487,23 +515,36 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
     return synced
 
 
-def _write_event_to_calendar(svc, cal_id: str, summary: str, starts_at, ends_at, description: str) -> str:
-    """Write an event to a specific Google Calendar, return provider event ID."""
-    def _fmt(dt) -> dict:
-        if dt is None:
-            return {}
-        if hasattr(dt, "hour"):
-            return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
-        return {"date": dt.strftime("%Y-%m-%d")}
+def _fmt_cal_dt(dt) -> dict:
+    if dt is None:
+        return {}
+    if hasattr(dt, "hour"):
+        return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
+    return {"date": dt.strftime("%Y-%m-%d")}
 
+
+def _write_event_to_calendar(svc, cal_id: str, summary: str, starts_at, ends_at, description: str) -> str:
+    """Insert a new event in a Google Calendar, return provider event ID."""
     body = {
         "summary":     summary,
         "description": description,
-        "start":       _fmt(starts_at),
-        "end":         _fmt(ends_at or starts_at),
+        "start":       _fmt_cal_dt(starts_at),
+        "end":         _fmt_cal_dt(ends_at or starts_at),
     }
     result = svc.events().insert(calendarId=cal_id, body=body).execute()
     return result["id"]
+
+
+def _patch_event_in_calendar(svc, cal_id: str, event_id: str,
+                              summary: str, starts_at, ends_at, description: str) -> None:
+    """Patch an existing Google Calendar event in-place."""
+    body = {
+        "summary":     summary,
+        "description": description,
+        "start":       _fmt_cal_dt(starts_at),
+        "end":         _fmt_cal_dt(ends_at or starts_at),
+    }
+    svc.events().patch(calendarId=cal_id, eventId=event_id, body=body).execute()
 
 
 def create_gmail_event(account: dict, summary: str, starts_at: datetime,

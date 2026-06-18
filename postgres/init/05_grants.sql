@@ -9,6 +9,9 @@ GRANT USAGE ON SCHEMA audit              TO openclaw_readonly;
 -- personal schema: curator + superuser only (no group grant here)
 GRANT USAGE ON SCHEMA personal TO curator;
 
+-- dashboard_ro: needs personal schema for review queue and financial data
+GRANT USAGE ON SCHEMA personal TO dashboard_ro;
+
 -- scraper: write to property_deals only
 GRANT USAGE ON SCHEMA property_deals     TO openclaw_scraper_role;
 GRANT USAGE ON SCHEMA audit              TO openclaw_scraper_role;

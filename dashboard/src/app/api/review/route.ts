@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
 
-// GET /api/review — fetch pending review items
+// GET /api/review — fetch pending review items (one per domain)
 export async function GET() {
   const pool = getPool();
   const { rows } = await pool.query(`
-    SELECT rq.id, rq.from_address, rq.subject, rq.received_at,
-           rq.suggested_entity, rq.confidence, rq.reason,
-           rq.status, rq.created_at,
-           em.category
-    FROM   personal.review_queue rq
-    JOIN   personal.email_message em ON em.id = rq.email_msg_id
-    WHERE  rq.status = 'pending'
-    ORDER  BY rq.created_at DESC
+    SELECT id, domain, from_address, sample_subjects,
+           email_count, suggested_entity, confidence, reason,
+           status, created_at
+    FROM   personal.review_queue
+    WHERE  status = 'pending'
+    ORDER  BY email_count DESC, created_at DESC
     LIMIT  100
   `);
   return NextResponse.json(rows);
@@ -33,7 +31,6 @@ export async function POST(req: NextRequest) {
   try {
     await client.query('BEGIN');
 
-    // Fetch the queue item
     const { rows } = await client.query(
       'SELECT * FROM personal.review_queue WHERE id = $1',
       [id]
@@ -42,19 +39,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
     const item = rows[0];
+    const domain: string = item.domain;
 
     if (action === 'approve') {
       const resolvedEntity = entity || item.suggested_entity || 'Personal';
 
-      // Mark the email as financially processed and set entity in graph if needed
+      // Reset financial_processed for all emails from this domain
+      // so the processor will re-classify them with the confirmed entity
       await client.query(
         `UPDATE personal.email_message
-         SET financial_processed = true
-         WHERE id = $1`,
-        [item.email_msg_id]
+         SET financial_processed = false
+         WHERE from_address ILIKE $1`,
+        [`%${domain}%`]
       );
 
-      // Update the review queue row
       await client.query(
         `UPDATE personal.review_queue
          SET status = 'approved', resolved_entity = $1, resolved_at = now()
@@ -62,24 +60,28 @@ export async function POST(req: NextRequest) {
         [resolvedEntity, id]
       );
 
-      // Learn the domain if requested
-      if (learnDomain && item.from_address.includes('@')) {
-        const domain = item.from_address.split('@')[1].toLowerCase();
+      if (learnDomain) {
         await client.query(
           `INSERT INTO personal.financial_domain (domain, entity_slug, source)
            VALUES ($1, $2, 'manual')
-           ON CONFLICT (domain) DO UPDATE SET entity_slug = EXCLUDED.entity_slug`,
+           ON CONFLICT (domain) DO UPDATE
+             SET entity_slug = EXCLUDED.entity_slug,
+                 source = 'manual'`,
           [domain, resolvedEntity !== 'Personal' ? resolvedEntity : null]
         );
       }
     } else {
-      // Junk — just mark it and set financial_processed so it never re-queues
+      // Junk — mark all emails from this domain as processed so they don't re-queue
       await client.query(
-        `UPDATE personal.email_message SET financial_processed = true WHERE id = $1`,
-        [item.email_msg_id]
+        `UPDATE personal.email_message
+         SET financial_processed = true
+         WHERE from_address ILIKE $1`,
+        [`%${domain}%`]
       );
       await client.query(
-        `UPDATE personal.review_queue SET status = 'junked', resolved_at = now() WHERE id = $1`,
+        `UPDATE personal.review_queue
+         SET status = 'junked', resolved_at = now()
+         WHERE id = $1`,
         [id]
       );
     }

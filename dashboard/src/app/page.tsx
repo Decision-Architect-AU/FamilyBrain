@@ -43,6 +43,9 @@ export default function Home() {
         </h1>
         <nav className="flex items-center gap-4">
           <ReviewBadge />
+          <Link href="/senders" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Senders
+          </Link>
           <Link href="/graph" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Graph explorer →
           </Link>

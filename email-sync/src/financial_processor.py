@@ -540,10 +540,13 @@ def _embed(text: str) -> list[float] | None:
 
 def _store_note(subject: str, file_path: Path, pdf_text: str) -> int | None:
     """
-    Insert a personal.note row with the PDF text and its embedding.
+    Upsert a personal.note row keyed on file_path.
+    Re-runs return the existing note id rather than creating a duplicate.
     Returns the note id, or None on failure.
     """
-    body = f"{subject}\n\n{pdf_text}".strip()
+    body      = f"{subject}\n\n{pdf_text}".strip()
+    path_str  = str(file_path)
+    tag       = str(file_path.parent.name)
     if not body:
         return None
     vec = _embed(body)
@@ -552,21 +555,28 @@ def _store_note(subject: str, file_path: Path, pdf_text: str) -> int | None:
             with conn.cursor() as cur:
                 if vec:
                     cur.execute(
-                        """INSERT INTO personal.note (source, body, tags, embedding)
-                           VALUES (%s, %s, %s, %s) RETURNING id""",
-                        ("financial_doc", body, [str(file_path.parent.name)], vec),
+                        """INSERT INTO personal.note (source, body, tags, embedding, file_path)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (file_path) DO UPDATE
+                             SET body = EXCLUDED.body,
+                                 embedding = EXCLUDED.embedding
+                           RETURNING id""",
+                        ("financial_doc", body, [tag], vec, path_str),
                     )
                 else:
                     cur.execute(
-                        """INSERT INTO personal.note (source, body, tags)
-                           VALUES (%s, %s, %s) RETURNING id""",
-                        ("financial_doc", body, [str(file_path.parent.name)]),
+                        """INSERT INTO personal.note (source, body, tags, file_path)
+                           VALUES (%s, %s, %s, %s)
+                           ON CONFLICT (file_path) DO UPDATE
+                             SET body = EXCLUDED.body
+                           RETURNING id""",
+                        ("financial_doc", body, [tag], path_str),
                     )
                 note_id = cur.fetchone()[0]
             conn.commit()
         return note_id
     except Exception as e:
-        print(f"[financials] note insert failed: {e}")
+        print(f"[financials] note upsert failed: {e}")
         return None
 
 
@@ -617,21 +627,40 @@ def _mark_processed(email_message_id: int) -> None:
         conn.commit()
 
 
-def _queue_for_review(email_msg_id: int, from_address: str, subject: str,
-                      received_at: str, suggested_entity: str | None,
-                      reason: str) -> None:
-    """Add an uncertain email to the human review queue (idempotent)."""
+def _queue_for_review(from_address: str, subject: str,
+                      suggested_entity: str | None, reason: str) -> None:
+    """
+    Upsert an uncertain sender into the review queue — one row per domain.
+    Collects up to 3 sample subjects and increments email_count.
+    """
+    if "@" not in from_address:
+        return
+    domain = from_address.split("@")[-1].lower().strip()
+    if not domain:
+        return
     try:
         with psycopg2.connect(DB_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO personal.review_queue
-                         (email_msg_id, from_address, subject, received_at,
+                         (domain, from_address, sample_subjects,
                           suggested_entity, confidence, reason)
-                       VALUES (%s, %s, %s, %s, %s, 'low', %s)
-                       ON CONFLICT DO NOTHING""",
-                    (email_msg_id, from_address, subject,
-                     received_at or None, suggested_entity, reason),
+                       VALUES (%s, %s, %s, %s, 'low', %s)
+                       ON CONFLICT (domain) DO UPDATE
+                         SET from_address    = EXCLUDED.from_address,
+                             email_count     = personal.review_queue.email_count + 1,
+                             sample_subjects = CASE
+                               WHEN array_length(personal.review_queue.sample_subjects, 1) >= 3
+                               THEN personal.review_queue.sample_subjects
+                               ELSE personal.review_queue.sample_subjects
+                                    || EXCLUDED.sample_subjects
+                             END,
+                             suggested_entity = COALESCE(
+                               EXCLUDED.suggested_entity,
+                               personal.review_queue.suggested_entity
+                             )
+                       WHERE personal.review_queue.status = 'pending'""",
+                    (domain, from_address, [subject[:120]], suggested_entity, reason),
                 )
             conn.commit()
     except Exception as e:
@@ -766,23 +795,28 @@ def process_financial_emails(accounts: list[dict]) -> int:
         domain_known = any(d in addr_lower for d in fin_domains)
         if not domain_known:
             _queue_for_review(
-                row["id"], from_addr, subject, received_at,
+                from_addr, subject,
                 entity_slug if entity_slug != "Personal" else None,
                 "unknown domain",
             )
 
-        for fname, data, pdf_txt in pdf_texts:
-            # Per-attachment fallback if still unresolved
-            if entity_slug == "Personal":
+        # Per-attachment fallback: try to resolve Personal using attachment text
+        if entity_slug == "Personal":
+            for fname, data, pdf_txt in pdf_texts:
                 combined = " ".join(filter(None, [fname, pdf_txt]))
                 if combined:
                     entity_slug = _classify_entity(subject, combined, from_addr, entities, prop_patterns, graph_patterns)
-            # Queue for review if still landing on Personal after all attempts
-            if entity_slug == "Personal" and domain_known:
-                _queue_for_review(
-                    row["id"], from_addr, subject, received_at,
-                    None, "entity uncertain — classified as Personal",
-                )
+                if entity_slug != "Personal":
+                    break
+
+        # Queue for review once if still unresolved after all attempts
+        if entity_slug == "Personal" and domain_known:
+            _queue_for_review(
+                from_addr, subject,
+                None, "entity uncertain — classified as Personal",
+            )
+
+        for fname, data, pdf_txt in pdf_texts:
 
             safe = _sanitize(Path(fname).stem)
             ext  = Path(fname).suffix or ".pdf"

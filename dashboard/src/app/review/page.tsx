@@ -10,13 +10,15 @@ const ENTITIES = ['Trust1', 'Trust2', 'Trust3', 'Trust4', 'SMSF', 'NDIS', 'Perso
 
 interface ReviewItem {
   id: number;
+  domain: string;
   from_address: string;
-  subject: string;
-  received_at: string;
+  sample_subjects: string[];
+  email_count: number;
   suggested_entity: string | null;
   confidence: string | null;
   reason: string | null;
-  category: string;
+  status: string;
+  created_at: string;
 }
 
 export default function ReviewPage() {
@@ -33,12 +35,7 @@ export default function ReviewPage() {
       await fetch('/api/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id,
-          action,
-          entity: entityOverrides[id],
-          learnDomain,
-        }),
+        body: JSON.stringify({ id, action, entity: entityOverrides[id], learnDomain }),
       });
       mutate();
     } finally {
@@ -50,7 +47,6 @@ export default function ReviewPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-white">
@@ -58,7 +54,7 @@ export default function ReviewPage() {
             <span className="text-gray-500 text-lg font-normal ml-2">/ Review queue</span>
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Emails the processor wasn&apos;t sure about. Approve to file, junk to discard.
+            Sender domains the processor couldn&apos;t confidently classify. Approve to file all emails from that domain, junk to discard.
           </p>
         </div>
         <Link href="/" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
@@ -81,35 +77,42 @@ export default function ReviewPage() {
         {pending.map(item => {
           const selectedEntity = entityOverrides[item.id] ?? item.suggested_entity ?? 'Personal';
           const isActing = acting === item.id;
-          const date = item.received_at
-            ? new Date(item.received_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })
-            : '—';
 
           return (
             <div
               key={item.id}
               className="rounded-xl border border-gray-700/40 bg-gray-900/60 p-4 space-y-3"
             >
-              {/* Row 1: from + date + badges */}
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-white truncate">{item.subject}</p>
-                  <p className="text-xs text-gray-400 mt-0.5 truncate">{item.from_address}</p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-xs text-gray-500">{date}</span>
+              {/* Domain + count */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="text-sm font-mono font-semibold text-sky-400 truncate">
+                    {item.domain}
+                  </span>
+                  <span className="text-[11px] bg-gray-800 text-gray-400 border border-gray-700/40 px-2 py-0.5 rounded-full shrink-0">
+                    {item.email_count} email{item.email_count !== 1 ? 's' : ''}
+                  </span>
                   {item.reason && (
-                    <span className="text-[10px] bg-yellow-900/40 text-yellow-400 border border-yellow-700/30 px-2 py-0.5 rounded-full">
+                    <span className="text-[10px] bg-yellow-900/40 text-yellow-400 border border-yellow-700/30 px-2 py-0.5 rounded-full shrink-0">
                       {item.reason}
                     </span>
                   )}
-                  <span className="text-[10px] bg-gray-800 text-gray-400 border border-gray-700/30 px-2 py-0.5 rounded-full">
-                    {item.category}
-                  </span>
                 </div>
+                <span className="text-xs text-gray-600 shrink-0">{item.from_address}</span>
               </div>
 
-              {/* Row 2: entity picker + actions */}
+              {/* Sample subjects */}
+              {item.sample_subjects?.length > 0 && (
+                <div className="space-y-1">
+                  {item.sample_subjects.slice(0, 3).map((subj, i) => (
+                    <p key={i} className="text-xs text-gray-400 pl-2 border-l border-gray-700 truncate">
+                      {subj}
+                    </p>
+                  ))}
+                </div>
+              )}
+
+              {/* Entity picker + actions */}
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-xs text-gray-500 shrink-0">File as:</span>
                 <select
@@ -151,7 +154,7 @@ export default function ReviewPage() {
       </div>
 
       {pending.length > 0 && (
-        <p className="text-xs text-gray-600 text-center">{pending.length} item{pending.length !== 1 ? 's' : ''} pending</p>
+        <p className="text-xs text-gray-600 text-center">{pending.length} domain{pending.length !== 1 ? 's' : ''} pending</p>
       )}
     </div>
   );

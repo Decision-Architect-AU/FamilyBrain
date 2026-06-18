@@ -50,6 +50,8 @@ def run_email_sync() -> None:
         n = fin_mod.process_financial_emails(all_accounts)
         if n:
             print(f"[email-sync] Financial processor saved {n} document(s)")
+        # Dedup first (catches any existing triples), then sync new notes, then enrich
+        billcal_mod.deduplicate_bill_calendar(all_accounts)
         billcal_mod.sync_bill_calendar(all_accounts)
         billcal_mod.enrich_bill_calendar(all_accounts)
     except Exception as e:

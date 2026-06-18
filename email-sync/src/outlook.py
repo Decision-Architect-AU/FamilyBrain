@@ -352,11 +352,23 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                 event_type = _classify_event(summary)
                 cal_key    = f"outlook:{account['email_address']}:{provider_id}"
 
-                # Write to target Outlook calendar if Bills/Holidays/Family configured
+                existing     = db.get_sync_map(account_id, provider_id)
+                # Outlook delta sync doesn't provide etags; use presence of sync_map as change signal
+                is_new_event = not existing
+
+                # Write/update routed Outlook calendar (Bills/Holidays/Family/default)
                 target_cal = target_calendar_id(ac, route)
+                target_cal_id_stored = None
                 if target_cal != ac.default_cal_id:
+                    existing_target_id = (existing or {}).get("target_cal_provider_id")
                     try:
-                        _write_outlook_event(account, target_cal, summary, starts_at, ends_at, description)
+                        if existing_target_id:
+                            _patch_outlook_event(account, existing_target_id,
+                                                 summary, starts_at, ends_at, description)
+                            target_cal_id_stored = existing_target_id
+                        else:
+                            target_cal_id_stored = _write_outlook_event(
+                                account, target_cal, summary, starts_at, ends_at, description)
                     except Exception as e:
                         print(f"[outlook] failed to write to {route} calendar for '{summary}': {e}")
 
@@ -371,18 +383,17 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     ingestor_url=ingestor_url,
                 )
 
-                existing = db.get_sync_map(account_id, provider_id)
-                if not (existing and existing.get("mirror_provider_id")):
+                if is_new_event:
                     for (mirror_acct_id, mirror_slot) in ac.mirror_to:
                         mirror_acct = mirror_by_id.get(mirror_acct_id)
                         if not mirror_acct or not mirror_acct.get("sync_calendar"):
                             continue
                         mirror_ac  = routing.get(mirror_acct_id)
-                        # "route" means use same classification as source event
                         effective_slot = route if mirror_slot == "route" else mirror_slot
                         mirror_cal = target_calendar_id(mirror_ac, effective_slot) if mirror_ac else None
                         try:
                             if mirror_acct["provider"] == "gmail":
+                                from .gmail import _calendar_service, _write_event_to_calendar
                                 mirror_svc = _calendar_service(mirror_acct)
                                 mirror_id  = _write_event_to_calendar(
                                     mirror_svc, mirror_cal or "primary",
@@ -394,11 +405,18 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                                 event_id, account_id, provider_id,
                                 mirror_account_id=mirror_acct_id,
                                 mirror_provider_id=mirror_id,
+                                target_cal_provider_id=target_cal_id_stored,
                                 sync_status="synced",
                             )
                         except Exception as e:
                             print(f"[outlook] mirror to {mirror_acct['email_address']} failed for '{summary}': {e}")
                             db.upsert_sync_map(event_id, account_id, provider_id, sync_status="error")
+                elif target_cal_id_stored:
+                    db.upsert_sync_map(
+                        event_id, account_id, provider_id,
+                        target_cal_provider_id=target_cal_id_stored,
+                        sync_status="synced",
+                    )
 
                 synced += 1
 
@@ -438,6 +456,27 @@ def _write_outlook_event(account: dict, calendar_id: str, summary: str,
     )
     resp.raise_for_status()
     return resp.json()["id"]
+
+
+def _patch_outlook_event(account: dict, event_id: str, summary: str,
+                         starts_at: datetime, ends_at: Optional[datetime], description: str) -> None:
+    """Patch an existing Outlook Calendar event in-place."""
+    def _fmt(dt: datetime) -> dict:
+        return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "AUS Eastern Standard Time"}
+
+    body = {
+        "subject": summary,
+        "body":    {"contentType": "text", "content": description},
+        "start":   _fmt(starts_at),
+        "end":     _fmt(ends_at or starts_at),
+    }
+    resp = requests.patch(
+        f"{GRAPH_BASE}/me/events/{event_id}",
+        headers=_headers(account),
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
 
 
 def create_outlook_event(account: dict, summary: str, starts_at: datetime,

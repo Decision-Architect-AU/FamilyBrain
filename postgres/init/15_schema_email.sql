@@ -93,9 +93,13 @@ CREATE TABLE personal.calendar_sync_map (
     mirror_account_id   BIGINT REFERENCES personal.email_account(id),
     mirror_provider_id  TEXT,                           -- provider's event ID in mirror
 
+    -- Routed copy in a non-default target calendar (Bills/Family/Health etc.)
+    target_cal_provider_id TEXT,                        -- event ID in the routed calendar
+
     sync_status     TEXT NOT NULL DEFAULT 'pending',    -- pending | synced | conflict | error
     last_synced_at  TIMESTAMPTZ,
     etag            TEXT,                               -- for change detection
+    last_etag       TEXT,                               -- etag at last target-cal write
 
     UNIQUE (source_account_id, source_provider_id)
 );
