@@ -1,0 +1,10 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/agents/route": "app/api/agents/route.js",
+  "/api/graph-stats/route": "app/api/graph-stats/route.js",
+  "/page": "app/page.js",
+  "/api/audit/route": "app/api/audit/route.js",
+  "/api/status/route": "app/api/status/route.js",
+  "/api/setup-check/route": "app/api/setup-check/route.js",
+  "/graph/page": "app/graph/page.js"
+}

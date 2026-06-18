@@ -1,0 +1,36 @@
+# OpenClaw Inference Server — model registry
+# Each entry maps an Ollama-style model name to a local OpenVINO model path and device.
+# Paths are relative to this file or absolute Windows paths.
+
+models:
+
+  # Embeddings — NPU (fall back to GPU if NPU fails)
+  nomic-embed-text:
+    path: C:\Users\Glenn\embed-ov
+    type: embedding
+    device: GPU          # NPU SDPA not supported yet — use GPU
+    dim: 384
+
+  # Fast extraction / classification — GPU
+  qwen2.5:3b:
+    path: C:\Users\Glenn\qwen2.5-3b-ov
+    type: generate
+    device: GPU
+
+  # Primary extraction — GPU (convert qwen2.5:14b INT4 when ready)
+  qwen2.5:14b:
+    path: C:\Users\Glenn\qwen2.5-14b-ov
+    type: generate
+    device: GPU
+
+  # Reasoning — CPU/RAM
+  qwen2.5:32b:
+    path: C:\Users\Glenn\qwen2.5-32b-ov
+    type: generate
+    device: CPU
+
+  # Voice transcription — CPU (NPU SDPA not supported)
+  whisper-small:
+    path: C:\Users\Glenn\whisper-small-ov
+    type: whisper
+    device: CPU

@@ -1,0 +1,1 @@
+{"version":3,"sources":["../../src/config/Flavors.js"],"names":["AGE","AGENS"],"mappings":";;;;;;eAAe;AACXA,EAAAA,GAAG,EAAE,KADM;AAEXC,EAAAA,KAAK,EAAE;AAFI,C","sourcesContent":["export default {\n    AGE: 'AGE',\n    AGENS: 'AGENS'\n}\n"],"file":"Flavors.js"}

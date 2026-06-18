@@ -1,0 +1,246 @@
+"""Database helpers — reads/writes email_account and email_message tables."""
+import os
+import psycopg2
+import psycopg2.extras
+from datetime import datetime, timezone
+from typing import Optional
+
+DB_URL = os.environ["DATABASE_URL"]
+
+
+def conn():
+    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+# ── Account management ─────────────────────────────────────────────────────────
+
+def get_enabled_accounts() -> list[dict]:
+    """Return all enabled email accounts."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM personal.email_account WHERE enabled = true ORDER BY id"
+            )
+            return cur.fetchall()
+
+
+def update_token(account_id: int, access_token: str, expiry: datetime) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_account
+                   SET access_token = %s, token_expiry = %s, updated_at = now()
+                   WHERE id = %s""",
+                (access_token, expiry, account_id),
+            )
+        c.commit()
+
+
+def update_sync_cursor(account_id: int, cursor: str) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_account
+                   SET sync_cursor = %s, last_synced_at = now(), updated_at = now()
+                   WHERE id = %s""",
+                (cursor, account_id),
+            )
+        c.commit()
+
+
+def update_calendar_sync_cursor(account_id: int, cursor: str) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_account
+                   SET calendar_sync_cursor = %s, updated_at = now()
+                   WHERE id = %s""",
+                (cursor, account_id),
+            )
+        c.commit()
+
+
+def mark_last_synced(account_id: int) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE personal.email_account SET last_synced_at = now() WHERE id = %s",
+                (account_id,),
+            )
+        c.commit()
+
+
+# ── Message deduplication ──────────────────────────────────────────────────────
+
+def mark_skipped(account_id: int, provider_msg_id: str, from_address: str,
+                 subject: str, received_at, reason: str) -> None:
+    """Record a skipped message so it's not re-evaluated on every sync run."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO personal.email_message
+                    (account_id, provider_msg_id, from_address, subject, received_at,
+                     ingest_status, ingest_error, ingest_at)
+                VALUES (%s, %s, %s, %s, %s, 'skipped', %s, now())
+                ON CONFLICT (account_id, provider_msg_id) DO NOTHING
+                """,
+                (account_id, provider_msg_id, from_address, subject, received_at, reason),
+            )
+        c.commit()
+
+
+def is_already_ingested(account_id: int, provider_msg_id: str) -> bool:
+    """Returns True if message has already been ingested or intentionally skipped."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT id FROM personal.email_message
+                   WHERE account_id = %s AND provider_msg_id = %s
+                     AND ingest_status IN ('ingested', 'skipped')""",
+                (account_id, provider_msg_id),
+            )
+            return cur.fetchone() is not None
+
+
+def get_retryable_messages(account_id: int) -> list[str]:
+    """Return provider_msg_ids with status 'error' or 'pending' (have body to re-fetch)."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT provider_msg_id FROM personal.email_message
+                   WHERE account_id = %s AND ingest_status IN ('error', 'pending')
+                   ORDER BY received_at DESC NULLS LAST
+                   LIMIT 500""",
+                (account_id,),
+            )
+            return [r["provider_msg_id"] for r in cur.fetchall()]
+
+
+def get_ingested_without_label(account_id: int) -> list[tuple[str, str]]:
+    """Return (provider_msg_id, category) for ingested messages that need label backfill."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT provider_msg_id, category FROM personal.email_message
+                   WHERE account_id = %s AND ingest_status = 'ingested'
+                     AND category IS NOT NULL AND schema_routed IS NULL
+                   ORDER BY received_at DESC NULLS LAST
+                   LIMIT 500""",
+                (account_id,),
+            )
+            return [(r["provider_msg_id"], r["category"]) for r in cur.fetchall()]
+
+
+def mark_label_applied(account_id: int, provider_msg_id: str) -> None:
+    """Mark that the Gmail label has been applied (reuse schema_routed as a flag)."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_message SET schema_routed = 'labelled'
+                   WHERE account_id = %s AND provider_msg_id = %s""",
+                (account_id, provider_msg_id),
+            )
+        c.commit()
+
+
+# ── Calendar sync map ──────────────────────────────────────────────────────────
+
+def upsert_event(
+    title: str,
+    starts_at: datetime,
+    ends_at: Optional[datetime],
+    event_type: str,
+    calendar_source: str,
+    calendar_event_id: str,
+    notes: str = "",
+    ingestor_url: Optional[str] = None,
+) -> int:
+    """
+    Upsert into personal.event, return event id.
+    If ingestor_url provided, also writes (:Event) node to personal_graph.
+    """
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO personal.event
+                    (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (calendar_event_id) DO UPDATE
+                    SET title = EXCLUDED.title,
+                        starts_at = EXCLUDED.starts_at,
+                        ends_at = EXCLUDED.ends_at,
+                        notes = EXCLUDED.notes
+                RETURNING id
+                """,
+                (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes),
+            )
+            row = cur.fetchone()
+        c.commit()
+
+    event_id = row["id"]
+
+    # Fire-and-forget: write (:Event) node to personal_graph via ingestor
+    if ingestor_url:
+        try:
+            import requests
+            requests.post(
+                f"{ingestor_url}/ingest/event",
+                json={
+                    "event_row_id":      event_id,
+                    "title":             title,
+                    "starts_at":         starts_at.isoformat() if hasattr(starts_at, "isoformat") else str(starts_at),
+                    "ends_at":           ends_at.isoformat() if ends_at and hasattr(ends_at, "isoformat") else (str(ends_at) if ends_at else ""),
+                    "event_type":        event_type,
+                    "calendar_source":   calendar_source,
+                    "calendar_event_id": calendar_event_id,
+                    "notes":             notes[:500],
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"[db] ingest/event graph call failed for '{title}': {e}")
+
+    return event_id
+
+
+def get_sync_map(source_account_id: int, source_provider_id: str) -> Optional[dict]:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT * FROM personal.calendar_sync_map
+                   WHERE source_account_id = %s AND source_provider_id = %s""",
+                (source_account_id, source_provider_id),
+            )
+            return cur.fetchone()
+
+
+def upsert_sync_map(
+    event_id: int,
+    source_account_id: int,
+    source_provider_id: str,
+    mirror_account_id: Optional[int] = None,
+    mirror_provider_id: Optional[str] = None,
+    sync_status: str = "synced",
+    etag: Optional[str] = None,
+) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO personal.calendar_sync_map
+                    (event_id, source_account_id, source_provider_id,
+                     mirror_account_id, mirror_provider_id, sync_status, last_synced_at, etag)
+                VALUES (%s, %s, %s, %s, %s, %s, now(), %s)
+                ON CONFLICT (source_account_id, source_provider_id) DO UPDATE
+                    SET mirror_account_id  = COALESCE(EXCLUDED.mirror_account_id, calendar_sync_map.mirror_account_id),
+                        mirror_provider_id = COALESCE(EXCLUDED.mirror_provider_id, calendar_sync_map.mirror_provider_id),
+                        sync_status        = EXCLUDED.sync_status,
+                        last_synced_at     = now(),
+                        etag               = COALESCE(EXCLUDED.etag, calendar_sync_map.etag)
+                """,
+                (event_id, source_account_id, source_provider_id,
+                 mirror_account_id, mirror_provider_id, sync_status, etag),
+            )
+        c.commit()

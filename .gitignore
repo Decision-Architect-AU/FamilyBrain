@@ -1,0 +1,14 @@
+.env
+*.env.local
+postgres/data/
+ollama/models/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+/.next/
+/dashboard/.next/
+/age-viewer/build-src/
+/age-viewer/app-root/backend/build/
+/age-viewer/ag-driver/build/
+*.log

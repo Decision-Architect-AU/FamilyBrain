@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+openvino>=2026.2.0
+openvino-genai>=2026.2.0.0
+openvino-tokenizers>=2026.2.0.0
+transformers>=4.40.0
+numpy>=1.24.0
+python-dotenv==1.0.1

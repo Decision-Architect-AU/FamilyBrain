@@ -1,0 +1,5 @@
+# Stage 9: Podcast Agents — placeholder
+FROM python:3.12-slim
+WORKDIR /app
+RUN echo 'print("Podcast agents placeholder — Stage 9")' > main.py
+CMD ["python", "main.py"]

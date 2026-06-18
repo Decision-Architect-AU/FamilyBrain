@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-scraper",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node src/index.js",
+    "scrape:domain": "node src/scrapers/domain.js"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0",
+    "pg": "^8.12.0",
+    "node-cron": "^3.0.3"
+  }
+}

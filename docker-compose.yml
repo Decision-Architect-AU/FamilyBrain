@@ -1,0 +1,297 @@
+services:
+
+  # ─── CORE PROFILE (always running) ───────────────────────────────────────────
+
+  postgres:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    container_name: openclaw-postgres
+    profiles: [core, normal, podcast]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-geoff}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?required}
+      POSTGRES_DB: openclaw
+      DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:?required}
+      AUDIT_DB_PASSWORD: ${AUDIT_DB_PASSWORD:?required}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?required}
+      SCRAPER_DB_PASSWORD: ${SCRAPER_DB_PASSWORD:?required}
+      AGENTS_DB_PASSWORD: ${AGENTS_DB_PASSWORD:?required}
+      CURATOR_DB_PASSWORD: ${CURATOR_DB_PASSWORD:?required}
+      PODCAST_DB_PASSWORD: ${PODCAST_DB_PASSWORD:?required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-geoff} -d openclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - openclaw-net
+
+  # ollama container removed — using native Windows Ollama on host.docker.internal:11434
+  # Install: winget install Ollama.Ollama --source winget
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.dev
+    container_name: openclaw-dashboard
+    profiles: [core, normal, podcast]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DASHBOARD_DB_USER:-dashboard_ro}:${DASHBOARD_DB_PASSWORD:?required}@postgres:5432/openclaw
+      MODE_FILE: /shared/current_mode
+    volumes:
+      - shared_state:/shared
+      - ./dashboard:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openclaw-net
+
+  audit-logger:
+    build:
+      context: ./audit
+      dockerfile: Dockerfile
+    container_name: openclaw-audit
+    profiles: [core, normal, podcast]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${AUDIT_DB_USER:-audit_writer}:${AUDIT_DB_PASSWORD:?required}@postgres:5432/openclaw
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openclaw-net
+
+  ingestor:
+    build:
+      context: ./ingestor
+      dockerfile: Dockerfile
+    container_name: openclaw-ingestor
+    profiles: [core, normal, podcast]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
+      AUDIT_SERVICE_URL: http://audit-logger:4000
+      OLLAMA_URL: http://172.23.96.1:11434
+      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:3b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EXTRACT_MODEL_QUICK:  ${EXTRACT_MODEL_QUICK:-qwen2.5:3b}
+      EXTRACT_MODEL_DEEP:   ${EXTRACT_MODEL_DEEP:-qwen2.5:14b}
+      EXTRACT_MODEL_DEEPER: ${EXTRACT_MODEL_DEEPER:-qwen2.5:32b}
+      EXTRACT_DEEP_PASS:    ${EXTRACT_DEEP_PASS:-true}
+      EXTRACT_DEEPER_PASS:  ${EXTRACT_DEEPER_PASS:-false}
+      INGEST_WATCH_DIR: /data/ReadyToIngest
+      INGEST_PROCESSING_DIR: /data/Processing
+      INGEST_DONE_DIR: /data/Ingested
+    ports:
+      - "4001:4001"
+    volumes:
+      - C:/DataFiles:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-logger:
+        condition: service_started
+    networks:
+      - openclaw-net
+
+  # ─── NORMAL PROFILE ───────────────────────────────────────────────────────────
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: openclaw-n8n
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: openclaw
+      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?required}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?required}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    ports:
+      - "5678:5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openclaw-net
+
+  scraper:
+    build:
+      context: ./scrapers
+      dockerfile: Dockerfile
+    container_name: openclaw-scraper
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${SCRAPER_DB_USER:-scraper}:${SCRAPER_DB_PASSWORD:?required}@postgres:5432/openclaw
+      AUDIT_SERVICE_URL: http://audit-logger:4000
+      OLLAMA_URL: http://172.23.96.1:11434
+      SCRAPE_SUBURBS: ${SCRAPE_SUBURBS:-Brisbane,QLD}
+      SCRAPE_MIN_BEDS: ${SCRAPE_MIN_BEDS:-3}
+      SCRAPE_MAX_PRICE: ${SCRAPE_MAX_PRICE:-1500000}
+      SCRAPE_CRON: ${SCRAPE_CRON:-0 */6 * * *}
+      DEDUP_CRON: ${DEDUP_CRON:-*/15 * * * *}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-logger:
+        condition: service_started
+    networks:
+      - openclaw-net
+
+  agents:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile
+    container_name: openclaw-agents
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${AGENTS_DB_USER:-pr_agent}:${AGENTS_DB_PASSWORD:?required}@postgres:5432/openclaw
+      AUDIT_SERVICE_URL: http://audit-logger:4000
+      OLLAMA_URL: http://172.23.96.1:11434
+      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:32b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      PR_CRON_TIME: ${PR_CRON_TIME:-07:00}
+      PR_RUN_ON_START: ${PR_RUN_ON_START:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-logger:
+        condition: service_started
+    networks:
+      - openclaw-net
+
+  # ─── PODCAST PROFILE ─────────────────────────────────────────────────────────
+
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: openclaw-whisper
+    profiles: [podcast]
+    restart: unless-stopped
+    environment:
+      ASR_MODEL: ${WHISPER_MODEL:-medium.en}
+      ASR_ENGINE: openai_whisper
+    ports:
+      - "9000:9000"
+    networks:
+      - openclaw-net
+
+  tts:
+    build:
+      context: ./voice
+      dockerfile: Dockerfile.piper
+    container_name: openclaw-tts
+    profiles: [podcast]
+    restart: unless-stopped
+    ports:
+      - "5500:5500"
+    networks:
+      - openclaw-net
+
+  podcast-agents:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile.podcast
+    container_name: openclaw-podcast-agents
+    profiles: [podcast]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${PODCAST_DB_USER:-podcast_agent}:${PODCAST_DB_PASSWORD:?required}@postgres:5432/openclaw
+      AUDIT_SERVICE_URL: http://audit-logger:4000
+      OLLAMA_URL: http://172.23.96.1:11434
+      WHISPER_URL: http://172.23.96.1:11434
+      TTS_URL: http://tts:5500
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openclaw-net
+
+  # ─── GRAPH EXPLORER ──────────────────────────────────────────────────────────
+  # Apache AGE Viewer — Neo4j Browser equivalent for PostgreSQL+AGE
+  # Access at http://localhost:8888
+  # Connect with: host=postgres port=5432 db=openclaw user=geoff
+  age-viewer:
+    build:
+      context: ./age-viewer
+      dockerfile: Dockerfile
+    container_name: openclaw-age-viewer
+    profiles: [normal]
+    restart: unless-stopped
+    ports:
+      - "8888:3001"
+    networks:
+      - openclaw-net
+
+  # ─── EMAIL + CALENDAR SYNC ───────────────────────────────────────────────────
+
+  email-sync:
+    build:
+      context: ./email-sync
+      dockerfile: Dockerfile
+    container_name: openclaw-email-sync
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
+
+      # Google OAuth2 — shared client credentials for all Gmail accounts
+      # Each account's refresh_token is stored in personal.email_account
+      GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID:?required}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?required}
+
+      # Microsoft OAuth2 — shared app registration for all Outlook/Hotmail accounts
+      # Use tenant_id=consumers for personal Microsoft accounts (Hotmail, Outlook.com)
+      MICROSOFT_CLIENT_ID:  ${MICROSOFT_CLIENT_ID:?required}
+      MICROSOFT_TENANT_ID:  ${MICROSOFT_TENANT_ID:-consumers}
+
+      # Ingestor webhook endpoint (internal Docker network)
+      INGESTOR_URL: http://ingestor:4001
+
+      # Poll intervals in seconds (override in .env if needed)
+      EMAIL_POLL_INTERVAL_SECS:    ${EMAIL_POLL_INTERVAL_SECS:-300}
+      CALENDAR_POLL_INTERVAL_SECS: ${CALENDAR_POLL_INTERVAL_SECS:-900}
+
+      # Financial document filing
+      FINANCIALS_DIR: /financials
+      OLLAMA_URL:     http://172.23.96.1:11434
+      AGENT_MODEL:    ${AGENT_MODEL:-qwen2.5:3b}
+    volumes:
+      - /mnt/c/Users/Glenn/Documents/FinancialsGW:/financials
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingestor:
+        condition: service_started
+    networks:
+      - openclaw-net
+
+volumes:
+  postgres_data:
+  n8n_data:
+  shared_state:
+
+networks:
+  openclaw-net:
+    driver: bridge
