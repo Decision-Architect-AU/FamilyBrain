@@ -17,6 +17,30 @@ from typing import Optional
 
 # ── Keywords ──────────────────────────────────────────────────────────────────
 
+_OLIVIA_KW = [
+    "olivia", "livie", "livvy", "livvie",
+    "speech therapy", "speech pathology",
+    "ndis", "support worker", "support session",
+    "paed", "paediatrician", "occupational therapy", "ot ", " ot",
+    "therapy session", "child health", "disability",
+]
+
+_ELLIANA_KW = [
+    "elliana", "ellie", "elliebear", "elli ",
+    "music ensemble", "kindy", "daycare", "day care", "childcare",
+    "swim", "dance", "gymnastics",
+]
+
+_HOLIDAY_KW_TAGS = [
+    "holiday", "school holidays", "term break", "public holiday",
+    "easter", "christmas", "new year", "anzac", "queens birthday",
+    "kings birthday", "labour day", "good friday", "boxing day",
+    "long weekend", "vacation", "annual leave",
+]
+
+# colorId: 4=Flamingo(pink), 3=Grape(purple), 2=Sage(green)
+_TAG_COLORS = {"Olivia": "4", "Elliana": "3", "Holiday": "2"}
+
 _BILLS_KW = [
     "invoice", "bill", "payment due", "direct debit", "statement",
     "rates", "rent", "overdue", "balance due", "tax invoice",
@@ -41,6 +65,22 @@ _FAMILY_KW = [
     "ndis", "support worker", "therapy session",
     "paed", "paediatrician", "child health",
 ]
+
+
+def tag_family_event(summary: str, description: str = "") -> tuple[str | None, str | None]:
+    """
+    Returns (tag, colorId) for events that belong to the Family calendar.
+    tag is one of: 'Olivia', 'Elliana', 'Holiday', or None.
+    Priority: Olivia > Elliana > Holiday (most specific first).
+    """
+    text = (summary + " " + description).lower()
+    if any(kw in text for kw in _OLIVIA_KW):
+        return "Olivia", _TAG_COLORS["Olivia"]
+    if any(kw in text for kw in _ELLIANA_KW):
+        return "Elliana", _TAG_COLORS["Elliana"]
+    if any(kw in text for kw in _HOLIDAY_KW_TAGS):
+        return "Holiday", _TAG_COLORS["Holiday"]
+    return None, None
 
 
 def classify_event(summary: str, description: str = "") -> str:

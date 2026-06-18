@@ -297,6 +297,61 @@ Visual graph explorer for Apache AGE. Based on `joefagan/incubator-age-viewer` w
 - Graph: `personal_graph` / `property_graph` / `decision_graph`
 - Flavor: **Apache AGE** (not AgensGraph)
 
+### WhatsApp Bridge (`whatsapp:3002`)
+
+Connects to WhatsApp using `whatsapp-web.js` (unofficial, no Meta Business API required). You scan a QR code once; the session is persisted in a Docker volume so subsequent restarts don't require re-scanning.
+
+**Setup:**
+1. Start the normal profile: `docker compose --profile normal up -d`
+2. Open http://localhost:3002/qr in a browser
+3. On your phone: WhatsApp → Settings → Linked Devices → Link a Device → scan the QR code
+4. The page auto-refreshes and shows "✅ WhatsApp connected" when done
+
+To restrict which numbers can talk to the bot, set `WA_ALLOWED_NUMBERS` in `.env` (comma-separated, E.164 format, e.g. `+61412345678,+61498765432`). Leave empty to allow all numbers.
+
+If the session expires (rare with multi-device), just re-scan at http://localhost:3002/qr.
+
+### WhatsApp Agent (`wa-agent:4002`)
+
+Receives messages from the WhatsApp bridge, routes to the right knowledge graph(s), retrieves context, and generates a response.
+
+**Query routing** (multi-layer, fast to slow):
+
+1. **Keyword match** — instant, no LLM call
+   - Property keywords (house, suburb, listing, mortgage…) → `property_graph`
+   - Decision keywords (agile, adkar, framework, linkedin…) → `decision_graph`
+   - Personal keywords (ndis, appointment, school, family…) → `personal_graph`
+2. **Multi-domain** — if keywords span domains, all matching graphs are searched
+3. **LLM classification** — for ambiguous messages with no keywords, the LLM classifies
+4. **Default** — falls back to `personal_graph`
+
+**Retrieval per graph:**
+- Embed the query with `nomic-embed-text`
+- Vector similarity search against the primary text table (`personal.note`, `property_deals.property`, `decision_architect.theme`)
+- Supplementary: upcoming calendar events (personal), frameworks (decision)
+- Cypher: fetch Concepts and high-confidence Claims linked to top-matched Documents
+
+**Conversation memory:** last 6 turns (3 user + 3 assistant) are kept per sender in memory so follow-up questions work naturally. History is cleared on container restart, or via `DELETE /history/{sender}`.
+
+**Example conversations:**
+
+```
+You: What's on this week?
+Bot: You have 3 events this week: school pickup Tuesday 3pm, medical appointment 
+     Thursday 10am, and Shannon's birthday on Saturday...
+
+You: Any NDIS reviews coming up?
+Bot: I found 2 NDIS-related notes. Your plan review is due in March 2026...
+
+You: What does ADKAR say about resistance to change?
+Bot: ADKAR addresses resistance in the Desire phase — it distinguishes between 
+     lack of awareness (handled in phase 1) and active resistance...
+
+You: how does that compare to Kotter's 8-step model?
+Bot: Both models treat resistance as a communication failure. Kotter's step 4 
+     (enlist a volunteer army) maps roughly to ADKAR's Desire phase...
+```
+
 ### OpenVINO Inference Server (Windows host, not Docker)
 
 FastAPI server providing Ollama-compatible API endpoints (`/api/generate`, `/api/embeddings`, `/v1/audio/transcriptions`) backed by OpenVINO GenAI models running on the Intel Arc GPU.
@@ -508,6 +563,7 @@ docker compose up -d --no-deps age-viewer
 
 ## Roadmap
 
+- [x] WhatsApp chat interface with graph-routed knowledge retrieval
 - [ ] Stage 7: Curator agent — cross-schema review queue, staging table, dashboard approval UI
 - [ ] Stage 8: Mode switching API + WhatsApp/n8n integration
 - [ ] Stage 9: Voice services — podcast recording, live transcription, TTS response

@@ -356,16 +356,20 @@ def _classify_event(summary: str) -> str:
     return "family"
 
 
-def _parse_cal_dt(dt_obj: dict) -> Optional[datetime]:
-    """Parse Google Calendar dateTime or date into datetime."""
+def _parse_cal_dt(dt_obj: dict):
+    """
+    Parse a Google Calendar start/end object.
+    Returns datetime for timed events, date for all-day events.
+    Keeping them distinct so _fmt_cal_dt writes the correct field back.
+    """
     if not dt_obj:
         return None
     if "dateTime" in dt_obj:
         from dateutil.parser import parse as dtparse
         return dtparse(dt_obj["dateTime"])
     if "date" in dt_obj:
-        from dateutil.parser import parse as dtparse
-        return dtparse(dt_obj["date"])
+        from datetime import date as date_type
+        return date_type.fromisoformat(dt_obj["date"])
     return None
 
 
@@ -422,9 +426,13 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
             if not starts_at:
                 continue
 
+            from .calendar_router import tag_family_event
             route      = classify_event(summary, description)
             event_type = _classify_event(summary)  # keep existing DB event_type
             cal_key    = f"gmail:{account['email_address']}:{provider_id}"
+
+            # Determine tag + color for Family events
+            tag, color_id = tag_family_event(summary, description) if route == "family" else (None, None)
 
             existing = db.get_sync_map(account_id, provider_id)
             etag_changed = not existing or existing.get("last_etag") != etag
@@ -438,13 +446,14 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     if existing_target_id and not etag_changed:
                         target_cal_id_stored = existing_target_id  # no change, keep as-is
                     elif existing_target_id:
-                        # Event was updated — patch the existing target-cal copy
                         _patch_event_in_calendar(svc, target_cal, existing_target_id,
-                                                 summary, starts_at, ends_at, description)
+                                                 summary, starts_at, ends_at, description,
+                                                 color_id=color_id)
                         target_cal_id_stored = existing_target_id
                     else:
                         target_cal_id_stored = _write_event_to_calendar(
-                            svc, target_cal, summary, starts_at, ends_at, description)
+                            svc, target_cal, summary, starts_at, ends_at, description,
+                            color_id=color_id)
                 except Exception as e:
                     print(f"[gmail] failed to write to {route} calendar for '{summary}': {e}")
 
@@ -523,20 +532,66 @@ def _fmt_cal_dt(dt) -> dict:
     return {"date": dt.strftime("%Y-%m-%d")}
 
 
-def _write_event_to_calendar(svc, cal_id: str, summary: str, starts_at, ends_at, description: str) -> str:
-    """Insert a new event in a Google Calendar, return provider event ID."""
+def _find_event_in_calendar(svc, cal_id: str, summary: str, starts_at) -> str | None:
+    """
+    Search a calendar for an existing event matching summary + date.
+    Returns the event ID if found, else None.
+    Prevents duplicate inserts when target_cal_provider_id isn't yet tracked.
+    """
+    from datetime import date as date_type, timedelta
+    try:
+        if isinstance(starts_at, date_type):
+            time_min = f"{starts_at}T00:00:00Z"
+            time_max = f"{starts_at + timedelta(days=1)}T00:00:00Z"
+        else:
+            time_min = (starts_at - timedelta(hours=1)).isoformat()
+            time_max = (starts_at + timedelta(hours=1)).isoformat()
+
+        results = svc.events().list(
+            calendarId=cal_id,
+            timeMin=time_min,
+            timeMax=time_max,
+            q=summary[:50],
+            singleEvents=True,
+            maxResults=10,
+        ).execute()
+        for ev in results.get("items", []):
+            if ev.get("summary", "").lower() == summary.lower():
+                return ev["id"]
+    except Exception as e:
+        print(f"[gmail] calendar search failed for '{summary}': {e}")
+    return None
+
+
+def _write_event_to_calendar(svc, cal_id: str, summary: str, starts_at, ends_at,
+                              description: str, color_id: str | None = None) -> str:
+    """
+    Insert a new event in a Google Calendar, return provider event ID.
+    Searches for an existing matching event first to avoid duplicates when
+    target_cal_provider_id isn't yet tracked in the sync map.
+    """
+    existing_id = _find_event_in_calendar(svc, cal_id, summary, starts_at)
+    if existing_id:
+        # Already exists — patch it and return its ID
+        _patch_event_in_calendar(svc, cal_id, existing_id, summary, starts_at, ends_at,
+                                  description, color_id=color_id)
+        return existing_id
+
     body = {
         "summary":     summary,
         "description": description,
         "start":       _fmt_cal_dt(starts_at),
         "end":         _fmt_cal_dt(ends_at or starts_at),
     }
+    if color_id:
+        body["colorId"] = color_id
     result = svc.events().insert(calendarId=cal_id, body=body).execute()
     return result["id"]
 
 
 def _patch_event_in_calendar(svc, cal_id: str, event_id: str,
-                              summary: str, starts_at, ends_at, description: str) -> None:
+                              summary: str, starts_at, ends_at,
+                              description: str, color_id: str | None = None) -> None:
     """Patch an existing Google Calendar event in-place."""
     body = {
         "summary":     summary,
@@ -544,6 +599,8 @@ def _patch_event_in_calendar(svc, cal_id: str, event_id: str,
         "start":       _fmt_cal_dt(starts_at),
         "end":         _fmt_cal_dt(ends_at or starts_at),
     }
+    if color_id:
+        body["colorId"] = color_id
     svc.events().patch(calendarId=cal_id, eventId=event_id, body=body).execute()
 
 

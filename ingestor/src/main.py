@@ -32,7 +32,8 @@ WATCH_DIR      = pathlib.Path(os.environ.get("INGEST_WATCH_DIR", "/data/ReadyToI
 PROCESSING_DIR = pathlib.Path(os.environ.get("INGEST_PROCESSING_DIR", "/data/Processing"))
 INGESTED_DIR   = pathlib.Path(os.environ.get("INGEST_DONE_DIR", "/data/Ingested"))
 
-SUPPORTED = {".pdf", ".docx", ".doc", ".txt", ".md", ".text", ".csv"}
+SUPPORTED = {".pdf", ".docx", ".doc", ".txt", ".md", ".text", ".csv",
+             ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
 
 ENABLE_DEEP_PASS   = os.environ.get("EXTRACT_DEEP_PASS",   "true").lower() == "true"
 ENABLE_DEEPER_PASS = os.environ.get("EXTRACT_DEEPER_PASS", "false").lower() == "true"

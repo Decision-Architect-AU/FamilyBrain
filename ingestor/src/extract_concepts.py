@@ -6,6 +6,7 @@ Returns structured list of nodes and edges to write to the AGE graph.
 import os
 import json
 import re
+import time
 import ollama
 
 OLLAMA_URL    = os.environ.get("OLLAMA_URL", "http://ollama:11434")
@@ -197,7 +198,11 @@ def _run_extraction(text: str, model: str, prompt_template: str, on_chunk=None) 
     seen: dict[str, set] = {"concepts": set(), "people": set(), "organisations": set(), "frameworks": set()}
     all_results = []
 
+    chunk_delay = float(os.environ.get("EXTRACT_CHUNK_DELAY", "2"))
+
     for i, chunk in enumerate(chunks):
+        if i > 0:
+            time.sleep(chunk_delay)
         print(f"[extract]   {model} chunk {i+1}/{len(chunks)}")
         result = extract_from_chunk(chunk, client, model=model, prompt_template=prompt_template)
         all_results.append(result)

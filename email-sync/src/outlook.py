@@ -341,16 +341,28 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
             for ev in data.get("value", []):
                 provider_id = ev["id"]
                 summary     = ev.get("subject", "(no title)")
-                starts_at   = _parse_dt(ev.get("start", {}).get("dateTime"), ev.get("start", {}).get("timeZone"))
-                ends_at     = _parse_dt(ev.get("end",   {}).get("dateTime"), ev.get("end",   {}).get("timeZone"))
+                is_all_day  = ev.get("isAllDay", False)
                 description = ev.get("body", {}).get("content", "")[:500]
+
+                if is_all_day:
+                    # Use date objects so _fmt_cal_dt writes {"date": ...} not {"dateTime": ...}
+                    from datetime import date as date_type
+                    raw_start = ev.get("start", {}).get("dateTime", "")[:10]
+                    raw_end   = ev.get("end",   {}).get("dateTime", "")[:10]
+                    starts_at = date_type.fromisoformat(raw_start) if raw_start else None
+                    ends_at   = date_type.fromisoformat(raw_end)   if raw_end   else None
+                else:
+                    starts_at = _parse_dt(ev.get("start", {}).get("dateTime"), ev.get("start", {}).get("timeZone"))
+                    ends_at   = _parse_dt(ev.get("end",   {}).get("dateTime"), ev.get("end",   {}).get("timeZone"))
 
                 if not starts_at:
                     continue
 
+                from .calendar_router import tag_family_event
                 route      = classify_event(summary, description)
                 event_type = _classify_event(summary)
                 cal_key    = f"outlook:{account['email_address']}:{provider_id}"
+                tag, color_id = tag_family_event(summary, description) if route == "family" else (None, None)
 
                 existing     = db.get_sync_map(account_id, provider_id)
                 # Outlook delta sync doesn't provide etags; use presence of sync_map as change signal
@@ -368,7 +380,8 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                             target_cal_id_stored = existing_target_id
                         else:
                             target_cal_id_stored = _write_outlook_event(
-                                account, target_cal, summary, starts_at, ends_at, description)
+                                account, target_cal, summary, starts_at, ends_at, description,
+                                is_all_day=is_all_day)
                     except Exception as e:
                         print(f"[outlook] failed to write to {route} calendar for '{summary}': {e}")
 
@@ -437,17 +450,29 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
 
 def _write_outlook_event(account: dict, calendar_id: str, summary: str,
-                         starts_at: datetime, ends_at: Optional[datetime], description: str) -> str:
+                         starts_at, ends_at, description: str,
+                         is_all_day: bool = False) -> str:
     """Write an event to a specific Outlook calendar, return provider event ID."""
-    def _fmt(dt: datetime) -> dict:
-        return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "AUS Eastern Standard Time"}
-
-    body = {
-        "subject": summary,
-        "body":    {"contentType": "text", "content": description},
-        "start":   _fmt(starts_at),
-        "end":     _fmt(ends_at or starts_at),
-    }
+    from datetime import date as date_type
+    if is_all_day or isinstance(starts_at, date_type):
+        def _fmt(d) -> dict:
+            return {"dateTime": f"{d}T00:00:00", "timeZone": "UTC"}
+        body = {
+            "subject":  summary,
+            "body":     {"contentType": "text", "content": description},
+            "isAllDay": True,
+            "start":    _fmt(starts_at),
+            "end":      _fmt(ends_at or starts_at),
+        }
+    else:
+        def _fmt(dt: datetime) -> dict:
+            return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "AUS Eastern Standard Time"}
+        body = {
+            "subject": summary,
+            "body":    {"contentType": "text", "content": description},
+            "start":   _fmt(starts_at),
+            "end":     _fmt(ends_at or starts_at),
+        }
     resp = requests.post(
         f"{GRAPH_BASE}/me/calendars/{calendar_id}/events",
         headers=_headers(account),

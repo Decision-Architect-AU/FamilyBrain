@@ -11,6 +11,8 @@ def extract_text(path: pathlib.Path) -> str:
         return _extract_docx(path)
     elif suffix in (".md", ".txt", ".text"):
         return path.read_text(encoding="utf-8", errors="replace")
+    elif suffix in (".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"):
+        return _extract_image(path)
     else:
         # Try reading as plain text for unknown types
         try:
@@ -30,3 +32,16 @@ def _extract_docx(path: pathlib.Path) -> str:
     from docx import Document
     doc = Document(str(path))
     return "\n\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+
+
+def _extract_image(path: pathlib.Path) -> str:
+    try:
+        import pytesseract
+        from PIL import Image
+        img  = Image.open(str(path))
+        text = pytesseract.image_to_string(img).strip()
+        if text:
+            return f"[Image: {path.name}]\n\n{text}"
+    except Exception as e:
+        print(f"[extract] OCR failed for {path.name}: {e}")
+    return f"[Image: {path.name}] (no text extracted)"

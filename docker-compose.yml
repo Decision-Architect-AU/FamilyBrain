@@ -92,8 +92,9 @@ services:
       EXTRACT_MODEL_QUICK:  ${EXTRACT_MODEL_QUICK:-qwen2.5:3b}
       EXTRACT_MODEL_DEEP:   ${EXTRACT_MODEL_DEEP:-qwen2.5:14b}
       EXTRACT_MODEL_DEEPER: ${EXTRACT_MODEL_DEEPER:-qwen2.5:32b}
-      EXTRACT_DEEP_PASS:    ${EXTRACT_DEEP_PASS:-true}
+      EXTRACT_DEEP_PASS:    ${EXTRACT_DEEP_PASS:-false}
       EXTRACT_DEEPER_PASS:  ${EXTRACT_DEEPER_PASS:-false}
+      EXTRACT_CHUNK_DELAY:  ${EXTRACT_CHUNK_DELAY:-2}
       INGEST_WATCH_DIR: /data/ReadyToIngest
       INGEST_PROCESSING_DIR: /data/Processing
       INGEST_DONE_DIR: /data/Ingested
@@ -110,6 +111,61 @@ services:
       - openclaw-net
 
   # ─── NORMAL PROFILE ───────────────────────────────────────────────────────────
+
+  whatsapp:
+    build:
+      context: ./whatsapp
+      dockerfile: Dockerfile
+    container_name: openclaw-whatsapp
+    hostname: openclaw-whatsapp
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      WA_AGENT_URL: http://wa-agent:4002
+      WA_ALLOWED_NUMBERS: ${WA_ALLOWED_NUMBERS:-}    # comma-separated E.164 numbers, empty = allow all
+    shm_size: '256m'
+    volumes:
+      - whatsapp_session:/app/.wwebjs_auth
+    ports:
+      - "3002:3002"                                   # QR scanner: http://localhost:3002/qr
+    networks:
+      - openclaw-net
+
+  wa-agent:
+    build:
+      context: ./wa-agent
+      dockerfile: Dockerfile
+    container_name: openclaw-wa-agent
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
+      OLLAMA_URL: http://172.23.96.1:11434
+      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:14b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      INGESTOR_URL: http://ingestor:4001
+      WHISPER_URL: http://172.23.96.1:11435
+      WHISPER_MODEL: ${WHISPER_MODEL:-whisper-small}
+      WA_SEARCH_TOP_K: ${WA_SEARCH_TOP_K:-5}
+      WA_MAX_HISTORY: ${WA_MAX_HISTORY:-6}
+      TZ: Australia/Brisbane
+      TZ_NAME: Australia/Brisbane
+      TZ_ABBR: AEST (UTC+10)
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+      EMAIL_FROM_NAME:    ${EMAIL_FROM_NAME:-OpenClaw}
+      EMAIL_SMTP_HOST:    ${EMAIL_SMTP_HOST:-smtp.gmail.com}
+      EMAIL_SMTP_PORT:    ${EMAIL_SMTP_PORT:-587}
+      EMAIL_SMTP_USER:    ${EMAIL_SMTP_USER:-}
+      EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+    ports:
+      - "4002:4002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingestor:
+        condition: service_started
+    networks:
+      - openclaw-net
 
   n8n:
     image: n8nio/n8n:latest
@@ -291,6 +347,7 @@ volumes:
   postgres_data:
   n8n_data:
   shared_state:
+  whatsapp_session:
 
 networks:
   openclaw-net:
