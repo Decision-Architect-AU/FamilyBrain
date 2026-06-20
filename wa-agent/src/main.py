@@ -27,6 +27,9 @@ from src.llm import generate
 from src.ingest import ingest_text, ingest_voice
 from src.commands import parse as parse_command
 from src.email_sender import compose as compose_email, send as send_email, smtp_configured
+from src.maintenance import run_maintenance
+from src.feedback import detect_feedback, save_feedback
+from src.persona import detect_persona, build_system_prompt
 
 app = FastAPI(title="OpenClaw WhatsApp Agent")
 
@@ -119,21 +122,48 @@ async def query(req: QueryRequest):
         # Not a clear yes/no — cancel the pending action and continue with query
         del _pending[sender]
 
-    # ── 2. Detect command intent ──────────────────────────────────────────────
+    # ── 2. Feedback detection ─────────────────────────────────────────────────
+    sentiment, correction = detect_feedback(message)
+    if sentiment:
+        history = list(_history[sender])
+        last_q  = next((h["text"] for h in reversed(history) if h["role"] == "user"),  None)
+        last_r  = next((h["text"] for h in reversed(history) if h["role"] == "assistant"), None)
+        last_graphs = next((h.get("graphs", []) for h in reversed(history) if h["role"] == "assistant"), [])
+        if last_q and last_r:
+            save_feedback(sender, last_q, last_r, last_graphs, message, sentiment, correction)
+            elapsed = int((time.time() - t0) * 1000)
+            if sentiment == "positive":
+                ack = "👍 Thanks — noted."
+            elif sentiment == "correction":
+                ack = f"Got it — I'll note the correction. You can re-ask and I'll try again."
+            else:
+                ack = "👎 Noted — I'll flag that response for review."
+            return QueryResponse(response=ack, graphs_used=[], elapsed_ms=elapsed)
+
+    # ── 3. Detect command intent ──────────────────────────────────────────────
     cmd = parse_command(message)
     if cmd:
         return await _handle_command(sender, cmd, t0)
 
-    # ── 3. Detect update/write intent ────────────────────────────────────────
+    # ── 4. Detect update/write intent ────────────────────────────────────────
     if _is_update_intent(message):
         result = ingest_text(sender, message)
         elapsed = int((time.time() - t0) * 1000)
         return QueryResponse(response=result.get("response", "✅ Saved."),
                              graphs_used=["personal_graph"], elapsed_ms=elapsed)
 
-    # ── 4. Knowledge query ────────────────────────────────────────────────────
-    graphs  = route(message)
+    # ── 5. Knowledge query ────────────────────────────────────────────────────
+    graphs, explicit = route(message)
     context = retrieve(message, graphs)
+
+    # Nothing found and user didn't name a specific graph — fan out silently
+    if not context and not explicit:
+        all_graphs = ["personal_graph", "property_graph", "decision_graph"]
+        remaining  = [g for g in all_graphs if g not in graphs]
+        if remaining:
+            context = retrieve(message, remaining)
+            if context:
+                graphs = all_graphs
 
     now = time.time()
     history = [h for h in _history[sender] if now - h.get("ts", 0) <= CONTEXT_WINDOW_SEC]
@@ -158,13 +188,18 @@ async def query(req: QueryRequest):
             f"Note: No relevant information found in the knowledge base.\n\nAssistant:"
         )
 
-    response = generate(prompt, system=SYSTEM_PROMPT)
+    persona_name, persona_prompt = detect_persona(message)
+    system = build_system_prompt(SYSTEM_PROMPT, persona_prompt)
+    if persona_name:
+        print(f"[wa-agent] persona={persona_name}")
+
+    response = generate(prompt, system=system)
 
     _history[sender].append({"role": "user",      "text": message, "ts": now})
-    _history[sender].append({"role": "assistant",  "text": response, "ts": time.time()})
+    _history[sender].append({"role": "assistant",  "text": response, "ts": time.time(), "graphs": graphs})
 
     elapsed = int((time.time() - t0) * 1000)
-    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs} ({elapsed}ms)")
+    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs} persona={persona_name} ({elapsed}ms)")
     return QueryResponse(response=response, graphs_used=graphs, elapsed_ms=elapsed)
 
 
@@ -187,6 +222,14 @@ async def clear_history(sender: str):
     if sender in _pending:
         del _pending[sender]
     return {"ok": True}
+
+
+@app.post("/maintenance")
+async def maintenance(tasks: list[str] | None = None):
+    """Trigger nightly maintenance. Runs in background — returns immediately."""
+    import asyncio
+    asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
+    return {"status": "running", "tasks": tasks or ["re_embed", "link", "dedup", "prune"]}
 
 
 @app.get("/health")

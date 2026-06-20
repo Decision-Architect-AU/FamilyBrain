@@ -446,14 +446,19 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     if existing_target_id and not etag_changed:
                         target_cal_id_stored = existing_target_id  # no change, keep as-is
                     elif existing_target_id:
+                        # event changed — patch existing target copy
                         _patch_event_in_calendar(svc, target_cal, existing_target_id,
                                                  summary, starts_at, ends_at, description,
                                                  color_id=color_id)
                         target_cal_id_stored = existing_target_id
-                    else:
+                    elif not existing:
+                        # brand-new event — insert into target calendar
                         target_cal_id_stored = _write_event_to_calendar(
                             svc, target_cal, summary, starts_at, ends_at, description,
                             color_id=color_id)
+                    # else: sync_map exists but target_cal_provider_id not yet tracked — skip to avoid duplicates
+                    # (the event is already in the target calendar; ID will be recovered on next etag change)
+                    # (avoids re-inserting on every cycle for pre-existing untracked events)
                 except Exception as e:
                     print(f"[gmail] failed to write to {route} calendar for '{summary}': {e}")
 
@@ -486,13 +491,14 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                             _patch_event_in_calendar(mirror_svc, mirror_cal or "primary",
                                                      existing_mirror_id, summary, starts_at, ends_at, description)
                             mirror_id = existing_mirror_id
-                        elif not existing_mirror_id:
+                        elif not existing_mirror_id and (not existing or etag_changed):
+                            # new event OR event changed but mirror_id not yet tracked — write once
                             mirror_svc = _calendar_service(mirror_acct)
                             mirror_id = _write_event_to_calendar(
                                 mirror_svc, mirror_cal or "primary",
                                 summary, starts_at, ends_at, description)
                         else:
-                            continue  # mirror exists, event unchanged — skip
+                            continue  # mirror exists or event unchanged — skip
                         db.upsert_sync_map(
                             event_id, account_id, provider_id,
                             mirror_account_id=mirror_acct_id,

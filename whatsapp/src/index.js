@@ -56,15 +56,21 @@ function stripIngestPrefix(text) {
   return text;
 }
 
-async function callAgent(path, body, timeoutMs = 120000) {
-  const resp = await fetch(`${WA_AGENT_URL}${path}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(body),
-    timeout: timeoutMs,
-  });
-  if (!resp.ok) throw new Error(`wa-agent ${path} returned ${resp.status}`);
-  return resp.json();
+async function callAgent(path, body, timeoutMs = 300000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${WA_AGENT_URL}${path}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  controller.signal,
+    });
+    if (!resp.ok) throw new Error(`wa-agent ${path} returned ${resp.status}`);
+    return resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── WhatsApp client ───────────────────────────────────────────────────────────
@@ -111,11 +117,13 @@ client.on('message_create', async (msg) => {
   if (msg.from?.includes('@g.us') || msg.to?.includes('@g.us')) return;
   if (msg.isGroupMsg) return;
 
+  // Only process Saved Messages (user messaging themselves)
   if (msg.fromMe) {
-    if (msg.hasQuotedMsg) return;   // bot's own reply — skip
-    // Saved Messages: to ends in @lid (linked device ID) or @c.us
-    // Allow all fromMe non-reply non-group messages — they're the user talking to themselves
+    console.log(`[debug] fromMe: from=${msg.from} to=${msg.to} type=${msg.type}`);
   }
+  if (!msg.fromMe) return;
+  if (!msg.to?.endsWith('@lid')) return;
+  if (msg.hasQuotedMsg) return;
 
   const sender = msg.from.replace('@c.us', '');
 

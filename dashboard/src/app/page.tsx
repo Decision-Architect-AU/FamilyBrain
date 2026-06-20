@@ -46,8 +46,17 @@ export default function Home() {
           <Link href="/senders" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Senders
           </Link>
+          <Link href="/routing" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Routing
+          </Link>
+          <Link href="/feedback" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Feedback
+          </Link>
           <Link href="/graph" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Graph explorer →
+          </Link>
+          <Link href="/family-brain" className="text-xs text-purple-400 hover:text-purple-300 transition-colors">
+            Family Brain →
           </Link>
           <a
             href="http://localhost:8888"

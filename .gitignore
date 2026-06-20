@@ -12,3 +12,5 @@ __pycache__/
 /age-viewer/app-root/backend/build/
 /age-viewer/ag-driver/build/
 *.log
+dashboard/.next/*
+dashboard/.next/cache/

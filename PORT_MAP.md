@@ -11,7 +11,9 @@
 | 3002 | WhatsApp Bridge | normal | QR scanner at `/qr`; session persists in Docker volume |
 | 4002 | WhatsApp Agent | normal | Knowledge graph query API — `/query`, `/health` |
 | 5678 | n8n | normal | Workflow orchestration |
-| 8888 | AGE Viewer | normal | Graph explorer — connect: host=`postgres` db=`openclaw` user=`geoff` flavor=`Apache AGE` |
+| 4003 | Graph API | normal | Family Brain Graph API — `/graph/*`, `/ingest/*`, `/quality/*`, `/templates/*`, `/schemas/*`; docs at `/docs` |
+| 5173 | Graph Explorer | normal | Family Brain Graph Explorer (React/Vite) — graph canvas, ingestor, quality lab, templates |
+| 8888 | AGE Viewer | normal | Legacy graph viewer — connect: host=`postgres` db=`openclaw` user=`geoff` flavor=`Apache AGE` |
 | 9000 | Whisper (STT) | podcast | OpenAI-compatible ASR: `POST /asr` |
 | 5500 | Piper (TTS) | podcast | Text-to-speech synthesis |
 

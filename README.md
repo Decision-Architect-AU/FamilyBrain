@@ -8,6 +8,100 @@ A fully self-hosted, multi-mode AI agent system built on a GMKtec Core Ultra 9 m
 
 OpenClaw continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
 
+The core design principle is **adaptive self-improvement**: the system continuously learns from new information and updates its own state without manual intervention. Appointments evolve as context changes, bills auto-resolve when payment is detected, proactive reminders fire based on rules and real-world timelines, and extraction models refine themselves as they accumulate domain-specific ground truth.
+
+---
+
+## Adaptive Intelligence
+
+OpenClaw is not a static knowledge store — it is designed to update its own representations as new information arrives. This section describes the key adaptive behaviours.
+
+### Adaptive Appointment Management
+
+Appointments are living entities. Their descriptions, priorities, and associated context are updated automatically as new information is ingested.
+
+**How it works:**
+- Every new email, file, or message is cross-referenced against existing `Event` nodes in `personal_graph`
+- If new content is semantically related to an upcoming event (same person, same organisation, same topic), the event description is enriched with the new context
+- As an appointment gets closer in time, the system applies **temporal reprioritisation** — events within 48 hours are surfaced more prominently; events that have passed are archived
+
+**Example:** A GP appointment ingested in January has a description of "annual checkup." In February an email arrives with blood test results. In March a referral letter arrives. Each enriches the event node so that by the appointment date the description reads: "Annual checkup — blood test results on file (Feb), referral to cardiologist noted (Mar), bring Medicare card."
+
+**Triggers for adaptive updates:**
+- New document, email, or message linked to a known Person or Organisation associated with an event
+- Direct keyword or entity match against event title or existing description
+- LLM semantic similarity above a configurable threshold (`EVENT_ENRICH_THRESHOLD`, default `0.75`)
+
+### Rules-Based Proactive Scheduling
+
+OpenClaw applies a configurable rule engine to detected entities and dates to generate proactive follow-up events. Rules fire when new information is ingested and when periodic scans run.
+
+**Built-in rule examples:**
+
+| Trigger | Detected entity / date | Action |
+|---------|------------------------|--------|
+| Holiday / travel booking detected | Departure date | Check passport expiry. If expiry < 6 months before departure → create `Passport renewal` reminder at 12 months before departure and `Passport organised` checkpoint at 3 months before |
+| Bill or invoice ingested | Due date | Create `Bill due` event. If payment later detected → auto-resolve to `Paid` |
+| NDIS plan review date detected | Plan expiry | Create reminders at 3 months, 6 weeks, and 2 weeks before expiry |
+| Insurance policy renewal | Renewal date | Create `Review insurance` reminder 6 weeks before |
+| Prescription / medication noted | Duration or quantity | Create `Reorder medication` reminder when supply is estimated to run low |
+| School term dates ingested | Term start/end | Auto-populate school calendar events for all children on file |
+
+**Rule anatomy:**
+
+```yaml
+# Example rule — passport expiry check on holiday booking
+name: passport_check_on_travel
+trigger:
+  entity_type: Event
+  keywords: ["flight", "holiday", "travel", "departure", "hotel", "airbnb"]
+condition:
+  passport_expiry_months_before_departure: 6   # warn if expiry is < 6 months out
+actions:
+  - create_event:
+      title: "Passport renewal required"
+      offset_months: -12    # 12 months before departure
+      priority: high
+  - create_event:
+      title: "Get passport organised"
+      offset_months: -3     # 3 months before departure
+      priority: medium
+  - notify_whatsapp: true
+```
+
+Rules are stored in `personal.scheduling_rules` and can be added, modified, or disabled from the dashboard without restarting the stack.
+
+### Auto-Resolving Bills
+
+When a bill or invoice is ingested it creates a `Bill` node with status `unpaid`. The system watches subsequent inbound transactions (bank feeds, payment confirmation emails, receipts) and automatically marks matching bills as `paid`.
+
+**Matching logic (applied in order):**
+1. **Exact amount + payee name** — highest confidence, auto-resolves immediately
+2. **Payee name + amount within 5%** — resolves after human confirmation (dashboard notification)
+3. **Reference number match** — auto-resolves regardless of amount (useful for partial payments, fees)
+4. **LLM semantic match** — for ambiguous cases; queued for human review
+
+**Bill lifecycle:**
+
+```
+ingested → unpaid → [payment signal detected] → pending_confirmation → paid
+                                                                      ↘ disputed
+```
+
+Bills that remain `unpaid` past their due date surface as `overdue` in the dashboard and generate a WhatsApp nudge.
+
+### Auto-Training and Feedback Loops
+
+The system is designed to improve extraction quality over time without manual retraining.
+
+**Entity correction feedback:** When you correct a misclassified entity via the dashboard or WhatsApp ("that's not a person, it's a company"), the correction is written to `personal.extraction_feedback`. Periodically the curator agent uses this table to build a few-shot correction dataset and updates the extraction prompt templates.
+
+**Confidence calibration:** Each extracted entity and claim carries a `confidence` score. When a human confirms or rejects an extraction, the system adjusts the confidence thresholds used for auto-commit vs. human-review routing. Over time the auto-commit rate increases for high-accuracy domains.
+
+**Template evolution:** The `response_templates` table (seeded at init) is updated by the wa-agent whenever a response is edited or regenerated. Frequently edited templates are flagged for review and eventually replaced with the preferred variants.
+
+**Schema reconciliation:** As new entity types emerge from ingested data, the graph-api's `/schemas/reconcile` endpoint proposes new node labels and properties. Accepted proposals are applied to the live schema and stored in `entity_schemas`.
+
 ### Three knowledge domains
 
 | Domain | Schema | AGE Graph | What it captures |
@@ -470,7 +564,9 @@ optimum-cli export openvino \
 | `Theme` | `theme_id` |
 | `Message` | `source`, `source_id`, `from_handle`, `from_name`, `subject`, `received_at`, `preview` |
 | `Sender` | `handle`, `name`, `source` |
-| `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `event_type`, `calendar_source` |
+| `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `event_type`, `calendar_source`, `description`, `enriched_at`, `priority` |
+| `Bill` | `bill_id`, `payee`, `amount`, `due_date`, `status` (`unpaid`/`paid`/`overdue`/`disputed`), `reference`, `resolved_at` |
+| `SchedulingRule` | `rule_id`, `name`, `trigger_keywords`, `condition_json`, `actions_json`, `enabled` |
 
 ### Edge types
 
@@ -488,6 +584,9 @@ optimum-cli export openvino \
 | `RELATED_TO` | Concept → Concept | `notes` |
 | `LINKED_TO` | Message → Document | — |
 | `FROM` | Message → Sender | — |
+| `ENRICHES` | Document/Message → Event | `confidence`, `enriched_at` |
+| `TRIGGERED` | Event → Event | `rule_id`, `rule_name` (proactive follow-up events) |
+| `RESOLVES` | Document/Message → Bill | `match_type`, `confidence`, `resolved_at` |
 
 ### Example Cypher queries
 
@@ -563,6 +662,7 @@ docker compose up -d --no-deps age-viewer
 
 ## Roadmap
 
+### Infrastructure
 - [x] WhatsApp chat interface with graph-routed knowledge retrieval
 - [ ] Stage 7: Curator agent — cross-schema review queue, staging table, dashboard approval UI
 - [ ] Stage 8: Mode switching API + WhatsApp/n8n integration
@@ -572,3 +672,14 @@ docker compose up -d --no-deps age-viewer
 - [ ] Inference server as Windows startup service (currently manual via `start.bat`)
 - [ ] Enable Pass 3 (32b) via `EXTRACT_DEEPER_PASS=true` once model is ready
 - [ ] Azure app registration for Outlook email sync (refresh token flow)
+
+### Adaptive Intelligence
+- [ ] Adaptive appointment enrichment — `ENRICHES` edge written when new docs/messages relate to existing `Event` nodes; event description updated in-place
+- [ ] Temporal reprioritisation — event priority escalation as appointment date approaches (configurable windows: 2 weeks / 48 hours)
+- [ ] Rules engine — `personal.scheduling_rules` table, rule evaluator runs on ingest and on daily cron; seed with built-in passport/holiday/NDIS/insurance rules
+- [ ] Proactive event generation — passport renewal chain (12 months + 3 months before travel), NDIS review reminders, medication reorder, school calendar auto-population
+- [ ] Bill auto-resolution — `Bill` node status lifecycle; payment signal matching (exact → fuzzy → reference → LLM); overdue nudge via WhatsApp
+- [ ] Bank feed / payment confirmation ingestion — parse transaction emails (CBA, ANZ, NAB patterns), match against open bills
+- [ ] Entity correction feedback loop — dashboard correction UI writes to `personal.extraction_feedback`; curator uses this to refine few-shot extraction prompts
+- [ ] Confidence calibration — human confirm/reject signals adjust auto-commit thresholds per entity type
+- [ ] Response template evolution — wa-agent tracks edited/regenerated responses; curator flags low-quality templates for replacement

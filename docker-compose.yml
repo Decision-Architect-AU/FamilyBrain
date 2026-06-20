@@ -101,7 +101,7 @@ services:
     ports:
       - "4001:4001"
     volumes:
-      - C:/DataFiles:/data
+      - /mnt/c/DataFiles:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,13 +141,15 @@ services:
     environment:
       DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
       OLLAMA_URL: http://172.23.96.1:11434
-      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:14b}
+      AGENT_MODEL: ${WA_AGENT_MODEL:-qwen2.5:14b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       INGESTOR_URL: http://ingestor:4001
       WHISPER_URL: http://172.23.96.1:11435
       WHISPER_MODEL: ${WHISPER_MODEL:-whisper-small}
       WA_SEARCH_TOP_K: ${WA_SEARCH_TOP_K:-5}
       WA_MAX_HISTORY: ${WA_MAX_HISTORY:-6}
+      WA_CONTEXT_WINDOW_SEC: ${WA_CONTEXT_WINDOW_SEC:-300}
+      MAINTENANCE_CRON: ${MAINTENANCE_CRON:-0 2 * * *}
       TZ: Australia/Brisbane
       TZ_NAME: Australia/Brisbane
       TZ_ABBR: AEST (UTC+10)
@@ -164,6 +166,23 @@ services:
         condition: service_healthy
       ingestor:
         condition: service_started
+    networks:
+      - openclaw-net
+
+  maintenance-cron:
+    image: alpine:3.19
+    container_name: openclaw-maintenance-cron
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      MAINTENANCE_CRON: ${MAINTENANCE_CRON:-0 2 * * *}
+      WA_AGENT_URL: http://wa-agent:4002
+    command: >
+      sh -c 'apk add --no-cache curl dcron &&
+             echo "$${MAINTENANCE_CRON} curl -s -X POST $${WA_AGENT_URL}/maintenance" | crontab - &&
+             crond -f -l 6'
+    depends_on:
+      - wa-agent
     networks:
       - openclaw-net
 
@@ -284,8 +303,47 @@ services:
     networks:
       - openclaw-net
 
-  # ─── GRAPH EXPLORER ──────────────────────────────────────────────────────────
-  # Apache AGE Viewer — Neo4j Browser equivalent for PostgreSQL+AGE
+  # ─── FAMILY BRAIN GRAPH EXPLORER ─────────────────────────────────────────────
+  # graph-api: FastAPI backend — graph CRUD, ingest, quality, templates
+  # graph-explorer: React/Vite frontend — http://localhost:5173
+  # API docs: http://localhost:4003/docs
+
+  graph-api:
+    build:
+      context: ./graph-api
+      dockerfile: Dockerfile
+    container_name: openclaw-graph-api
+    profiles: [normal]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
+      AGE_GRAPH_NAME: ${AGE_GRAPH_NAME:-personal_graph}
+      OLLAMA_URL: http://172.23.96.1:11434
+      EXTRACT_MODEL: ${EXTRACT_MODEL:-qwen2.5:14b}
+    ports:
+      - "4003:4003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openclaw-net
+
+  graph-explorer:
+    build:
+      context: ./graph-explorer
+      dockerfile: Dockerfile
+    container_name: openclaw-graph-explorer
+    profiles: [normal]
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    depends_on:
+      - graph-api
+    networks:
+      - openclaw-net
+
+  # ─── AGE VIEWER (legacy) ─────────────────────────────────────────────────────
+  # Apache AGE Viewer — kept for raw Cypher access
   # Access at http://localhost:8888
   # Connect with: host=postgres port=5432 db=openclaw user=geoff
   age-viewer:

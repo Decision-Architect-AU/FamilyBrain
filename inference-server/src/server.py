@@ -13,7 +13,7 @@ Endpoints implemented:
 import time
 import json
 import threading
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -27,6 +27,16 @@ from src.model_registry import (
 )
 
 app = FastAPI(title="OpenClaw Inference Server")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    body = await request.body()
+    caller = f"{request.client.host}:{request.client.port}"
+    ua = request.headers.get("user-agent", "unknown")
+    snippet = body[:200].decode(errors="replace") if body else ""
+    print(f"[{caller}] [{ua}] {request.method} {request.url.path} — {snippet}", flush=True)
+    return await call_next(request)
 
 
 @app.on_event("startup")

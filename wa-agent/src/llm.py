@@ -26,6 +26,6 @@ def generate(prompt: str, system: str | None = None, model: str | None = None) -
     }
     if system:
         payload["system"] = system
-    resp = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=120)
+    resp = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=300)
     resp.raise_for_status()
     return resp.json()["response"].strip()

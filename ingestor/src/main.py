@@ -27,6 +27,7 @@ from src.llm import embed
 from src import audit
 from src import graph as graph_writer
 from src.categorise import categorise_email, save_category, backfill_categories
+from src.config_index import record_ingest
 
 WATCH_DIR      = pathlib.Path(os.environ.get("INGEST_WATCH_DIR", "/data/ReadyToIngest"))
 PROCESSING_DIR = pathlib.Path(os.environ.get("INGEST_PROCESSING_DIR", "/data/Processing"))
@@ -130,6 +131,10 @@ def process_file(src: pathlib.Path) -> None:
                     extract_deeper(t, on_chunk=on_chunk_deeper)
                     print(f"[ingestor] Pass 3 (deeper) complete for {n}")
             threading.Thread(target=_deep_pass, daemon=True).start()
+
+        # Determine source type: PDFs/DOCXs from personal folder are financial_doc by convention
+        src_type = "financial_doc" if (schema == "personal" and src.suffix.lower() in (".pdf", ".docx", ".doc")) else "file"
+        record_ingest(schema, src_type)
 
         audit.log(
             "write",
@@ -271,6 +276,8 @@ def ingest_email(payload: dict) -> dict:
                     ),
                 )
             conn.commit()
+
+        record_ingest(schema, "email")
 
         audit.log("write", f"Email ingested [{schema}/{cat}]: {subject} from {from_address}",
                   target_schema=schema, target_table=target_table, node_id=str(row_id),
@@ -415,6 +422,8 @@ def ingest_message(payload: dict) -> dict:
             graph_writer.write_extracted_nodes(schema, f"{source}:{source_id}", note_id, _normalize_chunk(chunk_result), theme_id, embed)
 
         threading.Thread(target=extract_concepts, args=(full_text,), kwargs={"on_chunk": on_chunk}, daemon=True).start()
+
+        record_ingest(schema, source)  # source = 'whatsapp' | 'voice' | 'sms' | etc.
 
         audit.log("write", f"Message ingested [{source}→{schema}]: {subject or source_id} from {from_handle}",
                   target_schema=schema, target_table=target_table, node_id=str(note_id),
