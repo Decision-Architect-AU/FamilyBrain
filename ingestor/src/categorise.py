@@ -23,7 +23,7 @@ CAREFUL_MODEL   = os.environ.get("CATEGORISE_CAREFUL_MODEL", "qwen2.5:3b")
 DB_URL          = os.environ.get("DATABASE_URL")
 
 CATEGORIES = [
-    "ndis",       # NDIS invoices, service agreements, support worker comms, Olivia-related
+    "ndis",       # NDIS invoices, service agreements, support worker comms, participant-related
     "health",     # Medical appointments, referrals, prescriptions, test results, hospital
     "finance",    # Bank statements, bills, tax, BAS, accounting, super, invoices
     "property",   # Ownership statements, rates, maintenance, agent, lease, inspection
@@ -42,7 +42,7 @@ PROMPT_FAST = """Classify this email into exactly one category. Reply with only 
 Categories: {categories}
 
 Signals for each:
-- ndis: NDIS, support worker, therapy, Olivia, plan management, capacity building, service agreement
+- ndis: NDIS, support worker, therapy, participant, plan management, capacity building, service agreement
 - health: doctor, GP, appointment, referral, prescription, pharmacy, hospital, pathology, specialist, Medicare
 - finance: bank, statement, invoice, BAS, tax, ATO, super, accounting, payment received, direct debit
 - property: rental, tenancy, lease, rates, maintenance, ownership statement, property agent, inspection, strata

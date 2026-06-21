@@ -70,8 +70,8 @@ const AGENT_DEFS = [
     schedule: 'Always running',
     access: [
       { label: 'Open n8n UI', method: 'url', value: 'http://localhost:5678' },
-      { label: 'WhatsApp (Glenn)', method: 'url', value: 'http://localhost:3000 (whatsapp-web.js)' },
-      { label: 'WhatsApp (Shannon)', method: 'url', value: 'http://localhost:3001 (whatsapp-web.js)' },
+      { label: 'WhatsApp (Primary)', method: 'url', value: 'http://localhost:3000 (whatsapp-web.js)' },
+      { label: 'WhatsApp (Partner)', method: 'url', value: 'http://localhost:3001 (whatsapp-web.js)' },
     ],
     graphs: [],
     color: 'orange',

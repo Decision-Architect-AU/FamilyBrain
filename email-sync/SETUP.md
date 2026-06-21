@@ -41,23 +41,23 @@ This opens a browser for each account and prints the refresh_token.
 Insert one row per inbox into `personal.email_account`:
 
 ```sql
--- Glenn's Gmail
+-- Primary Gmail (your main account)
 INSERT INTO personal.email_account
     (provider, email_address, display_name, refresh_token, sync_email, sync_calendar, is_primary)
 VALUES
-    ('gmail', 'glenn@gmail.com', 'Glenn', '<refresh_token>', true, true, true);
+    ('gmail', 'you@gmail.com', 'Primary', '<refresh_token>', true, true, true);
 
--- Shannon's Gmail
+-- Partner Gmail (optional — set CALENDAR_MIRROR_PARTNER_EMAIL in .env to enable mirroring)
 INSERT INTO personal.email_account
     (provider, email_address, display_name, refresh_token, sync_email, sync_calendar)
 VALUES
-    ('gmail', 'shannon@gmail.com', 'Shannon', '<refresh_token>', true, true);
+    ('gmail', 'partner@gmail.com', 'Partner', '<refresh_token>', true, true);
 
--- Glenn's Hotmail
+-- Secondary Outlook/Hotmail (optional — set CALENDAR_MIRROR_SECONDARY_EMAIL in .env)
 INSERT INTO personal.email_account
     (provider, email_address, display_name, refresh_token, sync_email, sync_calendar)
 VALUES
-    ('outlook', 'glenn@hotmail.com', 'Glenn Hotmail', '<refresh_token>', true, true);
+    ('outlook', 'you@hotmail.com', 'Hotmail', '<refresh_token>', true, true);
 ```
 
 ## 5. Start the service

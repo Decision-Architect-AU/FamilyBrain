@@ -63,7 +63,7 @@ VALUES
  'Whole-trip overview: destination, dates, highlights',
  '[{"key":"destination","required":true,"format":"✈️ {destination} — {trip_name}"},{"key":"dates","required":true,"format":"📅 {start_date} – {end_date} ({n} nights)"},{"key":"travellers","required":false,"format":"👨‍👩‍👧 {travellers}"},{"key":"status","required":true,"format":"Status: {status}"}]',
  300, 'concise, practical',
- E'✈️ Portugal & Spain — Family Trip\n👨‍👩‍👧 Glenn, Shannon, Liam, Olivia\n📅 4 Jul – 22 Jul (18 nights)\nStatus: BOOKED ✅'),
+ E'✈️ Portugal & Spain — Family Trip\n👨‍👩‍👧 Parent1, Parent2, Child1, Child2\n📅 4 Jul – 22 Jul (18 nights)\nStatus: BOOKED ✅'),
 
 ('travel.day_itinerary', 'travel', 'day_itinerary', 'detail',
  'Single day breakdown: time, activities, logistics',
@@ -75,13 +75,13 @@ VALUES
  'Next appointment: practitioner, date, location',
  '[{"key":"practitioner","required":true,"format":"🩺 {name} — {specialty}"},{"key":"person","required":true,"format":"👤 {person}"},{"key":"datetime","required":true,"format":"📅 {date}, {time}"},{"key":"location","required":true,"format":"📍 {clinic_name}"},{"key":"referral","required":false,"format":"Referral: {status}"},{"key":"gap","required":false,"format":"Gap: ~${gap_amount}"}]',
  300, 'concise',
- E'📅 Olivia — Dr Chen (Paediatrician)\nThu 20 Jun, 2:30pm · Greenslopes Paediatrics\nReferral ✅ · Gap ~$95'),
+ E'📅 Child1 — Dr Smith (Paediatrician)\nThu 20 Jun, 2:30pm · City Paediatrics\nReferral ✅ · Gap ~$95'),
 
 ('health.medication_status', 'health', 'medication_status', 'summary',
  'Medication repeats and action dates',
  '[{"key":"medications","required":true,"format":"💊 {name} {dose} — {repeats_remaining} repeats left, action by {action_date}"}]',
  300, 'concise, action-oriented',
- E'💊 Concerta 36mg — 1 repeat remaining ⚠️\nAction by: 25 Jul · Book Dr Nguyen before then\n⚠️ Controlled drug — book early'),
+ E'💊 Medication 36mg — 1 repeat remaining ⚠️\nAction by: 25 Jul · Book prescriber before then\n⚠️ Controlled drug — book early'),
 
 ('ndis.budget_summary', 'ndis', 'budget_summary', 'summary',
  'NDIS category breakdown: allocated/spent/remaining',
@@ -105,7 +105,7 @@ VALUES
  'What a child needs for a given school day',
  '[{"key":"child","required":true,"format":"👤 {child} — {day}"},{"key":"activity","required":true,"format":"⚽ {activity_name} (Term {term})"},{"key":"uniform","required":true,"format":"👕 {uniform_or_equipment}"}]',
  200, 'practical, reminder-style',
- E'👤 Liam — Wednesday\n⚽ Football (Term 3)\n👕 Gold sports polo + shorts + boots')
+ E'👤 Child1 — Wednesday\n⚽ Football (Term 3)\n👕 Gold sports polo + shorts + boots')
 
 ON CONFLICT (id) DO NOTHING;
 

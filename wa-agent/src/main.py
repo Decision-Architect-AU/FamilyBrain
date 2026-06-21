@@ -21,7 +21,7 @@ from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from src.router import route
+from src.classify import classify
 from src.search import retrieve
 from src.llm import generate
 from src.ingest import ingest_text, ingest_voice
@@ -29,7 +29,7 @@ from src.commands import parse as parse_command
 from src.email_sender import compose as compose_email, send as send_email, smtp_configured
 from src.maintenance import run_maintenance
 from src.feedback import detect_feedback, save_feedback
-from src.persona import detect_persona, build_system_prompt
+from src.persona import build_system_prompt
 
 app = FastAPI(title="OpenClaw WhatsApp Agent")
 
@@ -153,11 +153,12 @@ async def query(req: QueryRequest):
                              graphs_used=["personal_graph"], elapsed_ms=elapsed)
 
     # ── 5. Knowledge query ────────────────────────────────────────────────────
-    graphs, explicit = route(message)
+    intent = classify(message)
+    graphs = intent.graphs
     context = retrieve(message, graphs)
 
     # Nothing found and user didn't name a specific graph — fan out silently
-    if not context and not explicit:
+    if not context and not intent.explicit_graph:
         all_graphs = ["personal_graph", "property_graph", "decision_graph"]
         remaining  = [g for g in all_graphs if g not in graphs]
         if remaining:
@@ -188,10 +189,9 @@ async def query(req: QueryRequest):
             f"Note: No relevant information found in the knowledge base.\n\nAssistant:"
         )
 
-    persona_name, persona_prompt = detect_persona(message)
-    system = build_system_prompt(SYSTEM_PROMPT, persona_prompt)
-    if persona_name:
-        print(f"[wa-agent] persona={persona_name}")
+    system = build_system_prompt(SYSTEM_PROMPT, intent.persona_prompt)
+    if intent.persona_name:
+        print(f"[wa-agent] persona={intent.persona_name}")
 
     response = generate(prompt, system=system)
 
@@ -199,7 +199,7 @@ async def query(req: QueryRequest):
     _history[sender].append({"role": "assistant",  "text": response, "ts": time.time(), "graphs": graphs})
 
     elapsed = int((time.time() - t0) * 1000)
-    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs} persona={persona_name} ({elapsed}ms)")
+    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs} persona={intent.persona_name} ({elapsed}ms)")
     return QueryResponse(response=response, graphs_used=graphs, elapsed_ms=elapsed)
 
 

@@ -3,7 +3,7 @@ Concept Linker — runs after ingest, creates confidence-weighted edges between
 similar Concept nodes in each AGE graph.
 
 Linkage strategy (in priority order):
-1. Name similarity  — "Trust 1" ↔ "West Property Inv No1 Disc Trust"  (ALIAS_OF, high)
+1. Name similarity  — "Trust 1" ↔ "Property Trust No1 Disc Trust"  (ALIAS_OF, high)
 2. Embedding cosine — semantically similar concepts                     (SIMILAR_TO, scored)
 3. Co-document      — two concepts mentioned in the same document       (CO_OCCURS_WITH, low)
 

@@ -13,27 +13,27 @@ import re
 
 # Patterns ordered most-specific to least-specific
 _EMAIL_PATTERNS = [
-    # "send email about olivia's appointment to x@y.com"
+    # "send email about the appointment to x@y.com"
     re.compile(
         r'send\s+(?:an?\s+)?email\s+about\s+(.+?)\s+to\s+([\w._%+\-]+@[\w.\-]+\.\w+)',
         re.I,
     ),
-    # "email x@y.com about olivia's appointment"
+    # "email x@y.com about the appointment"
     re.compile(
         r'email\s+([\w._%+\-]+@[\w.\-]+\.\w+)\s+(?:about|regarding|with)\s+(.+)',
         re.I,
     ),
-    # "send x@y.com the details of / about olivia's appointment"
+    # "send x@y.com the details of / about the appointment"
     re.compile(
         r'send\s+([\w._%+\-]+@[\w.\-]+\.\w+)\s+(?:the\s+details\s+of|about|regarding)\s+(.+)',
         re.I,
     ),
-    # "send details about olivia's appointment to x@y.com"
+    # "send details about the appointment to x@y.com"
     re.compile(
         r'send\s+(?:the\s+)?details\s+(?:of|about)\s+(.+?)\s+to\s+([\w._%+\-]+@[\w.\-]+\.\w+)',
         re.I,
     ),
-    # "forward olivia's appointment to x@y.com"
+    # "forward the appointment details to x@y.com"
     re.compile(
         r'forward\s+(.+?)\s+to\s+([\w._%+\-]+@[\w.\-]+\.\w+)',
         re.I,

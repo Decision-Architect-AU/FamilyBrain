@@ -72,7 +72,7 @@ CREATE TABLE personal.event (
     starts_at           TIMESTAMPTZ NOT NULL,
     ends_at             TIMESTAMPTZ,
     person_id           BIGINT REFERENCES personal.person(id),
-    calendar_source     TEXT,                           -- which calendar (geoff | shannon | kids)
+    calendar_source     TEXT,                           -- which calendar (primary | partner | kids)
     notes               TEXT
 );
 

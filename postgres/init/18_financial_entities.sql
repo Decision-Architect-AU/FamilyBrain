@@ -7,21 +7,18 @@ CREATE TABLE IF NOT EXISTS personal.ownership_entity (
     notes       text
 );
 
-INSERT INTO personal.ownership_entity (folder_slug, full_name, keywords) VALUES
-('Trust1', 'West Property Inv No1 PTY LTD atf West Property Inv No1 Disc Trust',
- ARRAY['west property inv no1','no1 disc trust','no 1 disc trust','inv no1']),
-('Trust2', 'West Property Inv No2 PTY LTD atf West Property Inv No2 Disc Trust',
- ARRAY['west property inv no2','no2 disc trust','no 2 disc trust','inv no2']),
-('Trust3', 'West Property Inv No3 PTY LTD atf West Property Inv No3 Disc Trust',
- ARRAY['west property inv no3','no3 disc trust','no 3 disc trust','inv no3']),
-('Trust4', 'West Property Inv No4 PTY LTD atf West Property Inv No4 Disc Trust',
- ARRAY['west property inv no4','no4 disc trust','no 4 disc trust','inv no4']),
-('SMSF',  'West Property Investment SMSF / West Property Investment Property Bare Trust',
- ARRAY['west property investment smsf','bare trust','smsf','superannuation']),
-('NDIS',  'NDIS / Olivia West',
- ARRAY['ndis','olivia west','olivia','participant','support worker','ndis plan']),
-('Personal', 'Glenn West Personal', ARRAY[]::text[])
-ON CONFLICT (folder_slug) DO NOTHING;
+-- Populate this table with your own entity names — do NOT commit real names to git.
+-- Example (run manually or via a private seed script outside this repo):
+--
+-- INSERT INTO personal.ownership_entity (folder_slug, full_name, keywords) VALUES
+-- ('Trust1', 'Your Trust 1 PTY LTD atf Your Trust 1 Disc Trust',
+--  ARRAY['your trust 1','no1 disc trust','no 1 disc trust']),
+-- ('SMSF',   'Your SMSF Name',
+--  ARRAY['your smsf','bare trust','smsf','superannuation']),
+-- ('NDIS',   'NDIS Participant',
+--  ARRAY['ndis','participant','support worker','ndis plan']),
+-- ('Personal', 'Personal', ARRAY[]::text[])
+-- ON CONFLICT (folder_slug) DO NOTHING;
 
 -- Property address → ownership entity mapping.
 -- Populate with known property addresses so filing is automatic.

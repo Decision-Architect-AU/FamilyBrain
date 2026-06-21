@@ -49,7 +49,7 @@ function TrainerPanel({ onSaved }: { onSaved: () => void }) {
 
   const PRESET_QUERIES = [
     'Tell me about trust 1',
-    'What properties does West Property Inv No1 own?',
+    'What properties does trust 1 own?',
     'Summarise my NDIS setup',
     'Who manages the family trust?',
     'What decisions have I made about property strategy?',

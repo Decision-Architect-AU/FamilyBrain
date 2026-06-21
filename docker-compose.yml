@@ -384,6 +384,15 @@ services:
       # Ingestor webhook endpoint (internal Docker network)
       INGESTOR_URL: http://ingestor:4001
 
+      # Calendar mirror routing — set real addresses in .env, never commit them
+      CALENDAR_MIRROR_PRIMARY_EMAIL:   ${CALENDAR_MIRROR_PRIMARY_EMAIL:-}
+      CALENDAR_MIRROR_SECONDARY_EMAIL: ${CALENDAR_MIRROR_SECONDARY_EMAIL:-}
+      CALENDAR_MIRROR_PARTNER_EMAIL:   ${CALENDAR_MIRROR_PARTNER_EMAIL:-}
+
+      # Child keyword lists for calendar routing — comma-separated names/nicknames
+      CHILD1_NAMES: ${CHILD1_NAMES:-}
+      CHILD2_NAMES: ${CHILD2_NAMES:-}
+
       # Poll intervals in seconds (override in .env if needed)
       EMAIL_POLL_INTERVAL_SECS:    ${EMAIL_POLL_INTERVAL_SECS:-300}
       CALENDAR_POLL_INTERVAL_SECS: ${CALENDAR_POLL_INTERVAL_SECS:-900}

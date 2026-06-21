@@ -5,28 +5,37 @@ Route types:
   default   — main calendar (primary)
   bills     — Bills calendar (invoices, payments, rent, rates)
   holiday   — Holidays calendar + stub in default calendar
-  family    — Family calendar (Ellie, Olivia, school, therapy, NDIS)
+  family    — Family calendar (children, school, therapy, NDIS)
 
-Mirror rules (configured via personal.calendar_routing):
-  Glenn's events  → Shannon's Family calendar
-  Shannon's events → Glenn's Family calendar
+Mirror rules configured via env vars (CALENDAR_MIRROR_*) — not hardcoded here.
 """
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+# ── Child name keyword lists — configured via environment variables ────────────
+# Set CHILD1_NAMES and CHILD2_NAMES as comma-separated lists of names/nicknames.
+# These are intentionally NOT hardcoded — configure in your .env file.
+# e.g. CHILD1_NAMES=alice,ali,allie  CHILD2_NAMES=ben,benny
+
+def _names_from_env(var: str) -> list[str]:
+    raw = os.environ.get(var, "")
+    return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+_CHILD1_NAMES = _names_from_env("CHILD1_NAMES")   # e.g. NDIS/therapy child
+_CHILD2_NAMES = _names_from_env("CHILD2_NAMES")   # e.g. younger child
+
 # ── Keywords ──────────────────────────────────────────────────────────────────
 
-_OLIVIA_KW = [
-    "olivia", "livie", "livvy", "livvie",
+_CHILD1_KW = _CHILD1_NAMES + [
     "speech therapy", "speech pathology",
     "ndis", "support worker", "support session",
     "paed", "paediatrician", "occupational therapy", "ot ", " ot",
     "therapy session", "child health", "disability",
 ]
 
-_ELLIANA_KW = [
-    "elliana", "ellie", "elliebear", "elli ",
+_CHILD2_KW = _CHILD2_NAMES + [
     "music ensemble", "kindy", "daycare", "day care", "childcare",
     "swim", "dance", "gymnastics",
 ]
@@ -39,7 +48,7 @@ _HOLIDAY_KW_TAGS = [
 ]
 
 # colorId: 4=Flamingo(pink), 3=Grape(purple), 2=Sage(green)
-_TAG_COLORS = {"Olivia": "4", "Elliana": "3", "Holiday": "2"}
+_TAG_COLORS = {"Child1": "4", "Child2": "3", "Holiday": "2"}
 
 _BILLS_KW = [
     "invoice", "bill", "payment due", "direct debit", "statement",
@@ -55,8 +64,7 @@ _HOLIDAY_KW = [
     "long weekend", "vacation", "annual leave",
 ]
 
-_FAMILY_KW = [
-    "ellie", "olivia", "elliebear", "livvy",
+_FAMILY_KW = _CHILD1_NAMES + _CHILD2_NAMES + [
     "pickup", "drop off", "drop-off", "school pick",
     "kindy", "daycare", "day care", "childcare",
     "swimming", "dance", "sport", "footy", "soccer", "netball",
@@ -70,14 +78,14 @@ _FAMILY_KW = [
 def tag_family_event(summary: str, description: str = "") -> tuple[str | None, str | None]:
     """
     Returns (tag, colorId) for events that belong to the Family calendar.
-    tag is one of: 'Olivia', 'Elliana', 'Holiday', or None.
-    Priority: Olivia > Elliana > Holiday (most specific first).
+    tag is one of: 'Child1', 'Child2', 'Holiday', or None.
+    Priority: Child1 > Child2 > Holiday (most specific first).
     """
     text = (summary + " " + description).lower()
-    if any(kw in text for kw in _OLIVIA_KW):
-        return "Olivia", _TAG_COLORS["Olivia"]
-    if any(kw in text for kw in _ELLIANA_KW):
-        return "Elliana", _TAG_COLORS["Elliana"]
+    if any(kw in text for kw in _CHILD1_KW):
+        return "Child1", _TAG_COLORS["Child1"]
+    if any(kw in text for kw in _CHILD2_KW):
+        return "Child2", _TAG_COLORS["Child2"]
     if any(kw in text for kw in _HOLIDAY_KW_TAGS):
         return "Holiday", _TAG_COLORS["Holiday"]
     return None, None
@@ -115,16 +123,20 @@ class AccountCalendars:
 def load_routing(accounts: list[dict]) -> dict[int, AccountCalendars]:
     """
     Build routing config from email_account rows.
-    Hardcodes the Glenn ↔ Shannon mirror rules based on email address.
-    Calendar IDs come from the account row fields.
+
+    Mirror rules driven by env vars — set in .env, not hardcoded:
+      CALENDAR_MIRROR_SECONDARY_EMAIL  — the secondary/Outlook account to mirror FROM
+      CALENDAR_MIRROR_PRIMARY_EMAIL    — the primary Gmail that receives all mirrors
+      CALENDAR_MIRROR_PARTNER_EMAIL    — partner account whose events mirror to primary Family cal
     """
+    secondary_email = os.environ.get("CALENDAR_MIRROR_SECONDARY_EMAIL", "")
+    primary_email   = os.environ.get("CALENDAR_MIRROR_PRIMARY_EMAIL", "")
+    partner_email   = os.environ.get("CALENDAR_MIRROR_PARTNER_EMAIL", "")
+
     routing: dict[int, AccountCalendars] = {}
     by_email: dict[str, dict] = {a["email_address"]: a for a in accounts}
 
-    # Identify account IDs for mirror rules
-    glenn_hotmail = by_email.get("glenn_w_west@hotmail.com")
-    glenn_gmail   = by_email.get("samthemerchant@gmail.com")
-    shannon_gmail = by_email.get("shannon.garner@gmail.com")
+    primary_acct = by_email.get(primary_email) if primary_email else None
 
     for acct in accounts:
         ac = AccountCalendars(
@@ -137,18 +149,13 @@ def load_routing(accounts: list[dict]) -> dict[int, AccountCalendars]:
             family_cal_id   = acct.get("family_calendar_id"),
         )
 
-        # Mirror rules:
-        # - Outlook (hotmail) events → samthemerchant@gmail.com shared Bills/Family calendars
-        # - Shannon's events → samthemerchant@gmail.com shared Family calendar
-        # Gmail shared calendars (Bills, Family) are already visible to both parties — no copy needed.
-        is_hotmail = acct["email_address"] == "glenn_w_west@hotmail.com"
-        is_shannon = acct["email_address"] == "shannon.garner@gmail.com"
+        # Mirror secondary (e.g. Outlook) events to primary Gmail shared calendars
+        if secondary_email and acct["email_address"] == secondary_email and primary_acct:
+            ac.mirror_to.append((primary_acct["id"], "route"))
 
-        if is_hotmail and glenn_gmail:
-            # Mirror hotmail events to shared Gmail calendars
-            ac.mirror_to.append((glenn_gmail["id"], "route"))  # route = use same route classification
-        if is_shannon and glenn_gmail:
-            ac.mirror_to.append((glenn_gmail["id"], "family"))
+        # Mirror partner events to primary Family calendar
+        if partner_email and acct["email_address"] == partner_email and primary_acct:
+            ac.mirror_to.append((primary_acct["id"], "family"))
 
         routing[acct["id"]] = ac
 

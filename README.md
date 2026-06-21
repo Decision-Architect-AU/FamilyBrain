@@ -99,7 +99,7 @@ The pipeline is split into three layers: **inbound channels**, a **centralised k
 │                                                         │
 │  OUTBOUND CHANNELS:                                     │
 │  gcal_bills ──► Bills calendar                          │
-│  gcal_family ──► Family calendar (Olivia/Elliana tags)  │
+│  gcal_family ──► Family calendar (Child1/Child2 tags)   │
 │  gcal_holidays ──► Holidays + daily expansion           │
 │  gcal_primary ──► Primary calendar                      │
 │  task_list ──► notes (tagged task)                      │
@@ -314,7 +314,7 @@ Runs five sequential stages after each email poll:
 
 **Calendar routing:**
 - Bills → Bills calendar (3 days before due, day-of reminder)
-- Family events → Family calendar (Olivia=pink, Elliana=purple, Holiday=green)
+- Family events → Family calendar (Child1=pink, Child2=purple, Holiday=green) — configure child names via `CHILD1_NAMES`/`CHILD2_NAMES` in `.env`
 - Holidays → Holidays calendar + individual day events in Family calendar
 - Everything else → Primary calendar
 
