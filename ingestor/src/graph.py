@@ -78,6 +78,57 @@ def write_document_node(schema: str, filename: str, row_id: int, text_preview: s
         print(f"[graph] Document node error for {filename}: {e}")
 
 
+def stamp_parse(schema: str, filename: str, model: str, confidence: float = 0.0) -> None:
+    """Record which model parsed this document. Accumulates parse_models list."""
+    from datetime import datetime, timezone
+    graph = GRAPH_MAP.get(schema)
+    if not graph:
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        # Read existing parse_models first
+        conn = _conn()
+        rows = []
+        try:
+            with conn.cursor() as cur:
+                sql = (f"SELECT * FROM cypher('{graph}', $$"
+                       f" MATCH (d:Document {{filename: '{_e(filename)}'}}) RETURN d.parse_models $$)"
+                       f" AS (v agtype)")
+                cur.execute(sql)
+                rows = cur.fetchall()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        finally:
+            conn.close()
+
+        existing = []
+        if rows and rows[0].get("v"):
+            raw = str(rows[0]["v"]).strip('"\'')
+            try:
+                import json
+                existing = json.loads(raw)
+            except Exception:
+                existing = []
+        if not isinstance(existing, list):
+            existing = []
+
+        if model not in existing:
+            existing.append(model)
+
+        models_str = _e(str(existing).replace("'", '"'))
+        _cypher1(graph, f"""
+            MATCH (d:Document {{filename: '{_e(filename)}'}})
+            SET d.parse_models = '{models_str}',
+                d.best_model = '{_e(model)}',
+                d.last_parsed_at = '{now}',
+                d.confidence = {confidence}
+            RETURN d
+        """)
+    except Exception as e:
+        print(f"[graph] stamp_parse error for {filename}: {e}")
+
+
 def _merge_node(graph: str, label: str, props: str) -> None:
     _cypher1(graph, f"MERGE (n:{label} {{{props}}}) RETURN n")
 

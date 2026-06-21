@@ -9,10 +9,11 @@ import re
 import time
 import ollama
 
-OLLAMA_URL    = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-AGENT_MODEL   = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
-EXTRACT_MODELS = [m.strip() for m in os.environ.get("EXTRACT_MODELS", AGENT_MODEL).split(",") if m.strip()]
-CHUNK_SIZE    = 3000  # chars per chunk
+OLLAMA_URL       = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+DEEPER_OLLAMA_URL = os.environ.get("DEEPER_OLLAMA_URL", "")  # e.g. http://172.23.96.1:11435 — blank = skip
+AGENT_MODEL      = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+EXTRACT_MODELS   = [m.strip() for m in os.environ.get("EXTRACT_MODELS", AGENT_MODEL).split(",") if m.strip()]
+CHUNK_SIZE       = 3000  # chars per chunk
 
 
 # Pass 1 — fast, 3b-friendly, simple schema
@@ -179,9 +180,16 @@ DEEP_MODEL   = os.environ.get("EXTRACT_MODEL_DEEP",   "qwen2.5:14b")
 DEEPER_MODEL = os.environ.get("EXTRACT_MODEL_DEEPER", "qwen2.5:32b")
 
 
-def _run_extraction(text: str, model: str, prompt_template: str, on_chunk=None) -> dict:
+def _run_extraction(text: str, model: str, prompt_template: str, on_chunk=None, ollama_url: str | None = None) -> dict:
     """Core extraction loop: chunk text, run model, fire on_chunk callbacks."""
-    client = ollama.Client(host=OLLAMA_URL)
+    url = ollama_url or OLLAMA_URL
+    try:
+        client = ollama.Client(host=url)
+        # Quick connectivity check
+        client.list()
+    except Exception as e:
+        print(f"[extract] {url} unreachable — skipping {model}: {e}")
+        return {}
     chunks = chunk_text(text)
 
     # Check model is available
@@ -240,9 +248,11 @@ def extract_deep(text: str, on_chunk=None) -> dict:
     return _run_extraction(text, DEEP_MODEL, RICH_PROMPT, on_chunk=on_chunk)
 
 
-def extract_deeper(text: str, on_chunk=None) -> dict:
-    """Pass 3 — deepest extraction using the larger model (32b). Full schema."""
-    return _run_extraction(text, DEEPER_MODEL, RICH_PROMPT, on_chunk=on_chunk)
+def extract_deeper(text: str, on_chunk=None, ollama_url: str | None = None) -> dict:
+    """Pass 3 — deepest extraction using the larger model (32b+). Full schema.
+    Uses DEEPER_OLLAMA_URL if set, otherwise skips gracefully if unreachable."""
+    url = ollama_url or DEEPER_OLLAMA_URL or OLLAMA_URL
+    return _run_extraction(text, DEEPER_MODEL, RICH_PROMPT, on_chunk=on_chunk, ollama_url=url)
 
 
 # Backwards compat alias — used by any callers that haven't migrated yet

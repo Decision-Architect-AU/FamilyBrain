@@ -42,6 +42,9 @@ export default function Home() {
           <span className="text-sky-400">Open</span>Claw
         </h1>
         <nav className="flex items-center gap-4">
+          <Link href="/chat" className="text-xs text-[#00a884] hover:text-[#00c49a] transition-colors font-medium">
+            Chat
+          </Link>
           <ReviewBadge />
           <Link href="/senders" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Senders

@@ -44,16 +44,26 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         '  "type": one of "calendar_event" | "payment" | "observation" | "task"\n'
         '  "title": short descriptive title (max 80 chars)\n'
         '  "detail": full context — what/who/where/how much/reference numbers etc.\n'
-        '  "date": YYYY-MM-DD if a specific date is mentioned or implied, else null\n'
+        '  "date": YYYY-MM-DD of the actual event/due date. '
+        f'Must NOT be the email received date ({received_date[:10]}) unless the event genuinely falls on that day. '
+        'Null if no specific future or past date is stated in the content.\n'
         '  "time": HH:MM (24h) if a specific time is mentioned, else null\n'
         "  -- extra fields for specific types:\n"
         '  calendar_event: "end_date": YYYY-MM-DD if multi-day, "location": string or null\n'
         '  payment: "amount": exact dollar amount or null, "biller": who to pay, "reference": invoice/ref or null\n'
         '  task: "priority": "high"|"normal"\n\n'
-        "Rules:\n"
+        "Type selection rules:\n"
+        "- calendar_event: a scheduled appointment, event, meeting, booking, or deadline with a specific date\n"
+        "- payment: an invoice, bill, or payment request — even without an attachment\n"
+        "- observation: a fact, decision, or piece of information worth remembering. "
+        "  Use this for: birthday/anniversary mentions, policy updates, notifications, "
+        "  confirmations of things already done, and anything informational with no action required\n"
+        "- task: ONLY use when the email explicitly asks YOU to do something specific and actionable "
+        "  (e.g. 'please sign and return', 'action required: renew by Friday'). "
+        "  Do NOT create tasks for birthday greetings, passive reminders, or general information.\n\n"
+        "General rules:\n"
         "- Only extract real items — skip marketing, unsubscribe footers, auto-replies\n"
         "- A payment reminder and a meeting invite in the same email = two separate items\n"
-        "- Observations capture facts, decisions, or information worth remembering\n"
         "- Do NOT invent dates, amounts, or names not present in the text\n"
         "- If nothing worth capturing: return {\"items\": []}"
     )
@@ -75,21 +85,31 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
     return []
 
 
+def _doc_date(received_at):
+    """Brisbane-local date of the source email — stored on the note, not derived at query time."""
+    try:
+        import pytz
+        from dateutil.parser import parse as dtparse
+        return dtparse(str(received_at)).astimezone(pytz.timezone("Australia/Brisbane")).date()
+    except Exception:
+        return None
+
+
 def _create_note(cur, email_id: int, title: str, body: str,
-                  item_type: str, tags: list[str]) -> int:
+                  item_type: str, tags: list[str], received_at=None) -> int:
     cur.execute(
         """
-        INSERT INTO personal.note (source, body, tags, item_type, source_email_id)
-        VALUES ('email_decompose', %s, %s, %s, %s)
+        INSERT INTO personal.note (source, body, tags, item_type, source_email_id, document_date)
+        VALUES ('email_decompose', %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (f"{title}\n\n{body}", tags, item_type, email_id),
+        (f"{title}\n\n{body}", tags, item_type, email_id, _doc_date(received_at)),
     )
     return cur.fetchone()[0]
 
 
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
-                             ingestor_url: str) -> None:
+                             ingestor_url: str, received_date: str = "") -> None:
     from .db import upsert_event
     title    = item.get("title", "")
     detail   = item.get("detail", "")
@@ -99,6 +119,11 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
 
     if not date_str:
         return  # can't place on calendar without a date
+
+    # Reject all-day events where the LLM defaulted to the email received date —
+    # that almost always means no real date was found in the content.
+    if not time_str and date_str == received_date[:10]:
+        return
 
     try:
         if time_str:
@@ -125,7 +150,7 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         print(f"[decompose] calendar event failed for '{title}': {e}")
 
 
-def _create_payment_note(cur, item: dict, email_id: int) -> None:
+def _create_payment_note(cur, item: dict, email_id: int, received_at=None) -> None:
     """Create a financial_doc note so bill_calendar picks it up."""
     biller  = item.get("biller") or item.get("title", "Unknown")
     amount  = item.get("amount") or ""
@@ -145,12 +170,12 @@ def _create_payment_note(cur, item: dict, email_id: int) -> None:
 
     cur.execute(
         """
-        INSERT INTO personal.note (source, body, item_type, source_email_id)
-        VALUES ('financial_doc', %s, 'payment', %s)
+        INSERT INTO personal.note (source, body, item_type, source_email_id, document_date)
+        VALUES ('financial_doc', %s, 'payment', %s, %s)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
-        ("\n".join(body_parts), email_id),
+        ("\n".join(body_parts), email_id, _doc_date(received_at)),
     )
 
 
@@ -207,17 +232,18 @@ def decompose_emails(accounts: list[dict]) -> int:
 
                         if itype == "calendar_event":
                             _create_calendar_event(wcur, item, calendar_source,
-                                                    email_id, INGESTOR_URL)
+                                                    email_id, INGESTOR_URL,
+                                                    received_date=received_at)
 
                         elif itype == "payment":
-                            _create_payment_note(wcur, item, email_id)
+                            _create_payment_note(wcur, item, email_id, received_at)
 
                         elif itype in ("observation", "task"):
                             tags = ["task"] if itype == "task" else []
                             priority = item.get("priority", "normal")
                             if itype == "task" and priority == "high":
                                 tags.append("urgent")
-                            _create_note(wcur, email_id, title, detail, itype, tags)
+                            _create_note(wcur, email_id, title, detail, itype, tags, received_at)
 
                     wcur.execute(
                         "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",

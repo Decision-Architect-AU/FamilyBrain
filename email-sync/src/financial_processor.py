@@ -202,7 +202,9 @@ def _classify_entity(subject: str, body: str, from_addr: str,
         f"Entities:\n{entity_list}\n\n"
         f"Subject: {subject}\n"
         f"From: {from_addr}\n"
-        f"Body (first 1000 chars): {body[:1000]}\n\n"
+        f"Document text (first 2000 chars — may include email body and/or PDF content):\n{body[:2000]}\n\n"
+        "Look for: property addresses, trust names, NDIS participant numbers, ABN numbers, "
+        "owner names, or any other identifying details that map to one of the entities above.\n"
         "Reply with ONLY the exact folder slug (Trust1, Trust2, Trust3, Trust4, SMSF, NDIS, or Personal). "
         "Default to Personal if unsure."
     )
@@ -360,12 +362,25 @@ def _doc_text(data: bytes, filename: str = "") -> str:
 
 # Domains we trust enough to follow PDF links from financial emails
 _TRUSTED_LINK_DOMAINS = {
+    # Property management portals
     "propertyme.com", "console.com.au", "myrealestatediary.com",
-    "propertyware.com", "energyaustralia.com.au", "ergon.com.au",
-    "originenergy.com.au", "agl.com.au", "ato.gov.au",
-    "qro.qld.gov.au", "brisbane.qld.gov.au", "ndis.gov.au", "ndia.gov.au",
-    "strataunit.com.au", "bodycopcorp.com.au", "s3.amazonaws.com",
-    "storage.googleapis.com",
+    "propertyware.com", "managedapp.com.au", "palace.com.au",
+    "rockend.com", "igloo.com.au", "portplus.com.au",
+    "reiconsole.com.au", "reapit.net",
+    # Utilities
+    "energyaustralia.com.au", "ergon.com.au", "originenergy.com.au",
+    "agl.com.au", "alintaenergy.com.au", "powerlink.com.au",
+    "unitywater.com", "seqwater.com.au",
+    # Government / rates
+    "ato.gov.au", "qro.qld.gov.au", "brisbane.qld.gov.au",
+    "goldcoast.qld.gov.au", "logan.qld.gov.au", "ipswich.qld.gov.au",
+    "ndis.gov.au", "ndia.gov.au",
+    # Strata / body corporate
+    "strataunit.com.au", "bodycopcorp.com.au", "strataman.com.au",
+    "archers.com.au", "cossill.com.au",
+    # Cloud storage (hosted statements)
+    "s3.amazonaws.com", "storage.googleapis.com",
+    "blob.core.windows.net", "cloudfront.net",
 }
 
 _LINK_LABEL_KW = [
@@ -401,7 +416,10 @@ def _harvest_pdf_links(html: str, from_domain: str) -> list[str]:
         is_trusted   = any(link_domain.endswith(d) for d in _TRUSTED_LINK_DOMAINS)
         sender_match = from_domain and link_domain.endswith(from_domain)
 
-        if is_pdf_url or ((is_dl_label or sender_match) and is_trusted):
+        # Trust: URL ends in .pdf (any domain), OR download-labelled link from
+        # either a globally-trusted domain OR the sender's own domain.
+        trusted_for_email = is_trusted or sender_match
+        if is_pdf_url or (is_dl_label and trusted_for_email):
             urls.append(href)
 
     return list(dict.fromkeys(urls))  # deduplicate preserving order
@@ -538,39 +556,68 @@ def _embed(text: str) -> list[float] | None:
         return None
 
 
-def _store_note(subject: str, file_path: Path, pdf_text: str) -> int | None:
+def _store_note(subject: str, file_path: Path, pdf_text: str,
+                received_at: str = "",
+                source_email_id: int | None = None) -> int | None:
     """
     Upsert a personal.note row keyed on file_path.
-    Re-runs return the existing note id rather than creating a duplicate.
-    Returns the note id, or None on failure.
+    document_date is the Brisbane-local date of the source document — stored
+    directly on the note so it is self-contained and never requires a join.
+    source_email_id is stored for audit trail only.
     """
     body      = f"{subject}\n\n{pdf_text}".strip()
     path_str  = str(file_path)
     tag       = str(file_path.parent.name)
     if not body:
         return None
+
+    # Derive document_date at ingest time — Brisbane local, timezone-free
+    doc_date = None
+    if received_at:
+        try:
+            import pytz
+            from dateutil.parser import parse as dtparse
+            _brisbane = pytz.timezone("Australia/Brisbane")
+            doc_date = dtparse(received_at).astimezone(_brisbane).date()
+        except Exception:
+            pass
+
     vec = _embed(body)
     try:
         with psycopg2.connect(DB_URL) as conn:
             with conn.cursor() as cur:
                 if vec:
                     cur.execute(
-                        """INSERT INTO personal.note (source, body, tags, embedding, file_path)
-                           VALUES (%s, %s, %s, %s, %s)
+                        """INSERT INTO personal.note
+                               (source, body, tags, embedding, file_path,
+                                document_date, source_email_id)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)
                            ON CONFLICT (file_path) DO UPDATE
-                             SET body = EXCLUDED.body,
-                                 embedding = EXCLUDED.embedding
+                             SET body          = EXCLUDED.body,
+                                 embedding     = EXCLUDED.embedding,
+                                 document_date = COALESCE(EXCLUDED.document_date,
+                                                          personal.note.document_date),
+                                 source_email_id = COALESCE(EXCLUDED.source_email_id,
+                                                            personal.note.source_email_id)
                            RETURNING id""",
-                        ("financial_doc", body, [tag], vec, path_str),
+                        ("financial_doc", body, [tag], vec, path_str,
+                         doc_date, source_email_id),
                     )
                 else:
                     cur.execute(
-                        """INSERT INTO personal.note (source, body, tags, file_path)
-                           VALUES (%s, %s, %s, %s)
+                        """INSERT INTO personal.note
+                               (source, body, tags, file_path,
+                                document_date, source_email_id)
+                           VALUES (%s, %s, %s, %s, %s, %s)
                            ON CONFLICT (file_path) DO UPDATE
-                             SET body = EXCLUDED.body
+                             SET body          = EXCLUDED.body,
+                                 document_date = COALESCE(EXCLUDED.document_date,
+                                                          personal.note.document_date),
+                                 source_email_id = COALESCE(EXCLUDED.source_email_id,
+                                                            personal.note.source_email_id)
                            RETURNING id""",
-                        ("financial_doc", body, [tag], path_str),
+                        ("financial_doc", body, [tag], path_str,
+                         doc_date, source_email_id),
                     )
                 note_id = cur.fetchone()[0]
             conn.commit()
@@ -777,12 +824,14 @@ def process_financial_emails(accounts: list[dict]) -> int:
         for fname, data in attachments:
             pdf_texts.append((fname, data, _doc_text(data, fname)))
 
-        # Build classification text: email body + all filenames + first attachment's text
+        # Build classification text: email body + all filenames + ALL attachment texts
+        # (owner statements often have the trust name / property address only in the PDF)
         filenames_text = " ".join(fname for fname, _, _ in pdf_texts)
+        all_pdf_text   = " ".join(txt for _, _, txt in pdf_texts if txt)
         classify_body  = " ".join(filter(None, [
             row.get("note_body", ""),
             filenames_text,
-            pdf_texts[0][2] if pdf_texts else "",
+            all_pdf_text[:4000],
         ]))
 
         entity_slug = _classify_entity(subject, classify_body, from_addr, entities, prop_patterns, graph_patterns)
@@ -827,7 +876,9 @@ def process_financial_emails(accounts: list[dict]) -> int:
                     print(f"[financials] saved [{entity_slug}] {dest.name}")
                     saved += 1
                 # Always record note+graph (even for deduped files — absorbs new OCR data)
-                note_id = _store_note(subject, dest, pdf_txt)
+                note_id = _store_note(subject, dest, pdf_txt,
+                                     source_email_id=row["id"],
+                                     received_at=received_at)
                 _record_in_graph(subject, from_addr, entity_slug, fy, dest,
                                  received_at, pdf_text=pdf_txt, note_id=note_id)
             except Exception as e:

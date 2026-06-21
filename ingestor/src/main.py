@@ -115,6 +115,7 @@ def process_file(src: pathlib.Path) -> None:
 
         print(f"[ingestor] Pass 1 (quick) for {src.name}...")
         extract_quick(text, on_chunk=on_chunk)
+        graph_writer.stamp_parse(schema, src.name, extract_concepts.QUICK_MODEL)
 
         # ── Pass 2: deep extraction (14b) — runs in background, enriches existing nodes ──
         if ENABLE_DEEP_PASS:
@@ -123,12 +124,14 @@ def process_file(src: pathlib.Path) -> None:
                 def on_chunk_deep(chunk_result):
                     graph_writer.write_extracted_nodes(s, n, nid, _normalize_chunk(chunk_result), tid, embed)
                 extract_deep(t, on_chunk=on_chunk_deep)
+                graph_writer.stamp_parse(s, n, extract_concepts.DEEP_MODEL)
                 print(f"[ingestor] Pass 2 (deep) complete for {n}")
                 if ENABLE_DEEPER_PASS:
                     def on_chunk_deeper(chunk_result):
                         graph_writer.write_extracted_nodes(s, n, nid, _normalize_chunk(chunk_result), tid, embed)
                     print(f"[ingestor] Pass 3 (deeper) starting for {n}...")
                     extract_deeper(t, on_chunk=on_chunk_deeper)
+                    graph_writer.stamp_parse(s, n, extract_concepts.DEEPER_MODEL)
                     print(f"[ingestor] Pass 3 (deeper) complete for {n}")
             threading.Thread(target=_deep_pass, daemon=True).start()
 
@@ -522,6 +525,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             result = ingest_event(body)
         elif self.path == "/ingest/message":
             result = ingest_message(body)
+        elif self.path == "/ingest/reparse":
+            # Body: {filename, schema, ollama_url (optional), model (optional)}
+            result = reparse_document(body)
         elif self.path == "/ingest/categorise-batch":
             # Backfill categories for previously ingested emails with no category.
             # Optional body: {"limit": 200}
@@ -550,6 +556,85 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 SCAN_INTERVAL = int(os.environ.get("INGEST_SCAN_INTERVAL", "15"))  # seconds
+
+
+def reparse_document(payload: dict) -> dict:
+    """
+    Re-run deep extraction on an already-ingested document using a specified model endpoint.
+    Called by the external scheduler when the 32B server is up.
+    Body: {filename, schema, ollama_url, model_name (optional)}
+    """
+    filename   = payload.get("filename", "")
+    schema     = payload.get("schema", "personal")
+    ollama_url = payload.get("ollama_url", "")
+    model_name = payload.get("model_name", "qwen2.5:32b")
+
+    if not filename:
+        return {"ok": False, "error": "filename required"}
+
+    # Find file in Ingested dir
+    file_path = INGESTED_DIR / schema / filename
+    if not file_path.exists():
+        # Try other schemas
+        for s in ("personal", "property", "decision", "unknown"):
+            candidate = INGESTED_DIR / s / filename
+            if candidate.exists():
+                file_path = candidate
+                schema = s
+                break
+    if not file_path.exists():
+        return {"ok": False, "error": f"{filename} not found in Ingested"}
+
+    def _run():
+        try:
+            text = extract_text(str(file_path))
+            if not text:
+                print(f"[reparse] No text extracted from {filename}")
+                return
+
+            # Get existing node_id from DB for graph linking
+            from src.ingest import ingest_personal, _find_closest_theme
+            vec      = embed(text[:2000])
+            theme_id = _find_closest_theme(vec)
+
+            # Re-run extraction with the deep model at the provided URL
+            import src.extract_concepts as ec
+            orig_deeper = ec.DEEPER_MODEL
+            ec.DEEPER_MODEL = model_name
+
+            extracted = extract_deeper(text, ollama_url=ollama_url)
+
+            ec.DEEPER_MODEL = orig_deeper
+
+            if extracted:
+                # Write enriched nodes back — reuses same graph write logic
+                # node_id=0 means we link by filename match in graph
+                from src import graph as gw
+                from src.ingest import _find_closest_theme
+                # Find row_id from personal.document
+                import psycopg2
+                conn = psycopg2.connect(os.environ["DATABASE_URL"])
+                row_id = 0
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT id FROM personal.document WHERE filename=%s LIMIT 1", (filename,))
+                        row = cur.fetchone()
+                        if row:
+                            row_id = row[0]
+                finally:
+                    conn.close()
+
+                from src.ingest import _normalize_chunk
+                gw.write_extracted_nodes(schema, filename, row_id, _normalize_chunk(extracted), theme_id, embed)
+                gw.stamp_parse(schema, filename, model_name)
+                print(f"[reparse] ✓ {filename} with {model_name}")
+            else:
+                print(f"[reparse] No extraction result for {filename} — server may be down")
+        except Exception as e:
+            print(f"[reparse] ✗ {filename}: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"Reparse started for {filename} with {model_name}"}
 
 
 def scan_existing() -> None:

@@ -47,6 +47,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${DASHBOARD_DB_USER:-dashboard_ro}:${DASHBOARD_DB_PASSWORD:?required}@postgres:5432/openclaw
       MODE_FILE: /shared/current_mode
+      WA_AGENT_URL: http://wa-agent:4002
     volumes:
       - shared_state:/shared
       - ./dashboard:/app
@@ -391,6 +392,7 @@ services:
       FINANCIALS_DIR: /financials
       OLLAMA_URL:     http://172.23.96.1:11434
       AGENT_MODEL:    ${AGENT_MODEL:-qwen2.5:14b}
+      GMAIL_INITIAL_DAYS: ${GMAIL_INITIAL_DAYS:-730}
     volumes:
       - /mnt/c/Users/Glenn/Documents/FinancialsGW:/financials
     depends_on:

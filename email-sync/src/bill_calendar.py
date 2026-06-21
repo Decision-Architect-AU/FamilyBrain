@@ -60,7 +60,14 @@ def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
         due = None
     if due:
         try:
-            datetime.strptime(str(due), "%Y-%m-%d")
+            parsed_due = datetime.strptime(str(due), "%Y-%m-%d")
+            # Reject dates more than 2 years from received_date — LLM picked the wrong year
+            try:
+                recv_dt = datetime.fromisoformat(received_date[:10])
+                if abs((parsed_due - recv_dt).days) > 730:
+                    due = None
+            except Exception:
+                pass
         except (ValueError, TypeError):
             due = None
     if not due:
@@ -76,22 +83,58 @@ def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
     return data
 
 
+def _entity_from_text(text: str) -> str:
+    """
+    Classify entity from raw text using the same keyword rules as financial_processor.
+    Returns folder_slug string.
+    """
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT folder_slug, keywords FROM personal.ownership_entity ORDER BY id")
+                entities = list(cur.fetchall())
+    except Exception:
+        return "Personal"
+
+    lower = text.lower()
+    for ent in entities:
+        if ent["folder_slug"] == "Personal":
+            continue
+        for kw in (ent["keywords"] or []):
+            if kw.lower() in lower:
+                return ent["folder_slug"]
+    return "Personal"
+
+
 def _extract_payment_details(subject: str, body: str, received_date: str) -> list[dict]:
     """
     Use LLM to extract ALL payment items from a financial document.
     Returns a list of payment dicts (most emails have one, some have several).
     Falls back to a single-item list on failure.
     """
+    # Parse received_date year for anchoring LLM date extraction
+    try:
+        _recv_year = str(datetime.fromisoformat(received_date[:10]).year)
+        _recv_date_hint = received_date[:10]
+    except Exception:
+        _recv_year = str(datetime.now(timezone.utc).year)
+        _recv_date_hint = received_date[:10] if received_date else "unknown"
+
     prompt = (
         "Extract ALL payment items from this financial document. "
         "An email may contain multiple invoices or line items — return ALL of them.\n"
         "Reply with ONLY a valid JSON object — no prose, no markdown, no explanation.\n\n"
+        f"Email received: {_recv_date_hint} (use this to anchor the year for any ambiguous dates)\n"
         f"Subject: {subject}\n"
         f"Document text (first 2500 chars):\n{body[:2500]}\n\n"
         'Return JSON with exactly one key: "payments" — an array where each item has:\n'
         '  "biller": string — the company or person sending the bill/invoice,\n'
         '  "amount_due": string — the EXACT dollar amount, or null if not found. Do NOT invent or guess.\n'
-        '  "due_date": string — payment due date YYYY-MM-DD (use invoice date if no due date, null if unknown),\n'
+        '  "due_date": string — the INVOICE DUE DATE in YYYY-MM-DD format. '
+        f'Dates in this document use DD/MM/YYYY format (Australian). '
+        f'The year must match or be close to the email received date ({_recv_date_hint}). '
+        'Use the invoice due date field specifically — not the job date, service date, or invoice date. '
+        'If no due date is present, use the invoice date. Null only if completely absent.\n'
         '  "for_what": string — property address, person name, or asset this relates to,\n'
         '  "invoice_ref": string — invoice/reference number if present, else null,\n'
         '  "how_to_pay": string — BSB, account, BPAY biller code, reference, or payment link. null if not found,\n'
@@ -242,15 +285,14 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT n.id, n.body, n.tags, n.created_at,
-                          n.bill_event_id,
-                          em.subject, em.received_at
-                   FROM   personal.note n
-                   LEFT   JOIN personal.email_message em ON em.note_id = n.id
-                   WHERE  n.source = 'financial_doc'
-                     AND  n.bill_event_id IS NOT NULL
-                     AND  n.bill_event_enriched IS NOT TRUE
-                   ORDER  BY n.id"""
+                """SELECT id, body, tags, created_at, bill_event_id,
+                          split_part(body, E'\n', 1) AS subject,
+                          COALESCE(document_date::text, created_at::date::text) AS received_at
+                   FROM   personal.note
+                   WHERE  source = 'financial_doc'
+                     AND  bill_event_id IS NOT NULL
+                     AND  bill_event_enriched IS NOT TRUE
+                   ORDER  BY COALESCE(document_date, created_at::date)"""
             )
             notes = list(cur.fetchall())
 
@@ -279,6 +321,9 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
         try:
             payments = _extract_payment_details(subject, body, received_at)
             details  = payments[0]  # enrich uses the primary/first payment
+            detected_entity = _entity_from_text(f"{subject} {body[:3000]}")
+            if detected_entity != "Personal":
+                entity_tag = f"{{{detected_entity}}}"
             patch    = _build_event_body(details, entity_tag)
             title    = patch["summary"]
             cal_svc.events().patch(
@@ -401,17 +446,17 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
         print("[billcal] no bills_calendar_id configured — skipping")
         return 0
 
-    # Load unscheduled financial notes
+    # Load unscheduled financial notes — document_date is self-contained on the note
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT n.id, n.body, n.tags, n.created_at,
-                          em.subject, em.received_at
-                   FROM   personal.note n
-                   LEFT   JOIN personal.email_message em ON em.note_id = n.id
-                   WHERE  n.source = 'financial_doc'
-                     AND  n.bill_event_id IS NULL
-                   ORDER  BY n.id"""
+                """SELECT id, body, tags, created_at,
+                          split_part(body, E'\n', 1) AS subject,
+                          COALESCE(document_date::text, created_at::date::text) AS received_at
+                   FROM   personal.note
+                   WHERE  source = 'financial_doc'
+                     AND  bill_event_id IS NULL
+                   ORDER  BY COALESCE(document_date, created_at::date)"""
             )
             notes = list(cur.fetchall())
 
@@ -438,6 +483,10 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
 
         try:
             payments = _extract_payment_details(subject, body, received_at)
+            # Override entity_tag with keyword classification against invoice body
+            detected_entity = _entity_from_text(f"{subject} {body[:3000]}")
+            if detected_entity != "Personal":
+                entity_tag = f"{{{detected_entity}}}"
             first_event_id = None
             for details in payments:
                 event_id = _create_event(cal_svc, bills_cal_id, details, entity_tag, note_id)
