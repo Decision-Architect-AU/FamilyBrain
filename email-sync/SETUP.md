@@ -66,19 +66,128 @@ VALUES
 docker compose --profile normal up -d email-sync
 ```
 
+---
+
 ## How it works
 
-- **Email**: polls each inbox every 5 min (configurable via `EMAIL_POLL_INTERVAL_SECS`)
-  - New emails → classify (personal/property/decision) → ingest to graph + `personal.note`
-  - Dedup via `personal.email_message` — each message ingested exactly once
-  - Uses Gmail history API / Outlook delta query for incremental sync (no re-scanning)
+Each poll cycle runs five stages in sequence:
 
-- **Calendar**: syncs every 15 min (configurable via `CALENDAR_POLL_INTERVAL_SECS`)
-  - Gmail events → `personal.event` → mirrored to Outlook
-  - Outlook events → `personal.event` → mirrored to Gmail
-  - Bidirectional via `personal.calendar_sync_map` — no duplicate mirror loops
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Stage 1 — Email sync                                        │
+│                                                              │
+│  Gmail (history API) + Outlook (delta query)                 │
+│  → personal.email_message (dedup, one row per message)       │
+│  → Two independent cursors per account:                      │
+│       sync_cursor          (email history / delta)           │
+│       calendar_sync_cursor (GCal syncToken / cal delta)      │
+└────────────────────────────┬─────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Stage 2 — Email decomposer  (qwen2.5:14b)                   │
+│                                                              │
+│  One email can produce multiple typed items:                 │
+│    calendar_event  → personal.event                          │
+│    payment         → financial_doc note → bill_calendar      │
+│    observation     → personal.note                           │
+│    task            → personal.note (tagged)                  │
+│                                                              │
+│  Skips: junk / marketing / newsletter / notification         │
+│  Marks email_decomposed = true when done                     │
+└────────────────────────────┬─────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Stage 3 — Financial processor                               │
+│                                                              │
+│  Structured extraction from attachments (PDF, invoices)      │
+│  → personal.note (financial_doc)                             │
+└────────────────────────────┬─────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Stage 4 — Bill calendar                                     │
+│                                                              │
+│  Creates / enriches personal.event rows for financial notes  │
+│  One event per payment (multi-bill emails → multiple events) │
+│  effective_date set from due date in Brisbane timezone       │
+└────────────────────────────┬─────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Stage 5 — Appointment updater (sole GCal writer)            │
+│                                                              │
+│  Polls personal.event WHERE:                                 │
+│    gcal_event_id IS NULL                (never written)      │
+│    OR updated_at > calendar_written_at  (changed since sync) │
+│    OR next_update_at <= now()           (scheduled recheck)  │
+│                                                              │
+│  Routes to target calendar:                                  │
+│    bills     → Bills calendar (3 days before due, day-of)   │
+│    family    → Family calendar (per-person colour tags)      │
+│    holiday   → Holidays calendar + individual day events     │
+│    default   → Primary calendar                              │
+│                                                              │
+│  Updates gcal_event_id, calendar_written_at, next_update_at  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Channel rules
+
+Scheduling and routing are driven by `personal.channel_rule` rows — not hardcoded logic. When a new event is inserted, `channel_resolver.materialise()` evaluates the rules and writes `next_update_at` immediately. The appointment updater just polls that indexed column.
+
+| Schedule | When `next_update_at` fires | Typical use |
+|----------|-----------------------------|-------------|
+| `immediate` | now() | Family events, tasks, catch-all |
+| `before_event:3d` | 06:00 AEST, 3 days before effective_date | Bill reminders |
+| `on_due_date` | 06:00 AEST on effective_date | Final bill check |
+| `batch:daily:07:00` | Next 07:00 AEST | Observation digests |
+| `never` | NULL | Only re-process on explicit change |
+
+### effective_date
+
+Every event stores `effective_date DATE` — the Brisbane local calendar date, regardless of the event's TIMESTAMPTZ. All-day events from any timezone resolve correctly. Use `effective_date` for all date-range queries, not `starts_at`.
+
+### Separate sync cursors
+
+Each `personal.email_account` row has two independent cursors:
+- `sync_cursor` — email history position (Gmail historyId / Outlook deltaLink)
+- `calendar_sync_cursor` — calendar sync position (GCal syncToken / Outlook calendar deltaLink)
+
+They advance independently so an email-only resync never resets the calendar cursor.
+
+---
 
 ## Adding more accounts
 
 Just insert another row into `personal.email_account` with the refresh token.
 No code changes, no restarts needed after the first sync pass completes.
+
+---
+
+## Reprocessing / resets
+
+### Reset email ingestion for a date range
+
+```sql
+-- Reprocess all emails from FY2024 onwards (unset email_decomposed and ingest_status)
+UPDATE personal.email_message
+SET email_decomposed = false, ingest_status = 'pending'
+WHERE received_at >= '2023-07-01';
+```
+
+### Delete and resync Google Calendar events after a date
+
+```bash
+docker compose run --rm email-sync python -m scripts.reset_calendar_after
+```
+
+Edit `CUTOFF_DATE` in `scripts/reset_calendar_after.py` before running. This:
+1. Deletes all GCal events on/after the cutoff from all writable calendars
+2. Clears `target_cal_provider_id`, `gcal_event_id`, `calendar_written_at` for affected events
+3. Clears `calendar_sync_cursor` so the next poll re-fetches the full window
+
+### Model
+
+Set `AGENT_MODEL` in `.env` (default `qwen2.5:14b`). This controls the decomposer and financial extraction LLM.

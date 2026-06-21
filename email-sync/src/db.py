@@ -146,6 +146,18 @@ def mark_label_applied(account_id: int, provider_msg_id: str) -> None:
 
 # ── Calendar sync map ──────────────────────────────────────────────────────────
 
+def _effective_date(starts_at):
+    """Return the Brisbane local date for an event start — timezone-free."""
+    from datetime import date as date_type
+    import pytz
+    _brisbane = pytz.timezone("Australia/Brisbane")
+    if isinstance(starts_at, date_type) and not hasattr(starts_at, "hour"):
+        return starts_at  # already a plain date (all-day event)
+    if hasattr(starts_at, "tzinfo") and starts_at.tzinfo:
+        return starts_at.astimezone(_brisbane).date()
+    return starts_at.date()
+
+
 def upsert_event(
     title: str,
     starts_at: datetime,
@@ -155,31 +167,53 @@ def upsert_event(
     calendar_event_id: str,
     notes: str = "",
     ingestor_url: Optional[str] = None,
+    item_type: Optional[str] = None,
+    category: Optional[str] = None,
+    source_slug: Optional[str] = None,
 ) -> int:
     """
     Upsert into personal.event, return event id.
+    Materialises next_update_at via channel_resolver on insert.
     If ingestor_url provided, also writes (:Event) node to personal_graph.
     """
+    eff_date = _effective_date(starts_at)
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO personal.event
-                    (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (calendar_event_id) DO UPDATE
-                    SET title = EXCLUDED.title,
-                        starts_at = EXCLUDED.starts_at,
-                        ends_at = EXCLUDED.ends_at,
-                        notes = EXCLUDED.notes
-                RETURNING id
+                    SET title          = EXCLUDED.title,
+                        starts_at      = EXCLUDED.starts_at,
+                        ends_at        = EXCLUDED.ends_at,
+                        notes          = EXCLUDED.notes,
+                        effective_date = EXCLUDED.effective_date,
+                        updated_at     = now()
+                RETURNING id, (xmax = 0) AS inserted
                 """,
-                (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes),
+                (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date),
             )
             row = cur.fetchone()
         c.commit()
 
     event_id = row["id"]
+    is_new   = row["inserted"]
+
+    # Materialise next_update_at for new events via channel rules
+    if is_new:
+        try:
+            from .channel_resolver import materialise
+            materialise(
+                event_id,
+                item_type=item_type or event_type or "calendar_event",
+                category=category,
+                source_slug=source_slug,
+                effective_date=eff_date,
+            )
+        except Exception as e:
+            print(f"[db] channel materialise failed for event {event_id}: {e}")
 
     # Fire-and-forget: write (:Event) node to personal_graph via ingestor
     if ingestor_url:

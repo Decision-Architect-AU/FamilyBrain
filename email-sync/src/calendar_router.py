@@ -169,3 +169,40 @@ def target_calendar_id(ac: AccountCalendars, route: str) -> str:
 def holiday_stub_summary(summary: str, starts_at, ends_at) -> str:
     """One-line stub for holiday start/end in the default calendar."""
     return f"✈ {summary} starts" if starts_at else f"✈ {summary} ends"
+
+
+def expand_holiday_days(summary: str, starts_at, ends_at) -> list[dict]:
+    """
+    For a multi-day holiday/break, return individual all-day event dicts for
+    each day in the range — one per calendar day from starts_at up to (but not
+    including) ends_at, matching Google Calendar's exclusive all-day end convention.
+
+    Each dict: {"summary": str, "starts_at": date, "ends_at": date}
+    Returns empty list for single-day events.
+    """
+    from datetime import date as date_type, timedelta
+
+    def _to_date(dt):
+        if isinstance(dt, date_type) and not hasattr(dt, "hour"):
+            return dt
+        if hasattr(dt, "date"):
+            return dt.date()
+        return dt
+
+    start = _to_date(starts_at)
+    end   = _to_date(ends_at) if ends_at else None
+    if not end or end <= start:
+        return []
+
+    # Google all-day end is exclusive — last actual day is end - 1 day
+    total = (end - start).days
+    if total <= 1:
+        return []
+
+    _DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    result = []
+    for i in range(total):
+        d     = start + timedelta(days=i)
+        label = f"{summary} — Day {i + 1} ({_DAYS[d.weekday()]} {d.day} {d.strftime('%b')})"
+        result.append({"summary": label, "starts_at": d, "ends_at": d + timedelta(days=1)})
+    return result

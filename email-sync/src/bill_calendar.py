@@ -45,79 +45,85 @@ def _is_statement_email(subject: str) -> bool:
     return any(kw in s for kw in _STATEMENT_SUBJECT_KW)
 
 
-def _extract_payment_details(subject: str, body: str, received_date: str) -> dict:
-    """
-    Use LLM to extract full payment details from a financial document.
-    Falls back to safe defaults if extraction fails.
-    """
-    # LLM placeholder values that should be treated as "not found"
+def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
+    """Normalise and validate one extracted payment dict."""
     _FAKE_AMOUNTS = {"$1,234.56", "1234.56", "$123.45", "123.45",
                      "$456.78", "456.78", "$1,000,000.00", "$0.00", "0.00"}
-    _FAKE_DATES   = {"2023-04-15", "2023-10-15", "2024-10-01"}  # hallucinated template dates
+    _FAKE_DATES   = {"2023-04-15", "2023-10-15", "2024-10-01"}
 
+    amt = str(data.get("amount_due") or "").strip()
+    if not amt or amt.lower() in ("null", "none") or amt in _FAKE_AMOUNTS:
+        data["amount_due"] = ""
+
+    due = data.get("due_date")
+    if due and str(due) in _FAKE_DATES:
+        due = None
+    if due:
+        try:
+            datetime.strptime(str(due), "%Y-%m-%d")
+        except (ValueError, TypeError):
+            due = None
+    if not due:
+        try:
+            due = (datetime.fromisoformat(received_date[:10]) + timedelta(days=14)).strftime("%Y-%m-%d")
+        except Exception:
+            due = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
+    data["due_date"] = due
+
+    if _is_statement_email(subject):
+        data["payment_status"] = "paid_via_statement"
+
+    return data
+
+
+def _extract_payment_details(subject: str, body: str, received_date: str) -> list[dict]:
+    """
+    Use LLM to extract ALL payment items from a financial document.
+    Returns a list of payment dicts (most emails have one, some have several).
+    Falls back to a single-item list on failure.
+    """
     prompt = (
-        "Extract payment details from this financial document. "
+        "Extract ALL payment items from this financial document. "
+        "An email may contain multiple invoices or line items — return ALL of them.\n"
         "Reply with ONLY a valid JSON object — no prose, no markdown, no explanation.\n\n"
         f"Subject: {subject}\n"
-        f"Document text (first 2000 chars):\n{body[:2000]}\n\n"
-        "Return JSON with exactly these fields:\n"
+        f"Document text (first 2500 chars):\n{body[:2500]}\n\n"
+        'Return JSON with exactly one key: "payments" — an array where each item has:\n'
         '  "biller": string — the company or person sending the bill/invoice,\n'
-        '  "amount_due": string — the EXACT dollar amount from the document, or null if not found. '
-        'Do NOT invent or guess an amount.\n'
-        '  "due_date": string — payment due date in YYYY-MM-DD format (use invoice date if no due date found, null if unknown),\n'
-        '  "for_what": string — what property address, person name, or asset this bill relates to,\n'
-        '  "invoice_ref": string — invoice number or reference if present, else null,\n'
-        '  "how_to_pay": string — payment instructions: BSB, account number, BPAY biller code, reference, or payment link. null if not found,\n'
-        '  "payment_status": string — EXACTLY "pending" (standalone invoice needing payment) or '
-        '"paid_via_statement" (expense already deducted in an owner/rental statement).\n\n'
-        "IMPORTANT: only return values that actually appear in the document. "
-        "Use null for any field you cannot find. Never fabricate amounts or dates."
+        '  "amount_due": string — the EXACT dollar amount, or null if not found. Do NOT invent or guess.\n'
+        '  "due_date": string — payment due date YYYY-MM-DD (use invoice date if no due date, null if unknown),\n'
+        '  "for_what": string — property address, person name, or asset this relates to,\n'
+        '  "invoice_ref": string — invoice/reference number if present, else null,\n'
+        '  "how_to_pay": string — BSB, account, BPAY biller code, reference, or payment link. null if not found,\n'
+        '  "payment_status": string — EXACTLY "pending" or "paid_via_statement".\n\n'
+        "IMPORTANT: only use values that actually appear in the document. "
+        "Never fabricate amounts or dates. If only one payment exists, still return an array with one item."
     )
     try:
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False},
-            timeout=60,
+            timeout=90,
         )
         raw = resp.json().get("response", "")
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
-            data = json.loads(m.group())
-
-            # Scrub known LLM placeholder/hallucinated values
-            amt = str(data.get("amount_due") or "").strip()
-            if not amt or amt.lower() in ("null", "none") or amt in _FAKE_AMOUNTS:
-                data["amount_due"] = ""
-
-            # Validate / normalise due_date; reject hallucinated template dates
-            due = data.get("due_date")
-            if due and str(due) in _FAKE_DATES:
-                due = None
-            if due:
-                try:
-                    datetime.strptime(str(due), "%Y-%m-%d")
-                except (ValueError, TypeError):
-                    due = None
-            if not due:
-                try:
-                    due = (datetime.fromisoformat(received_date[:10]) + timedelta(days=14)).strftime("%Y-%m-%d")
-                except Exception:
-                    due = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
-            data["due_date"] = due
-
-            # Subject-level override: statement emails always = already settled
-            if _is_statement_email(subject):
-                data["payment_status"] = "paid_via_statement"
-            return data
+            outer = json.loads(m.group())
+            payments = outer.get("payments")
+            if isinstance(payments, list) and payments:
+                return [_scrub_payment(p, subject, received_date) for p in payments]
+            # LLM returned a bare payment object instead of {"payments": [...]}
+            if isinstance(outer, dict) and "biller" in outer:
+                return [_scrub_payment(outer, subject, received_date)]
     except Exception as e:
         print(f"[billcal] LLM extract failed: {e}")
 
-    # Safe fallback
+    # Safe fallback — single item
     try:
         fallback_date = (datetime.fromisoformat(received_date[:10]) + timedelta(days=14)).strftime("%Y-%m-%d")
     except Exception:
         fallback_date = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
-    return {
+    return [{
         "biller": subject[:60],
         "amount_due": "",
         "due_date": fallback_date,
@@ -125,7 +131,7 @@ def _extract_payment_details(subject: str, body: str, received_date: str) -> dic
         "invoice_ref": "",
         "how_to_pay": "",
         "payment_status": "paid_via_statement" if _is_statement_email(subject) else "pending",
-    }
+    }]
 
 
 def _find_existing_event(cal_svc, calendar_id: str, biller: str, due_date: str) -> str | None:
@@ -271,9 +277,10 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
         subject    = note["subject"] or body.split("\n")[0][:80]
 
         try:
-            details = _extract_payment_details(subject, body, received_at)
-            patch   = _build_event_body(details, entity_tag)
-            title   = patch["summary"]
+            payments = _extract_payment_details(subject, body, received_at)
+            details  = payments[0]  # enrich uses the primary/first payment
+            patch    = _build_event_body(details, entity_tag)
+            title    = patch["summary"]
             cal_svc.events().patch(
                 calendarId=bills_cal_id, eventId=event_id, body=patch
             ).execute()
@@ -430,19 +437,24 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
         subject      = note["subject"] or body.split("\n")[0][:80]
 
         try:
-            details  = _extract_payment_details(subject, body, received_at)
-            event_id = _create_event(cal_svc, bills_cal_id, details, entity_tag, note_id)
+            payments = _extract_payment_details(subject, body, received_at)
+            first_event_id = None
+            for details in payments:
+                event_id = _create_event(cal_svc, bills_cal_id, details, entity_tag, note_id)
+                if first_event_id is None:
+                    first_event_id = event_id
+                print(f"[billcal] created '{details.get('biller')} {details.get('amount_due')}' on {details['due_date']} [{entity_tag}]")
+                created += 1
 
-            with psycopg2.connect(DB_URL) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE personal.note SET bill_event_id = %s WHERE id = %s",
-                        (event_id, note_id),
-                    )
-                conn.commit()
-
-            print(f"[billcal] created '{details.get('biller')} {details.get('amount_due')}' on {details['due_date']} [{entity_tag}]")
-            created += 1
+            # Store first event_id to mark note as scheduled
+            if first_event_id:
+                with psycopg2.connect(DB_URL) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE personal.note SET bill_event_id = %s WHERE id = %s",
+                            (first_event_id, note_id),
+                        )
+                    conn.commit()
         except Exception as e:
             print(f"[billcal] failed for note {note_id}: {e}")
 

@@ -380,7 +380,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
     Returns number of events synced.
     """
     from .outlook import create_outlook_event
-    from .calendar_router import classify_event, load_routing, target_calendar_id, holiday_stub_summary
+    from .calendar_router import classify_event, load_routing, target_calendar_id, holiday_stub_summary, _TAG_COLORS
 
     all_accounts = [account] + mirror_accounts
     routing      = load_routing(all_accounts)
@@ -457,8 +457,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                             svc, target_cal, summary, starts_at, ends_at, description,
                             color_id=color_id)
                     # else: sync_map exists but target_cal_provider_id not yet tracked — skip to avoid duplicates
-                    # (the event is already in the target calendar; ID will be recovered on next etag change)
-                    # (avoids re-inserting on every cycle for pre-existing untracked events)
+                    # Holiday day expansion is handled by appointment_updater, not here
                 except Exception as e:
                     print(f"[gmail] failed to write to {route} calendar for '{summary}': {e}")
 

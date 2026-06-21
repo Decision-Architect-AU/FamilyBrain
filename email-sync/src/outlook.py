@@ -379,10 +379,10 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                                                  summary, starts_at, ends_at, description)
                             target_cal_id_stored = existing_target_id
                         elif not existing:
-                            # brand-new event only — skip if sync_map exists to avoid duplicates
                             target_cal_id_stored = _write_outlook_event(
                                 account, target_cal, summary, starts_at, ends_at, description,
                                 is_all_day=is_all_day)
+                            # Holiday day expansion handled by appointment_updater
                     except Exception as e:
                         print(f"[outlook] failed to write to {route} calendar for '{summary}': {e}")
 

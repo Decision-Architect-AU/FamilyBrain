@@ -15,7 +15,7 @@ import json
 import time
 import psycopg2
 import psycopg2.extras
-from src.llm import embed
+from src.llm import embed, generate
 
 DB_URL          = os.environ.get("DATABASE_URL")
 TOP_K           = int(os.environ.get("WA_SEARCH_TOP_K", "5"))
@@ -236,12 +236,12 @@ def _cypher_search(conn, graph: str, query: str) -> dict:
     regex = "(?i)(" + "|".join(re.escape(t) for t in terms[:6]) + ")"
 
     # ── Pass 1: name match ────────────────────────────────────────────────────
-    safe_regex = regex.replace("'", "\\'")
+    safe_regex = regex.replace('"', '\\"')
     raw = _cypher(
         conn, graph,
-        f"MATCH (c:Concept) WHERE c.name =~ '{safe_regex}' "
-        f"RETURN c.name AS name, c.description AS cdesc, c.type AS ctype "
-        f"LIMIT 10",
+        f'MATCH (c:Concept) WHERE c.name =~ "{safe_regex}" '
+        f'RETURN c.name AS name, c.description AS cdesc, c.type AS ctype '
+        f'LIMIT 10',
         "(name agtype, cdesc agtype, ctype agtype)",
     )
 
@@ -257,20 +257,20 @@ def _cypher_search(conn, graph: str, query: str) -> dict:
         row["confidence"] = "medium"
         entities.append(row)
 
-        safe_anchor = anchor.replace("'", "\\'")
+        safe_anchor = anchor.replace('"', '\\"')
         neighbours = _cypher(
             conn, graph,
-            f"MATCH (a:Concept {{name: '{safe_anchor}'}})-[r]-(b) "
-            f"RETURN type(r) AS rel, b.name AS name, b.description AS cdesc "
-            f"LIMIT 10",
+            f'MATCH (a:Concept {{name: "{safe_anchor}"}})-[r]-(b) '
+            f'RETURN type(r) AS rel, b.name AS name, b.description AS cdesc '
+            f'LIMIT 10',
             "(rel agtype, name agtype, cdesc agtype)",
         )
         claims = _cypher(
             conn, graph,
-            f"MATCH (a:Concept {{name: '{safe_anchor}'}})-[:ASSERTS]->(cl:Claim) "
+            f'MATCH (a:Concept {{name: "{safe_anchor}"}})-[:ASSERTS]->(cl:Claim) '
             f"WHERE cl.confidence <> 'low' "
-            f"RETURN cl.text AS text, cl.confidence AS conf "
-            f"LIMIT 5",
+            f'RETURN cl.text AS text, cl.confidence AS conf '
+            f'LIMIT 5',
             "(text agtype, conf agtype)",
         )
         related += neighbours + claims
@@ -412,6 +412,41 @@ def retrieve(query: str, graphs: list[str]) -> str:
 
             # ── Cypher: always runs ───────────────────────────────────────────
             cypher_result = _cypher_search(conn, graph, query)
+
+            # ── Auto-create missing Concepts and retry once ───────────────────
+            if not cypher_result["entities"] and graph == "personal_graph":
+                terms = _query_terms(query)
+                created = []
+                for term in terms[:3]:
+                    try:
+                        safe_term = term.replace('"', '\\"')
+                        # Check existence first — AGE doesn't support MERGE...ON CREATE SET
+                        exists = _cypher(
+                            conn, graph,
+                            f'MATCH (c:Concept {{name: "{safe_term}"}}) RETURN c LIMIT 1',
+                            "(c agtype)",
+                        )
+                        if not exists:
+                            # Ask LLM to describe this term so the retry has real content
+                            try:
+                                desc = generate(
+                                    f"In 1-2 sentences, what is '{term}'? Be factual and concise.",
+                                    system="You are a knowledge assistant. Answer only with a short factual description, no preamble.",
+                                )
+                                desc = desc.strip().replace('"', "'")[:400]
+                            except Exception:
+                                desc = "auto-created from query"
+                            _cypher(
+                                conn, graph,
+                                f'CREATE (c:Concept {{name: "{safe_term}", description: "{desc}", type: "unknown"}})',
+                                "(c agtype)",
+                            )
+                        created.append(term)
+                    except Exception:
+                        conn.rollback()
+                if created:
+                    print(f"[search] Auto-created Concepts: {created} — retrying search")
+                    cypher_result = _cypher_search(conn, graph, query)
 
             if cypher_result["entities"]:
                 has_content = True

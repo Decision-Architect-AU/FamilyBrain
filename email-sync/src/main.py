@@ -18,6 +18,8 @@ from . import gmail as gmail_mod
 from . import outlook as outlook_mod
 from . import financial_processor as fin_mod
 from . import bill_calendar as billcal_mod
+from . import email_decomposer as decompose_mod
+from . import appointment_updater as appt_mod
 
 INGESTOR_URL            = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
 EMAIL_POLL_INTERVAL     = int(os.environ.get("EMAIL_POLL_INTERVAL_SECS", "300"))    # 5 min
@@ -44,18 +46,33 @@ def run_email_sync() -> None:
 
     print(f"[email-sync] Email pass complete — {total} total messages ingested")
 
+    all_accounts = get_enabled_accounts()
+
+    # Decompose emails into typed items (calendar events, payments, tasks, observations)
+    try:
+        n = decompose_mod.decompose_emails(all_accounts)
+        if n:
+            print(f"[email-sync] Decomposed {n} email(s)")
+    except Exception as e:
+        print(f"[email-sync] Email decomposer error: {e}")
+
     # File financial documents and schedule bill calendar events
     try:
-        all_accounts = get_enabled_accounts()
         n = fin_mod.process_financial_emails(all_accounts)
         if n:
             print(f"[email-sync] Financial processor saved {n} document(s)")
-        # Dedup first (catches any existing triples), then sync new notes, then enrich
-        billcal_mod.deduplicate_bill_calendar(all_accounts)
         billcal_mod.sync_bill_calendar(all_accounts)
         billcal_mod.enrich_bill_calendar(all_accounts)
     except Exception as e:
         print(f"[email-sync] Financial processor error: {e}")
+
+    # Push pending/changed events to Google Calendar
+    try:
+        n = appt_mod.run_appointment_updater(all_accounts)
+        if n:
+            print(f"[email-sync] Appointment updater wrote {n} event(s) to GCal")
+    except Exception as e:
+        print(f"[email-sync] Appointment updater error: {e}")
 
 
 def run_calendar_sync() -> None:

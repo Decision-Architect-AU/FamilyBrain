@@ -14,3 +14,10 @@ __pycache__/
 *.log
 dashboard/.next/*
 dashboard/.next/cache/
+
+# Data — never commit
+*.dump
+*.sql.gz
+*.backup
+graph-api/explorer-dist/
+C:/DataFiles/
