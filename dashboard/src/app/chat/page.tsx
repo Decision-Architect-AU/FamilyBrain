@@ -10,12 +10,38 @@ interface Message {
   elapsed_ms?: number;
   graphs_used?: string[];
   ts: Date;
+  query?: string;   // the user message that produced this response
 }
 
 function Bubble({ msg }: { msg: Message }) {
   const isUser = msg.role === 'user';
+  const [flagged, setFlagged] = useState<'idle' | 'pending' | 'done'>('idle');
+
+  const flagDown = async () => {
+    if (flagged !== 'idle') return;
+    setFlagged('pending');
+    try {
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: 'dashboard',
+          query: msg.query ?? '',
+          response: msg.text,
+          graphs_used: msg.graphs_used ?? [],
+          feedback: '👎',
+          sentiment: 'negative',
+          correction: null,
+        }),
+      });
+      setFlagged('done');
+    } catch {
+      setFlagged('idle');
+    }
+  };
+
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-2`}>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-2 group`}>
       <div className={`max-w-[75%] ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
         <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words
           ${isUser
@@ -35,6 +61,19 @@ function Bubble({ msg }: { msg: Message }) {
             <span className="text-[10px] text-gray-700">
               {msg.graphs_used.map(g => g.replace('_graph', '')).join(', ')}
             </span>
+          )}
+          {!isUser && (
+            <button
+              onClick={flagDown}
+              disabled={flagged !== 'idle'}
+              title={flagged === 'done' ? 'Flagged for review' : 'Flag for review'}
+              className={`text-[13px] transition-opacity leading-none
+                ${flagged === 'done' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
+                ${flagged === 'idle' ? 'hover:scale-110' : ''}
+                disabled:cursor-default`}
+            >
+              {flagged === 'done' ? '👎' : '👎'}
+            </button>
           )}
         </div>
       </div>
@@ -98,6 +137,7 @@ export default function ChatPage() {
         text: data.response ?? data.error ?? 'No response',
         elapsed_ms: data.elapsed_ms,
         graphs_used: data.graphs_used,
+        query: text.trim(),
         ts: new Date(),
       };
       setMessages(m => [...m, reply]);

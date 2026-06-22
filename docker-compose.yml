@@ -401,7 +401,9 @@ services:
       FINANCIALS_DIR: /financials
       OLLAMA_URL:     http://172.23.96.1:11434
       AGENT_MODEL:    ${AGENT_MODEL:-qwen2.5:14b}
-      GMAIL_INITIAL_DAYS: ${GMAIL_INITIAL_DAYS:-730}
+      GMAIL_INITIAL_DAYS:   ${GMAIL_INITIAL_DAYS:-730}
+      OUTLOOK_INITIAL_DAYS: ${OUTLOOK_INITIAL_DAYS:-730}
+      PYTHONUNBUFFERED: "1"
     volumes:
       - /mnt/c/Users/Glenn/Documents/FinancialsGW:/financials
     depends_on:

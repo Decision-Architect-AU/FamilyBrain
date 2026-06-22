@@ -592,7 +592,7 @@ def _store_note(subject: str, file_path: Path, pdf_text: str,
                                (source, body, tags, embedding, file_path,
                                 document_date, source_email_id)
                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                           ON CONFLICT (file_path) DO UPDATE
+                           ON CONFLICT (file_path) WHERE file_path IS NOT NULL DO UPDATE
                              SET body          = EXCLUDED.body,
                                  embedding     = EXCLUDED.embedding,
                                  document_date = COALESCE(EXCLUDED.document_date,
@@ -609,7 +609,7 @@ def _store_note(subject: str, file_path: Path, pdf_text: str,
                                (source, body, tags, file_path,
                                 document_date, source_email_id)
                            VALUES (%s, %s, %s, %s, %s, %s)
-                           ON CONFLICT (file_path) DO UPDATE
+                           ON CONFLICT (file_path) WHERE file_path IS NOT NULL DO UPDATE
                              SET body          = EXCLUDED.body,
                                  document_date = COALESCE(EXCLUDED.document_date,
                                                           personal.note.document_date),

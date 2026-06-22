@@ -8,7 +8,7 @@ Run with:
 from datetime import datetime, timezone, date
 import sys
 
-CUTOFF_DATE = date(2026, 7, 2)   # delete events on/after this date (AEST July 2)
+CUTOFF_DATE = date(2026, 7, 1)   # delete events on/after this date (AEST July 1)
 
 from src.db import get_enabled_accounts, conn
 from src.gmail import _gmail_service

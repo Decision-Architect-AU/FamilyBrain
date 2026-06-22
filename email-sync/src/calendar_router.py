@@ -29,13 +29,14 @@ _CHILD2_NAMES = _names_from_env("CHILD2_NAMES")   # e.g. younger child
 # ── Keywords ──────────────────────────────────────────────────────────────────
 
 _CHILD1_KW = _CHILD1_NAMES + [
-    "speech therapy", "speech pathology",
-    "ndis", "support worker", "support session",
-    "paed", "paediatrician", "occupational therapy", "ot ", " ot",
-    "therapy session", "child health", "disability",
+    "paed", "paediatrician", "therapy session", "child health",
 ]
 
 _CHILD2_KW = _CHILD2_NAMES + [
+    "ndis", "support worker", "support session", "disability",
+    "occupational therapy", "ot ", " ot", "weekly ot",
+    "physio", "physiotherapy",
+    "speech therapy", "speech pathology",
     "music ensemble", "kindy", "daycare", "day care", "childcare",
     "swim", "dance", "gymnastics",
 ]
@@ -72,6 +73,8 @@ _FAMILY_KW = _CHILD1_NAMES + _CHILD2_NAMES + [
     "speech therapy", "occupational therapy", "ot ", " ot ",
     "ndis", "support worker", "therapy session",
     "paed", "paediatrician", "child health",
+    "physio", "physiotherapy", "weekly ot",
+    "disability",
 ]
 
 

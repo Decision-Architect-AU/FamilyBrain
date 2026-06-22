@@ -179,6 +179,22 @@ def upsert_event(
     eff_date = _effective_date(starts_at)
     with conn() as c:
         with c.cursor() as cur:
+            # Secondary dedup: same calendar event mirrored across Gmail+Outlook
+            # produces different cal_key values but is the same real event.
+            # If title+starts_at already exists, return that row instead of inserting.
+            cur.execute(
+                """
+                SELECT id FROM personal.event
+                WHERE lower(title) = lower(%s) AND starts_at = %s
+                  AND calendar_event_id != %s
+                LIMIT 1
+                """,
+                (title, starts_at, calendar_event_id),
+            )
+            existing_dup = cur.fetchone()
+            if existing_dup:
+                return existing_dup["id"]
+
             cur.execute(
                 """
                 INSERT INTO personal.event
@@ -188,7 +204,7 @@ def upsert_event(
                     SET title          = EXCLUDED.title,
                         starts_at      = EXCLUDED.starts_at,
                         ends_at        = EXCLUDED.ends_at,
-                        notes          = EXCLUDED.notes,
+                        notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
                         effective_date = EXCLUDED.effective_date,
                         updated_at     = now()
                 RETURNING id, (xmax = 0) AS inserted

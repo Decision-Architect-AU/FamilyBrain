@@ -155,16 +155,23 @@ async def query(req: QueryRequest):
     # ── 5. Knowledge query ────────────────────────────────────────────────────
     intent = classify(message)
     graphs = intent.graphs
-    context = retrieve(message, graphs)
+    context_sections = retrieve(message, graphs)
 
     # Nothing found and user didn't name a specific graph — fan out silently
-    if not context and not intent.explicit_graph:
+    if not context_sections and not intent.explicit_graph:
         all_graphs = ["personal_graph", "property_graph", "decision_graph"]
         remaining  = [g for g in all_graphs if g not in graphs]
         if remaining:
-            context = retrieve(message, remaining)
-            if context:
-                graphs = all_graphs
+            extra = retrieve(message, remaining)
+            if extra:
+                context_sections.update(extra)
+                graphs = list(context_sections.keys())
+
+    _GRAPH_LABELS = {
+        "personal_graph":  "Personal records",
+        "property_graph":  "Property listings",
+        "decision_graph":  "Decision frameworks",
+    }
 
     now = time.time()
     history = [h for h in _history[sender] if now - h.get("ts", 0) <= CONTEXT_WINDOW_SEC]
@@ -176,12 +183,28 @@ async def query(req: QueryRequest):
         )
         history_text = f"\n\nConversation so far:\n{history_text}\n"
 
-    if context:
-        prompt = (
-            f"Knowledge base excerpts:\n{context}\n"
-            f"{history_text}"
-            f"\nUser: {message}\n\nAssistant:"
-        )
+    if context_sections:
+        if len(context_sections) == 1:
+            # Single source — no need for labelled sections
+            context_block = next(iter(context_sections.values()))
+            prompt = (
+                f"Knowledge base excerpts:\n{context_block}\n"
+                f"{history_text}"
+                f"\nUser: {message}\n\nAssistant:"
+            )
+        else:
+            # Multiple sources — label each and ask LLM to address them separately
+            labelled = "\n\n".join(
+                f"--- {_GRAPH_LABELS.get(g, g)} ---\n{text}"
+                for g, text in context_sections.items()
+            )
+            prompt = (
+                f"The following information comes from multiple knowledge sources. "
+                f"Address each source separately in your response, clearly labelling which source says what.\n\n"
+                f"{labelled}\n"
+                f"{history_text}"
+                f"\nUser: {message}\n\nAssistant:"
+            )
     else:
         prompt = (
             f"{history_text}"
@@ -195,12 +218,13 @@ async def query(req: QueryRequest):
 
     response = generate(prompt, system=system)
 
+    graphs_used = list(context_sections.keys()) if context_sections else graphs
     _history[sender].append({"role": "user",      "text": message, "ts": now})
-    _history[sender].append({"role": "assistant",  "text": response, "ts": time.time(), "graphs": graphs})
+    _history[sender].append({"role": "assistant",  "text": response, "ts": time.time(), "graphs": graphs_used})
 
     elapsed = int((time.time() - t0) * 1000)
-    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs} persona={intent.persona_name} ({elapsed}ms)")
-    return QueryResponse(response=response, graphs_used=graphs, elapsed_ms=elapsed)
+    print(f"[wa-agent] query {sender}: {message[:60]} → {graphs_used} persona={intent.persona_name} ({elapsed}ms)")
+    return QueryResponse(response=response, graphs_used=graphs_used, elapsed_ms=elapsed)
 
 
 @app.post("/ingest/text")

@@ -84,6 +84,16 @@ _VECTOR_SEARCH = {
             "extra_cols": "'contact' AS source_type, id, "
                           "COALESCE(phone, '') || ' ' || COALESCE(email, '') AS meta",
         },
+        "ownership_sql": """
+            SELECT 'ownership' AS source_type,
+                   op.id,
+                   oe.name || ': ' || op.address AS text,
+                   'entity=' || oe.folder_slug || ' type=' || COALESCE(op.ownership_type, '') AS meta,
+                   NULL::float AS dist
+            FROM personal.ownership_property op
+            JOIN personal.ownership_entity oe ON oe.id = op.entity_id
+            ORDER BY oe.name, op.address
+        """,
     },
     "property_graph": {
         "sql": """
@@ -393,13 +403,13 @@ def _rank_rows(rows: list[dict], query: str, graph: str, rules_cache: dict) -> l
     return sorted(rows, key=sort_key)
 
 
-def retrieve(query: str, graphs: list[str]) -> str:
-    """Return a formatted context string from all relevant graphs."""
+def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
+    """Return per-graph context sections as {graph_name: text}."""
     vec = embed(query)
     vec_param = _vec_param(vec)
     terms = _query_terms(query)
 
-    sections = []
+    sections: dict[str, str] = {}
     conn = _conn()
 
     try:
@@ -534,6 +544,25 @@ def retrieve(query: str, graphs: list[str]) -> str:
                         print(f"[search] Vector error on {graph}: {e}")
                         conn.rollback()
 
+                # Ownership: always inject when query mentions entity/property terms
+                ownership_sql = cfg.get("ownership_sql")
+                if ownership_sql:
+                    _entity_kw = re.compile(
+                        r'\b(trust\s*\d|inv\s*no\s*\d|smsf|ndis|'
+                        r'which\s+(propert|address)|assign|own(ed|s)?\s+propert|'
+                        r'moranbah|rowlands|macarthur|kirwan|strathdale|doveton|'
+                        r'rockingham|currajong|canning\s*vale|sebastopol|ballarat)\b',
+                        re.I
+                    )
+                    if _entity_kw.search(query):
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute(ownership_sql)
+                                _add_rows([dict(r) for r in cur.fetchall()])
+                        except Exception as e:
+                            print(f"[search] Ownership query error: {e}")
+                            conn.rollback()
+
                 # 3. Supplementary SQL queries (events, schedule, medications, framework)
                 for extra_key in ("event_sql", "schedule_sql", "medication_sql", "framework_sql"):
                     extra_sql = cfg.get(extra_key)
@@ -568,9 +597,9 @@ def retrieve(query: str, graphs: list[str]) -> str:
                             section_lines.append(f"  • {text}{suffix}")
 
             if has_content:
-                sections.append("\n".join(section_lines))
+                sections[graph] = "\n".join(section_lines)
 
     finally:
         conn.close()
 
-    return "\n\n".join(sections) if sections else ""
+    return sections

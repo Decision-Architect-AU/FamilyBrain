@@ -31,8 +31,9 @@ OUTLOOK_SCOPES = [
 ]
 
 _h2t = html2text.HTML2Text()
-_h2t.ignore_links = True
+_h2t.ignore_links = False   # preserve hrefs so financial_processor can harvest PDF links
 _h2t.ignore_images = True
+_h2t.protect_links = True
 _h2t.body_width = 0
 
 
@@ -188,17 +189,22 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
                 subject = msg.get("subject", "(no subject)")
 
-                # Only sync Focused inbox — skip Other, except financial/property domains
+                # Only sync Focused inbox — skip Other unless domain is in financial_domain DB table
                 if msg.get("inferenceClassification") == "other":
                     domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
-                    _FINANCIAL_DOMAINS = {
-                        "propertyme.com", "console.com.au", "myrealestatediary.com",
-                        "propertyware.com", "energyaustralia.com.au", "ergon.com.au",
-                        "originenergy.com.au", "agl.com.au", "origin.com.au",
-                        "ato.gov.au", "qro.qld.gov.au", "ndia.gov.au", "ndis.gov.au",
-                        "strataunit.com.au", "bodycopcorp.com.au",
-                    }
-                    if domain not in _FINANCIAL_DOMAINS:
+                    try:
+                        import psycopg2
+                        _db_url = os.environ.get("DATABASE_URL")
+                        with psycopg2.connect(_db_url) as _conn:
+                            with _conn.cursor() as _cur:
+                                _cur.execute(
+                                    "SELECT 1 FROM personal.financial_domain WHERE %s ILIKE '%%' || domain || '%%' LIMIT 1",
+                                    (domain,)
+                                )
+                                _in_whitelist = _cur.fetchone() is not None
+                    except Exception:
+                        _in_whitelist = False
+                    if not _in_whitelist:
                         skipped += 1
                         db.mark_skipped(account_id, msg_id, from_addr, subject,
                                         msg.get("receivedDateTime"), "outlook:other")

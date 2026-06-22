@@ -94,8 +94,8 @@ def _persona_list_text(personas: list[dict]) -> str:
 _CLASSIFY_PROMPT = """You are classifying a message for a personal AI assistant.
 
 Graphs:
-  - personal: family, finances, NDIS, trusts, companies, household notes, reminders
-  - property: property listings, suburb research, deal analysis, new acquisitions
+  - personal: family, finances, NDIS, trusts, companies, household notes, reminders, owned properties (which properties belong to which trust/entity)
+  - property: property listings for sale, suburb research, deal analysis, cashflow/growth deals, new acquisitions to consider buying
   - decision: frameworks (Agile, Six Sigma, ADKAR), thought leadership, LinkedIn content
 
 Output personas (structured response formats):

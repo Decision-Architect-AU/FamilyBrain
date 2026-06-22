@@ -38,8 +38,9 @@ GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_TOKEN_URI     = "https://oauth2.googleapis.com/token"
 
 _h2t = html2text.HTML2Text()
-_h2t.ignore_links = True
+_h2t.ignore_links = False   # preserve hrefs so financial_processor can harvest PDF links
 _h2t.ignore_images = True
+_h2t.protect_links = True   # keep URLs inline in markdown format
 _h2t.body_width = 0
 
 
@@ -543,14 +544,14 @@ def _find_event_in_calendar(svc, cal_id: str, summary: str, starts_at) -> str | 
     Returns the event ID if found, else None.
     Prevents duplicate inserts when target_cal_provider_id isn't yet tracked.
     """
-    from datetime import date as date_type, timedelta
+    from datetime import date as date_type, datetime as datetime_type, timedelta
     try:
-        if isinstance(starts_at, date_type):
-            time_min = f"{starts_at}T00:00:00Z"
-            time_max = f"{starts_at + timedelta(days=1)}T00:00:00Z"
-        else:
+        if isinstance(starts_at, datetime_type):
             time_min = (starts_at - timedelta(hours=1)).isoformat()
             time_max = (starts_at + timedelta(hours=1)).isoformat()
+        else:
+            time_min = f"{starts_at}T00:00:00Z"
+            time_max = f"{starts_at + timedelta(days=1)}T00:00:00Z"
 
         results = svc.events().list(
             calendarId=cal_id,

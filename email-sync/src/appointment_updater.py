@@ -37,6 +37,27 @@ DB_URL   = os.environ["DATABASE_URL"]
 _BATCH   = 50
 
 
+def _load_people() -> dict[int, str]:
+    """Return {person_id: first_name} for all persons."""
+    with psycopg2.connect(DB_URL) as c:
+        with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, name FROM personal.person")
+            return {r["id"]: r["name"].split()[0] for r in cur.fetchall()}
+
+
+def _enrich_title(title: str, person_name: str | None, notes: str) -> str:
+    """
+    Prefix title with person name when the event belongs to a specific person.
+    e.g. "Physio" + Olivia → "Olivia Physio"
+         "Speech Therapy" + Olivia → "Olivia Speech Therapy"
+    """
+    if not person_name:
+        return title
+    if title.lower().startswith(person_name.lower()):
+        return title   # already prefixed
+    return f"{person_name} {title}"
+
+
 # ── Google Calendar helpers ───────────────────────────────────────────────────
 
 def _cal_service(gmail_account: dict):
@@ -150,14 +171,15 @@ def run_appointment_updater(accounts: list[dict]) -> int:
     if not ac:
         return 0
 
-    now = datetime.now(timezone.utc)
+    now     = datetime.now(timezone.utc)
+    people  = _load_people()
 
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as rconn:
         with rconn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, title, event_type, starts_at, ends_at, effective_date,
-                       calendar_source, notes,
+                       calendar_source, notes, person_id,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
                        updated_at
                 FROM personal.event
@@ -181,9 +203,10 @@ def run_appointment_updater(accounts: list[dict]) -> int:
     processed = 0
 
     for ev in events:
-        ev_id  = ev["id"]
-        title  = ev["title"] or ""
-        notes  = ev["notes"] or ""
+        ev_id       = ev["id"]
+        notes       = ev["notes"] or ""
+        person_name = people.get(ev.get("person_id"))
+        title       = _enrich_title(ev["title"] or "", person_name, notes)
 
         try:
             route    = classify_event(title, notes)
