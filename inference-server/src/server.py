@@ -23,7 +23,7 @@ import tempfile, os
 _generate_lock = threading.Lock()
 
 from src.model_registry import (
-    load_registry, list_models, get_generate_pipeline, embed_text, get_whisper_pipeline
+    load_registry, list_models, get_generate_pipeline, embed_text, rerank_pairs, get_whisper_pipeline
 )
 
 app = FastAPI(title="OpenClaw Inference Server")
@@ -163,6 +163,22 @@ def embeddings(req: EmbedRequest):
     try:
         vec = embed_text(req.model, req.prompt)
         return {"embedding": vec}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── Rerank ────────────────────────────────────────────────────────────────────
+
+class RerankRequest(BaseModel):
+    model: str = "ms-marco-reranker"
+    query: str
+    passages: list[str]
+
+@app.post("/api/rerank")
+def rerank(req: RerankRequest):
+    try:
+        scores = rerank_pairs(req.model, req.query, req.passages)
+        return {"scores": scores}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

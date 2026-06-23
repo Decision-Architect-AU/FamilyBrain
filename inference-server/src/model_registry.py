@@ -11,6 +11,8 @@ REGISTRY_PATH = Path(__file__).parent.parent / "models.yaml"
 _generate_pipelines: dict = {}
 _embed_models: dict = {}
 _embed_tokenizers: dict = {}
+_rerank_models: dict = {}
+_rerank_tokenizers: dict = {}
 _whisper_pipelines: dict = {}
 _config: dict = {}
 
@@ -43,11 +45,33 @@ def load_registry():
             elif model_type == "embedding":
                 print(f"[registry] Loading embedding {name} on {device}...")
                 core = ov.Core()
-                model = core.compile_model(f"{path}/openvino_model.xml", device, gpu_props)
+                ov_model = core.read_model(f"{path}/openvino_model.xml")
+                if device == "NPU":
+                    # NPU requires fully static shapes — no dynamic dimensions
+                    max_len = cfg.get("max_length", 512)
+                    static_shapes = {inp.any_name: [1, max_len] for inp in ov_model.inputs}
+                    ov_model.reshape(static_shapes)
+                    print(f"[registry]   Reshaped to static [1, {max_len}] for NPU")
+                compiled = core.compile_model(ov_model, device)
                 tokenizer = AutoTokenizer.from_pretrained(path)
-                _embed_models[name] = model
+                _embed_models[name] = compiled
                 _embed_tokenizers[name] = tokenizer
                 print(f"[registry] ✓ {name} embedding ready")
+
+            elif model_type == "rerank":
+                print(f"[registry] Loading reranker {name} on {device}...")
+                core = ov.Core()
+                ov_model = core.read_model(f"{path}/openvino_model.xml")
+                if device == "NPU":
+                    max_len = cfg.get("max_length", 512)
+                    static_shapes = {inp.any_name: [1, max_len] for inp in ov_model.inputs}
+                    ov_model.reshape(static_shapes)
+                    print(f"[registry]   Reshaped to static [1, {max_len}] for NPU")
+                compiled = core.compile_model(ov_model, device)
+                tokenizer = AutoTokenizer.from_pretrained(path)
+                _rerank_models[name] = compiled
+                _rerank_tokenizers[name] = tokenizer
+                print(f"[registry] ✓ {name} reranker ready")
 
             elif model_type == "whisper":
                 print(f"[registry] Loading whisper {name} on {device}...")
@@ -98,6 +122,10 @@ def list_models() -> list[dict]:
         cfg = _config["models"].get(name, {})
         models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
                         "size": 0, "digest": name, "details": {"family": "openvino-embed", "device": cfg.get("device")}})
+    for name in _rerank_models:
+        cfg = _config["models"].get(name, {})
+        models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
+                        "size": 0, "digest": name, "details": {"family": "openvino-rerank", "device": cfg.get("device")}})
     for name in _whisper_pipelines:
         cfg = _config["models"].get(name, {})
         models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
@@ -105,11 +133,44 @@ def list_models() -> list[dict]:
     return models
 
 
+def rerank_pairs(model_name: str, query: str, passages: list[str]) -> list[float]:
+    """Score each (query, passage) pair. Returns a relevance score per passage."""
+    if model_name not in _rerank_models:
+        # Fall back to first available reranker
+        if not _rerank_models:
+            raise ValueError("No rerank model loaded")
+        model_name = next(iter(_rerank_models))
+    model = _rerank_models[model_name]
+    tokenizer = _rerank_tokenizers[model_name]
+    cfg = _config.get("models", {}).get(model_name, {})
+    max_len = cfg.get("max_length", 512)
+    padding = "max_length" if cfg.get("device") == "NPU" else True
+
+    scores = []
+    for passage in passages:
+        inputs = tokenizer(
+            query, passage,
+            return_tensors="np",
+            padding=padding,
+            truncation=True,
+            max_length=max_len,
+        )
+        result = model(dict(inputs))
+        # ms-marco models output logits shape [1, 1] — raw relevance score
+        logit = float(list(result.values())[0].flat[0])
+        scores.append(logit)
+    return scores
+
+
 def embed_text(model_name: str, text: str) -> list[float]:
     model, tokenizer = get_embed_model(model_name)
     if model is None:
         raise ValueError(f"No embedding model available for {model_name}")
-    inputs = tokenizer(text, return_tensors="np", padding=True, truncation=True, max_length=512)
+    cfg = _config.get("models", {}).get(model_name, {})
+    max_len = cfg.get("max_length", 512)
+    # NPU uses static shapes — must pad to exactly max_len
+    padding = "max_length" if cfg.get("device") == "NPU" else True
+    inputs = tokenizer(text, return_tensors="np", padding=padding, truncation=True, max_length=max_len)
     result = model(dict(inputs))
     vec = list(result.values())[0][0].mean(axis=0)
     # Normalize

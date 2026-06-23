@@ -116,7 +116,7 @@ def _load_entities() -> list[dict]:
 def _load_property_patterns() -> list[dict]:
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT address_pattern, entity_slug FROM personal.ownership_property")
+            cur.execute("SELECT address_pattern, entity_slug, subfolder FROM personal.ownership_property")
             return list(cur.fetchall())
 
 
@@ -161,6 +161,25 @@ def _load_graph_patterns(entities: list[dict]) -> list[dict]:
     return patterns
 
 
+# ── Entity / subfolder helpers ────────────────────────────────────────────────
+
+def _get_subfolder(entity_slug: str, text: str, prop_patterns: list[dict],
+                   entities: list[dict]) -> str | None:
+    """
+    Return the per-property subfolder for this document, or None.
+    Checks property address patterns first, then entity-level person subfolder.
+    """
+    text_lower = text.lower()
+    for pp in prop_patterns:
+        if pp["address_pattern"].lower() in text_lower and pp["entity_slug"] == entity_slug:
+            return pp.get("subfolder")
+    # Fall back to entity-level subfolder (e.g. Glenn for Personal, Olivia for NDIS)
+    for ent in entities:
+        if ent["folder_slug"] == entity_slug:
+            return ent.get("subfolder")
+    return None
+
+
 # ── Entity classification ─────────────────────────────────────────────────────
 
 def _classify_entity(subject: str, body: str, from_addr: str,
@@ -174,6 +193,11 @@ def _classify_entity(subject: str, body: str, from_addr: str,
     4. LLM fallback
     """
     text = f"{subject} {from_addr} {body[:3000]}".lower()
+
+    # 0. Sender-specific overrides — take priority over all keyword/LLM matching
+    # Shannon's own payslips are her personal employment records, not NDIS service docs
+    if "shannon" in from_addr.lower() and "payslip" in subject.lower():
+        return "Personal"
 
     # 1. Explicit address patterns (ownership_property table)
     for pp in prop_patterns:
@@ -248,10 +272,12 @@ def _hash_exists_on_disk(h: str) -> bool:
     return _find_on_disk(h) is not None
 
 
-def _save_file(data: bytes, fy: str, entity_slug: str, filename: str) -> tuple[Path, bool]:
+def _save_file(data: bytes, fy: str, entity_slug: str, filename: str,
+               subfolder: str | None = None) -> tuple[Path, bool]:
     """
     Save file.  Returns (path, is_new).
     is_new=False when an identical file already existed (dedup) — path points to existing file.
+    Path: FINANCIALS_ROOT / fy / entity_slug / subfolder / filename (subfolder optional).
     """
     h = _file_hash(data)
     existing = None if h not in _seen_hashes else _find_on_disk(h)
@@ -263,7 +289,7 @@ def _save_file(data: bytes, fy: str, entity_slug: str, filename: str) -> tuple[P
         return existing, False
 
     _seen_hashes.add(h)
-    dest_dir = FINANCIALS_ROOT / fy / entity_slug
+    dest_dir = FINANCIALS_ROOT / fy / entity_slug / subfolder if subfolder else FINANCIALS_ROOT / fy / entity_slug
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / filename
     if dest.exists():
@@ -476,7 +502,7 @@ def _gmail_attachments(account: dict, msg_id: str) -> tuple[list[tuple[str, byte
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                          "application/msword", "application/vnd.ms-excel")
                 or Path(fname).suffix.lower() in _DOC_EXTENSIONS
-            ):
+            ) and not re.search(r'SEQ_Listings', fname, re.I):
                 att_id = body_obj.get("attachmentId")
                 if att_id:
                     att  = svc.users().messages().attachments().get(
@@ -526,6 +552,8 @@ def _outlook_attachments(account: dict, msg_id: str) -> tuple[list[tuple[str, by
             continue
         name    = att.get("name", "attachment.bin")
         content = att.get("contentBytes", "")
+        if re.search(r'SEQ_Listings', name, re.I):
+            continue  # skip property deal spreadsheets
         if content and (Path(name).suffix.lower() in _DOC_EXTENSIONS or
                         att.get("contentType") in (
                             "application/pdf",
@@ -835,6 +863,7 @@ def process_financial_emails(accounts: list[dict]) -> int:
         ]))
 
         entity_slug = _classify_entity(subject, classify_body, from_addr, entities, prop_patterns, graph_patterns)
+        subfolder   = _get_subfolder(entity_slug, classify_body, prop_patterns, entities)
 
         # Auto-learn: record this sender's domain for future runs
         _learn_domain(from_addr, entity_slug)
@@ -856,6 +885,7 @@ def process_financial_emails(accounts: list[dict]) -> int:
                 if combined:
                     entity_slug = _classify_entity(subject, combined, from_addr, entities, prop_patterns, graph_patterns)
                 if entity_slug != "Personal":
+                    subfolder = _get_subfolder(entity_slug, combined, prop_patterns, entities)
                     break
 
         # Queue for review once if still unresolved after all attempts
@@ -871,9 +901,10 @@ def process_financial_emails(accounts: list[dict]) -> int:
             ext  = Path(fname).suffix or ".pdf"
             dest_name = f"{date_str}_{safe}{ext}"
             try:
-                dest, is_new = _save_file(data, fy, entity_slug, dest_name)
+                dest, is_new = _save_file(data, fy, entity_slug, dest_name, subfolder=subfolder)
                 if is_new:
-                    print(f"[financials] saved [{entity_slug}] {dest.name}")
+                    loc = f"{entity_slug}/{subfolder}" if subfolder else entity_slug
+                    print(f"[financials] saved [{loc}] {dest.name}")
                     saved += 1
                 # Always record note+graph (even for deduped files — absorbs new OCR data)
                 note_id = _store_note(subject, dest, pdf_txt,

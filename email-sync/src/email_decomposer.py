@@ -198,7 +198,9 @@ def decompose_emails(accounts: list[dict]) -> int:
                 WHERE  em.email_decomposed = false
                   AND  em.ingest_status = 'ingested'
                   AND  em.category NOT IN ('junk', 'marketing', 'newsletter', 'notification')
-                ORDER  BY em.received_at DESC
+                ORDER  BY
+                  CASE WHEN em.category IN ('finance', 'health', 'medical', 'ndis', 'insurance', 'legal') THEN 0 ELSE 1 END,
+                  em.received_at DESC
                 LIMIT  %s
                 """,
                 (_BATCH,),

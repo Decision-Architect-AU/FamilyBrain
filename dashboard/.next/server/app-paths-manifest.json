@@ -1,11 +1,13 @@
 {
   "/page": "app/page.js",
-  "/api/review/route": "app/api/review/route.js",
-  "/api/setup-check/route": "app/api/setup-check/route.js",
   "/api/status/route": "app/api/status/route.js",
   "/api/agents/route": "app/api/agents/route.js",
-  "/api/audit/route": "app/api/audit/route.js",
-  "/chat/page": "app/chat/page.js",
   "/api/graph-stats/route": "app/api/graph-stats/route.js",
-  "/review/page": "app/review/page.js"
+  "/review/page": "app/review/page.js",
+  "/api/audit/route": "app/api/audit/route.js",
+  "/api/setup-check/route": "app/api/setup-check/route.js",
+  "/api/review/route": "app/api/review/route.js",
+  "/senders/page": "app/senders/page.js",
+  "/chat/page": "app/chat/page.js",
+  "/api/senders/route": "app/api/senders/route.js"
 }

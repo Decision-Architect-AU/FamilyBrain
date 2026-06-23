@@ -158,6 +158,47 @@ def _effective_date(starts_at):
     return starts_at.date()
 
 
+def _enrich_event_title(title: str) -> str:
+    """
+    Prefix title with child name based on:
+    - Therapy keywords → Child2 (Olivia)
+    - 'Year N' mention → whichever child is in that school year (from personal.person)
+    """
+    import os, re as _re
+    tl = title.lower().strip()
+
+    # Child2 therapy keywords
+    child2_names = [n.strip() for n in os.environ.get("CHILD2_NAMES", "").split(",") if n.strip()]
+    child2_first = child2_names[0] if child2_names else ""
+    _therapy_kw = _re.compile(
+        r'^(physio|physiotherapy|speech\s+therapy|speech\s+pathology|'
+        r'occupational\s+therapy|weekly\s+ot|speech\s+therapy\s+extra\s+session)$', _re.I
+    )
+    if child2_first and _therapy_kw.match(tl) and not tl.startswith(child2_first.lower()):
+        return f"{child2_first} {title}"
+
+    # School year derivation — look up personal.person
+    m = _re.search(r'\b(?:year|yr)\s*(\d+)\b', title, _re.I)
+    if m:
+        try:
+            import psycopg2, psycopg2.extras
+            with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM personal.person WHERE school_year = %s LIMIT 1",
+                        (int(m.group(1)),),
+                    )
+                    row = cur.fetchone()
+            if row:
+                first = row["name"].split()[0]
+                if not tl.startswith(first.lower()):
+                    return f"{first} {title}"
+        except Exception:
+            pass
+
+    return title
+
+
 def upsert_event(
     title: str,
     starts_at: datetime,
@@ -173,19 +214,21 @@ def upsert_event(
 ) -> int:
     """
     Upsert into personal.event, return event id.
-    Materialises next_update_at via channel_resolver on insert.
+    Enriches title (person prefix) and deduplicates before storing.
     If ingestor_url provided, also writes (:Event) node to personal_graph.
     """
+    title    = _enrich_event_title(title)
     eff_date = _effective_date(starts_at)
     with conn() as c:
         with c.cursor() as cur:
-            # Secondary dedup: same calendar event mirrored across Gmail+Outlook
-            # produces different cal_key values but is the same real event.
-            # If title+starts_at already exists, return that row instead of inserting.
+            # Dedup: same event from multiple sources (Gmail+Outlook mirror, recurring sync)
+            # Compare in AEST to handle Outlook events stored as UTC (e.g. 22:00 UTC = 08:00 AEST next day)
             cur.execute(
                 """
                 SELECT id FROM personal.event
-                WHERE lower(title) = lower(%s) AND starts_at = %s
+                WHERE lower(title) = lower(%s)
+                  AND (starts_at AT TIME ZONE 'Australia/Brisbane')::date
+                    = (%s::timestamptz AT TIME ZONE 'Australia/Brisbane')::date
                   AND calendar_event_id != %s
                 LIMIT 1
                 """,

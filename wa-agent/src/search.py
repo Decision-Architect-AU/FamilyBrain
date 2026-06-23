@@ -20,6 +20,9 @@ from src.llm import embed, generate
 DB_URL          = os.environ.get("DATABASE_URL")
 TOP_K           = int(os.environ.get("WA_SEARCH_TOP_K", "5"))
 RULES_CACHE_TTL = int(os.environ.get("RULES_CACHE_TTL", "300"))  # seconds
+RERANK_ENABLED  = os.environ.get("RERANK_ENABLED", "true").lower() == "true"
+RERANK_MODEL    = os.environ.get("RERANK_MODEL", "ms-marco-reranker")
+_RERANK_FETCH   = 20  # candidates fetched before reranking
 
 # Stop-words excluded from entity name matching
 _STOP = {
@@ -134,6 +137,29 @@ _VECTOR_SEARCH = {
         """,
     },
 }
+
+
+def _rerank(query: str, rows: list[dict]) -> list[dict]:
+    """Re-score rows using the cross-encoder reranker, return sorted by score desc."""
+    if not rows or not RERANK_ENABLED:
+        return rows
+    passages = [(r.get("text") or "").strip()[:500] for r in rows]
+    try:
+        import requests as _req
+        ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+        resp = _req.post(
+            f"{ollama_url}/api/rerank",
+            json={"model": RERANK_MODEL, "query": query, "passages": passages},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        scores = resp.json()["scores"]
+        for row, score in zip(rows, scores):
+            row["_rerank_score"] = score
+        rows.sort(key=lambda r: r.get("_rerank_score", 0.0), reverse=True)
+    except Exception as e:
+        print(f"[search] Reranker unavailable, using vector order: {e}")
+    return rows
 
 
 def _conn():
@@ -508,6 +534,9 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                             seen_ids.add(rid)
                             rows.append(r)
 
+                # Fetch more candidates when reranker is enabled
+                fetch_k = _RERANK_FETCH if RERANK_ENABLED else TOP_K
+
                 # 1. FTS (tsvector/tsquery + trigram fallback) — preferred
                 fts_cfg = cfg.get("fts_cfg")
                 if fts_cfg:
@@ -518,7 +547,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         text_col=fts_cfg["text_col"],
                         extra_cols=fts_cfg["extra_cols"],
                         query=query,
-                        limit=TOP_K,
+                        limit=fetch_k,
                     ))
 
                 # Contact FTS (personal_graph only)
@@ -531,14 +560,14 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         text_col=contact_fts["text_col"],
                         extra_cols=contact_fts["extra_cols"],
                         query=query,
-                        limit=TOP_K,
+                        limit=fetch_k,
                     ))
 
                 # 2. Vector search
                 if cfg.get("sql"):
                     try:
                         with conn.cursor() as cur:
-                            cur.execute(cfg["sql"], (vec_param, TOP_K))
+                            cur.execute(cfg["sql"], (vec_param, fetch_k))
                             _add_rows([dict(r) for r in cur.fetchall()])
                     except Exception as e:
                         print(f"[search] Vector error on {graph}: {e}")
@@ -581,9 +610,10 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
 
                 if rows:
                     rows = _rank_rows(rows, query, graph, rules_cache)
+                    rows = _rerank(query, rows)
                     has_content = True
                     section_lines.append("Documents:")
-                    for row in rows[:TOP_K * 2]:
+                    for row in rows[:TOP_K]:
                         text  = (row.get("text") or "").strip()[:300]
                         meta  = (row.get("meta") or "").strip()[:100]
                         score = row.get("match_score")

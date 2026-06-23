@@ -8,26 +8,33 @@ models:
   nomic-embed-text:
     path: C:\Users\Glenn\embed-ov
     type: embedding
-    device: GPU          # NPU SDPA not supported yet — use GPU
-    dim: 384
+    device: NPU
+    dim: 768
 
   # Fast extraction / classification — GPU
   qwen2.5:3b:
     path: C:\Users\Glenn\qwen2.5-3b-ov
     type: generate
-    device: GPU
+    device: HETERO:GPU,NPU,CPU
 
   # Primary extraction — GPU (convert qwen2.5:14b INT4 when ready)
   qwen2.5:14b:
     path: C:\Users\Glenn\qwen2.5-14b-ov
     type: generate
-    device: GPU
+    device: HETERO:GPU,CPU
 
   # Reasoning — CPU/RAM
   qwen2.5:32b:
     path: C:\Users\Glenn\qwen2.5-32b-ov
     type: generate
-    device: CPU
+    device: GPU,CPU
+
+  # Cross-encoder reranker — NPU
+  ms-marco-reranker:
+    path: C:\Users\Glenn\reranker-ov
+    type: rerank
+    device: NPU
+    max_length: 512
 
   # Voice transcription — CPU (NPU SDPA not supported)
   whisper-small:

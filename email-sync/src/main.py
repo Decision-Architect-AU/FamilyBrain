@@ -5,6 +5,10 @@ Runs two sync passes on a schedule:
   - Email:    every EMAIL_POLL_INTERVAL_SECS (default 300 = 5 min)
   - Calendar: every CALENDAR_POLL_INTERVAL_SECS (default 900 = 15 min)
 
+Architecture: calendar/email → graph (enriched + deduped) → appointment_updater → GCal.
+GCal is the write output. Calendar sources (Gmail, Outlook) feed the graph as inputs,
+not mirrors. Enrichment (person names, locations) and dedup happen before GCal write.
+
 All account configs come from personal.email_account (DB).
 No hardcoded accounts — add rows to personal.email_account to connect inboxes.
 """
@@ -76,27 +80,9 @@ def run_email_sync() -> None:
 
 
 def run_calendar_sync() -> None:
-    accounts = get_enabled_accounts()
-    gmail_accounts   = [a for a in accounts if a["provider"] == "gmail"   and a.get("sync_calendar")]
-    outlook_accounts = [a for a in accounts if a["provider"] == "outlook" and a.get("sync_calendar")]
-
-    total = 0
-
-    # Sync Gmail → personal.event, mirror to Outlook
-    for acct in gmail_accounts:
-        print(f"[email-sync] Gmail calendar: {acct['email_address']}")
-        n = gmail_mod.sync_calendar(acct, mirror_accounts=outlook_accounts, ingestor_url=INGESTOR_URL)
-        print(f"[email-sync]   → {n} events synced")
-        total += n
-
-    # Sync Outlook → personal.event, mirror to Gmail
-    for acct in outlook_accounts:
-        print(f"[email-sync] Outlook calendar: {acct['email_address']}")
-        n = outlook_mod.sync_calendar(acct, mirror_accounts=gmail_accounts, ingestor_url=INGESTOR_URL)
-        print(f"[email-sync]   → {n} events synced")
-        total += n
-
-    print(f"[email-sync] Calendar pass complete — {total} total events synced")
+    # Calendar pull sync disabled.
+    # Source of truth: email/decomposer → personal.event → appointment_updater → GCal.
+    pass
 
 
 def email_loop() -> None:

@@ -405,7 +405,7 @@ services:
       OUTLOOK_INITIAL_DAYS: ${OUTLOOK_INITIAL_DAYS:-730}
       PYTHONUNBUFFERED: "1"
     volumes:
-      - /mnt/c/Users/Glenn/Documents/FinancialsGW:/financials
+      - C:/Users/Glenn/Documents/FinancialsGW:/financials
     depends_on:
       postgres:
         condition: service_healthy

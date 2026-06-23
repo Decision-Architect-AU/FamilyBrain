@@ -28,6 +28,7 @@ from src import audit
 from src import graph as graph_writer
 from src.categorise import categorise_email, save_category, backfill_categories
 from src.config_index import record_ingest
+from src.triage import triage_email
 
 WATCH_DIR      = pathlib.Path(os.environ.get("INGEST_WATCH_DIR", "/data/ReadyToIngest"))
 PROCESSING_DIR = pathlib.Path(os.environ.get("INGEST_PROCESSING_DIR", "/data/Processing"))
@@ -197,6 +198,41 @@ def ingest_email(payload: dict) -> dict:
 
     if not body_text:
         return {"ok": False, "error": "Empty email body — skipping"}
+
+    # ── Triage: gate before full extraction ──────────────────────────────────
+    triage_action = triage_email(from_address, subject, body_text)
+    if triage_action in ("marketing", "skip"):
+        # Save a minimal record so we don't re-process, but skip full extraction
+        try:
+            import psycopg2
+            import psycopg2.extras
+            from src.ingest import DB_URL
+            with psycopg2.connect(DB_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO personal.email_message
+                            (account_id, provider_msg_id, thread_id,
+                             from_address, from_name, to_addresses, subject, received_at,
+                             schema_routed, ingest_status, ingest_at,
+                             category, category_confidence, categorised_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'skip', %s, now(),
+                                %s, 0.9, now())
+                        ON CONFLICT (account_id, provider_msg_id) DO NOTHING
+                        """,
+                        (
+                            account_id, provider_msg_id, payload.get("thread_id"),
+                            from_address, from_name, payload.get("to_addresses", []),
+                            subject, received_at,
+                            triage_action,          # ingest_status = 'marketing' or 'skip'
+                            triage_action,          # category
+                        ),
+                    )
+                conn.commit()
+        except Exception as te:
+            print(f"[ingestor] triage record failed for {provider_msg_id}: {te}")
+        print(f"[ingestor] triage:{triage_action} — {subject[:60]} from {from_address}")
+        return {"ok": True, "skipped": triage_action}
 
     # Build full text for classify + embed
     full_text = f"From: {from_name} <{from_address}>\nSubject: {subject}\n\n{body_text}"

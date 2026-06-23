@@ -21,6 +21,8 @@ next_update_at rules:
   - Bill event with no amount                        → tomorrow (retry enrichment)
 """
 import os
+import re
+import requests
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone, date, timedelta
@@ -33,8 +35,117 @@ from .calendar_router import (
     expand_holiday_days, load_routing, _TAG_COLORS,
 )
 
-DB_URL   = os.environ["DATABASE_URL"]
-_BATCH   = 50
+DB_URL      = os.environ["DATABASE_URL"]
+OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+_BATCH      = 50
+
+# Titles that are "thin" — worth trying to enrich via graph lookup
+_THIN_TITLE = re.compile(
+    r'\b(dr|doctor|dentist|specialist|appointment|appt|physio|'
+    r'physiotherapy|speech|ot|therapy|chiro|optometrist|checkup|check.up|'
+    r'consult|consultation|review|meeting|catch.?up)\b',
+    re.I,
+)
+
+
+def _graph_context_for_event(title: str, notes: str) -> str:
+    """
+    Search personal_graph notes for context relevant to this event.
+    Returns a text block of relevant snippets, or empty string.
+    """
+    query = f"{title} {notes}".strip()[:300]
+    try:
+        import psycopg2, psycopg2.extras
+
+        # Embed the query
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/embeddings",
+            json={"model": os.environ.get("EMBED_MODEL", "nomic-embed-text"), "prompt": query},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        vec = resp.json()["embedding"]
+        vec_str = "[" + ",".join(str(v) for v in vec) + "]"
+
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT body FROM personal.note
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT 5
+                    """,
+                    (vec_str,),
+                )
+                rows = cur.fetchall()
+        return "\n---\n".join(r["body"][:400] for r in rows if r["body"])
+    except Exception as e:
+        print(f"[appt] graph context lookup failed: {e}")
+        return ""
+
+
+def _llm_enrich(title: str, notes: str, context: str, starts_at) -> tuple[str, str]:
+    """
+    Use LLM to suggest an enriched title and description for a thin appointment.
+    Returns (enriched_title, enriched_description). Falls back to originals on error.
+    """
+    date_str = starts_at.strftime("%A %d %B %Y") if hasattr(starts_at, "strftime") else str(starts_at)
+    prompt = f"""You are enriching a calendar appointment using information from a personal knowledge graph.
+
+Appointment: "{title}"
+Date: {date_str}
+Current notes: {notes or "(none)"}
+
+Relevant context from knowledge graph:
+{context or "(none)"}
+
+Task: Write an enriched calendar title and description using the context above.
+- Title: specific and informative (include person name, practitioner name, clinic if known). Max 60 chars.
+- Description: 1-3 sentences with useful details (location, what to bring, purpose). Leave blank if nothing useful to add.
+- Only include information you are confident about from the context. Do not invent details.
+- If context has nothing relevant, keep the original title and leave description blank.
+
+Reply in this exact format:
+TITLE: <enriched title>
+DESCRIPTION: <description or blank>"""
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
+                  "options": {"temperature": 0.1, "num_predict": 150}},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "").strip()
+        new_title = title
+        new_desc  = notes
+        for line in text.splitlines():
+            if line.upper().startswith("TITLE:"):
+                t = line[6:].strip()
+                if t and len(t) <= 80:
+                    new_title = t
+            elif line.upper().startswith("DESCRIPTION:"):
+                new_desc = line[12:].strip()
+        return new_title, new_desc
+    except Exception as e:
+        print(f"[appt] LLM enrich failed: {e}")
+        return title, notes
+
+
+def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
+    """
+    If the title looks thin, attempt graph-backed LLM enrichment.
+    Returns (title, notes) — possibly unchanged.
+    """
+    if not _THIN_TITLE.search(title):
+        return title, notes
+    context = _graph_context_for_event(title, notes)
+    if not context:
+        return title, notes
+    return _llm_enrich(title, notes, context, starts_at)
 
 
 def _load_people() -> dict[int, str]:
@@ -45,17 +156,71 @@ def _load_people() -> dict[int, str]:
             return {r["id"]: r["name"].split()[0] for r in cur.fetchall()}
 
 
-def _enrich_title(title: str, person_name: str | None, notes: str) -> str:
+def _names_from_env(var: str) -> list[str]:
+    raw = os.environ.get(var, "")
+    return [n.strip() for n in raw.split(",") if n.strip()]
+
+# Keywords that belong to a specific child — used for title enrichment
+# even when person_id isn't set (e.g. after a fresh calendar resync)
+_CHILD2_FIRST = (_names_from_env("CHILD2_NAMES") or [""])[0]
+
+_CHILD2_TITLE_KW = [
+    "physio", "physiotherapy", "speech therapy", "speech pathology",
+    "occupational therapy", "weekly ot",
+]
+
+
+def _load_school_year_map() -> dict[int, str]:
+    """
+    Return {school_year: first_name} for all persons with a school_year set.
+    Used to derive child tags from year-level mentions in event titles.
+    e.g. {3: "Elliana", 1: "Olivia"}
+    """
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT name, school_year FROM personal.person WHERE school_year IS NOT NULL"
+                )
+                return {r["school_year"]: r["name"].split()[0] for r in cur.fetchall()}
+    except Exception:
+        return {}
+
+
+def _child_from_school_year(title: str, school_year_map: dict[int, str]) -> str | None:
+    """
+    If title contains 'Year N' or 'Yr N', return the child's first name for that year.
+    e.g. "Year 3 Assembly" + {3: "Elliana"} → "Elliana"
+    """
+    m = re.search(r'\b(?:year|yr)\s*(\d+)\b', title, re.I)
+    if m:
+        return school_year_map.get(int(m.group(1)))
+    return None
+
+
+def _enrich_title(title: str, person_name: str | None, notes: str,
+                  school_year_map: dict[int, str] | None = None) -> str:
     """
     Prefix title with person name when the event belongs to a specific person.
-    e.g. "Physio" + Olivia → "Olivia Physio"
-         "Speech Therapy" + Olivia → "Olivia Speech Therapy"
+    Priority: explicit person_id → school year derivation → therapy keyword fallback.
+    e.g. "Year 3 Assembly" → "Ellie Year 3 Assembly" (derived from school_year_map)
+         "Physio"          → "Olivia Physio"          (therapy keyword)
     """
-    if not person_name:
+    tl = title.lower()
+
+    name = person_name
+    if not name and school_year_map:
+        name = _child_from_school_year(title, school_year_map)
+    if not name:
+        child2 = _CHILD2_FIRST
+        if child2 and any(kw in tl for kw in _CHILD2_TITLE_KW):
+            name = child2
+
+    if not name:
         return title
-    if title.lower().startswith(person_name.lower()):
+    if tl.startswith(name.lower()):
         return title   # already prefixed
-    return f"{person_name} {title}"
+    return f"{name} {title}"
 
 
 # ── Google Calendar helpers ───────────────────────────────────────────────────
@@ -171,8 +336,9 @@ def run_appointment_updater(accounts: list[dict]) -> int:
     if not ac:
         return 0
 
-    now     = datetime.now(timezone.utc)
-    people  = _load_people()
+    now            = datetime.now(timezone.utc)
+    people         = _load_people()
+    school_yr_map  = _load_school_year_map()
 
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as rconn:
         with rconn.cursor() as cur:
@@ -206,7 +372,10 @@ def run_appointment_updater(accounts: list[dict]) -> int:
         ev_id       = ev["id"]
         notes       = ev["notes"] or ""
         person_name = people.get(ev.get("person_id"))
-        title       = _enrich_title(ev["title"] or "", person_name, notes)
+        title       = _enrich_title(ev["title"] or "", person_name, notes, school_yr_map)
+
+        # Graph-backed enrichment for thin/vague titles
+        title, notes = _try_enrich(title, notes, ev["starts_at"])
 
         try:
             route    = classify_event(title, notes)
@@ -258,10 +427,12 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                         SET gcal_event_id       = %s,
                             gcal_calendar_id    = %s,
                             calendar_written_at = now(),
-                            next_update_at      = %s
+                            next_update_at      = %s,
+                            title               = %s,
+                            notes               = %s
                         WHERE id = %s
                         """,
-                        (gcal_id, cal_id, nxt, ev_id),
+                        (gcal_id, cal_id, nxt, title, notes or ev["notes"], ev_id),
                     )
                 wconn.commit()
 
