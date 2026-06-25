@@ -23,7 +23,7 @@ def auth_gmail():
         "installed": {
             "client_id":     GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
+            "redirect_uris": ["http://localhost"],
             "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
             "token_uri":     "https://oauth2.googleapis.com/token",
         }
@@ -33,10 +33,14 @@ def auth_gmail():
         "https://www.googleapis.com/auth/calendar",       # full calendar read/write
     ]
     flow = InstalledAppFlow.from_client_config(client_config, scopes,
-                                               redirect_uri="urn:ietf:wg:oauth:2.0:oob")
+                                               redirect_uri="http://localhost")
     auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
     print(f"\nVisit this URL to authorise:\n{auth_url}\n")
-    code = input("Paste the authorisation code here: ").strip()
+    print("After approving, your browser will redirect to http://localhost/?code=XXXX")
+    print("Copy the full URL from your browser's address bar and paste it below.")
+    redirected = input("Paste the full redirect URL here: ").strip()
+    from urllib.parse import urlparse, parse_qs
+    code = parse_qs(urlparse(redirected).query).get("code", [redirected])[0]
     flow.fetch_token(code=code)
     creds = flow.credentials
     print("\n=== Gmail OAuth2 tokens ===")

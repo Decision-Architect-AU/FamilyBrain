@@ -174,23 +174,27 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 if db.is_already_ingested(account_id, msg_id):
                     continue
 
-                from_name, from_addr = _parse_address(msg.get("from", {}))
+                from_name, from_addr = _parse_address(msg.get("from") or {})
                 to_addrs = [
                     r["emailAddress"]["address"]
-                    for r in msg.get("toRecipients", [])
+                    for r in msg.get("toRecipients") or []
                     if r.get("emailAddress", {}).get("address")
                 ]
-                body_obj  = msg.get("body", {})
+                body_obj  = msg.get("body") or {}
                 body_text = (
                     _strip_html(body_obj.get("content", ""))
-                    if body_obj.get("contentType", "").lower() == "html"
+                    if (body_obj.get("contentType") or "").lower() == "html"
                     else body_obj.get("content", "")
                 )
 
-                subject = msg.get("subject", "(no subject)")
+                subject = msg.get("subject") or "(no subject)"
+
+                # Self-sent emails (e.g. scanner to self) always pass through
+                acct_addr = account.get("email_address", "").lower()
+                is_self_sent = from_addr.lower() == acct_addr
 
                 # Only sync Focused inbox — skip Other unless domain is in financial_domain DB table
-                if msg.get("inferenceClassification") == "other":
+                if not is_self_sent and msg.get("inferenceClassification") == "other":
                     domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
                     try:
                         import psycopg2

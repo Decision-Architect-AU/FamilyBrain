@@ -28,6 +28,11 @@ import psycopg2.extras
 from datetime import datetime, timezone, date, timedelta
 from googleapiclient.discovery import build
 
+_JOIN_LINK_RE = re.compile(
+    r'https?://\S*(?:teams\.microsoft\.com|zoom\.us/j|meet\.google\.com|webex\.com/meet|gotomeeting\.com|whereby\.com|bluejeans\.com)\S*',
+    re.IGNORECASE,
+)
+
 from .db import get_enabled_accounts, conn
 from .gmail import _gmail_service, _fmt_cal_dt
 from .calendar_router import (
@@ -39,6 +44,8 @@ DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
 _BATCH      = 50
+
+_PARTNER_NAMES = [n.strip().lower() for n in os.environ.get("PARTNER_NAMES", "").split(",") if n.strip()]
 
 # Titles that are "thin" — worth trying to enrich via graph lookup
 _THIN_TITLE = re.compile(
@@ -122,6 +129,8 @@ DESCRIPTION: <description or blank>"""
         text = resp.json().get("response", "").strip()
         new_title = title
         new_desc  = notes
+        # Preserve any meeting join links from the original notes
+        join_links = _JOIN_LINK_RE.findall(notes)
         for line in text.splitlines():
             if line.upper().startswith("TITLE:"):
                 t = line[6:].strip()
@@ -129,6 +138,9 @@ DESCRIPTION: <description or blank>"""
                     new_title = t
             elif line.upper().startswith("DESCRIPTION:"):
                 new_desc = line[12:].strip()
+        if join_links:
+            link_block = "\n".join(join_links)
+            new_desc = f"{new_desc}\n\n{link_block}".strip() if new_desc else link_block
         return new_title, new_desc
     except Exception as e:
         print(f"[appt] LLM enrich failed: {e}")
@@ -231,6 +243,48 @@ def _cal_service(gmail_account: dict):
     return build("calendar", "v3", credentials=creds)
 
 
+def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: list[dict]) -> None:
+    """
+    Patch the original Outlook calendar event with the enriched title + description.
+    Looks up the Outlook provider_id from calendar_sync_map, then calls PATCH via Graph API.
+    Silently skips if no Outlook source event found.
+    """
+    try:
+        from .outlook import _headers, GRAPH_BASE
+        import psycopg2, psycopg2.extras, os, requests as req
+        with psycopg2.connect(os.environ["DATABASE_URL"], cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """SELECT csm.source_provider_id, ea.id as account_id
+                       FROM personal.calendar_sync_map csm
+                       JOIN personal.email_account ea ON ea.id = csm.source_account_id
+                       WHERE csm.event_id = %s AND ea.provider = 'outlook'
+                       LIMIT 1""",
+                    (ev_id,),
+                )
+                row = c.cursor().fetchone() if False else cur.fetchone()
+        if not row:
+            return
+        acct = next((a for a in outlook_accounts if a["id"] == row["account_id"]), None)
+        if not acct:
+            return
+        provider_id = row["source_provider_id"]
+        body = {
+            "subject": title,
+            "body": {"contentType": "text", "content": notes or ""},
+        }
+        resp = req.patch(
+            f"{GRAPH_BASE}/me/events/{provider_id}",
+            headers={**_headers(acct), "Content-Type": "application/json"},
+            json=body,
+            timeout=15,
+        )
+        if not resp.ok:
+            print(f"[appt] outlook patch failed for event {ev_id}: {resp.status_code}")
+    except Exception as e:
+        print(f"[appt] outlook source patch error for event {ev_id}: {e}")
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
     """Insert event, return gcal event id."""
     from datetime import date as date_type
@@ -320,10 +374,27 @@ def run_appointment_updater(accounts: list[dict]) -> int:
     Push pending/changed/scheduled events to Google Calendar.
     Returns number of events processed.
     """
-    gmail_acct = next((a for a in accounts if a["provider"] == "gmail"), None)
+    gmail_acct = next(
+        (a for a in accounts if a["provider"] == "gmail" and a.get("is_primary_calendar")),
+        next((a for a in accounts if a["provider"] == "gmail"), None),  # fallback if flag not set
+    )
     if not gmail_acct:
         print("[appt] no Gmail account — skipping")
         return 0
+
+    # Partner calendar — when connected, Shannon-tagged events mirror here too
+    partner_acct = next(
+        (a for a in accounts if a["provider"] == "gmail" and a.get("is_partner_calendar")),
+        None,
+    )
+    partner_cal_svc = None
+    partner_routing = None
+    if partner_acct:
+        try:
+            partner_cal_svc = _cal_service(partner_acct)
+            partner_routing = load_routing(accounts).get(partner_acct["id"])
+        except Exception as e:
+            print(f"[appt] partner calendar service init failed: {e}")
 
     try:
         cal_svc = _cal_service(gmail_acct)
@@ -354,6 +425,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     OR updated_at > calendar_written_at
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
+                AND COALESCE(status, 'active') != 'cancelled'
                 AND calendar_source NOT LIKE 'gmail:%%'    -- skip events already in GCal source
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
@@ -435,6 +507,22 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                         (gcal_id, cal_id, nxt, title, notes or ev["notes"], ev_id),
                     )
                 wconn.commit()
+
+            # Write enriched title+notes back to the original Outlook event
+            if ev.get("calendar_source", "").startswith("outlook:"):
+                outlook_accounts = [a for a in accounts if a["provider"] == "outlook"]
+                _patch_outlook_source(ev_id, title, notes, outlook_accounts)
+
+            # Mirror partner-tagged events to Shannon's calendar
+            if partner_cal_svc and partner_routing and _PARTNER_NAMES:
+                title_lower = title.lower()
+                if any(n in title_lower for n in _PARTNER_NAMES):
+                    partner_cal_id = target_calendar_id(partner_routing, route)
+                    try:
+                        _write_gcal(partner_cal_svc, partner_cal_id, ev, color_id=color_id)
+                        print(f"[appt] mirrored '{title[:50]}' → partner cal")
+                    except Exception as pe:
+                        print(f"[appt] partner mirror failed for '{title[:40]}': {pe}")
 
             print(f"[appt] {'patch' if ev.get('gcal_event_id') else 'write'} "
                   f"'{title[:50]}' → {route} cal"

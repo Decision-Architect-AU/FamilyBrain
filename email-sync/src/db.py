@@ -250,15 +250,26 @@ def upsert_event(
                         notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
                         effective_date = EXCLUDED.effective_date,
                         updated_at     = now()
-                RETURNING id, (xmax = 0) AS inserted
+                RETURNING id, (xmax = 0) AS inserted,
+                          (personal.event.starts_at IS DISTINCT FROM EXCLUDED.starts_at) AS date_changed
                 """,
                 (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date),
             )
             row = cur.fetchone()
         c.commit()
 
-    event_id = row["id"]
-    is_new   = row["inserted"]
+    event_id     = row["id"]
+    is_new       = row["inserted"]
+    date_changed = row.get("date_changed", False)
+
+    # Cascade date change to relative child events
+    if date_changed and not is_new:
+        try:
+            n = cascade_relative_events(event_id)
+            if n:
+                print(f"[db] cascaded date change to {n} relative event(s) under event {event_id}")
+        except Exception as e:
+            print(f"[db] cascade failed for event {event_id}: {e}")
 
     # Materialise next_update_at for new events via channel rules
     if is_new:
@@ -296,6 +307,53 @@ def upsert_event(
             print(f"[db] ingest/event graph call failed for '{title}': {e}")
 
     return event_id
+
+
+def cascade_relative_events(parent_event_id: int) -> int:
+    """
+    When a parent event's date changes, recalculate all child events that are
+    relative to it (parent_event_id + relative_offset_days).
+    Returns number of children updated.
+    """
+    updated = 0
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT starts_at FROM personal.event WHERE id = %s",
+                (parent_event_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return 0
+            parent_start = row["starts_at"]
+
+            cur.execute(
+                """SELECT id, relative_offset_days FROM personal.event
+                   WHERE parent_event_id = %s AND relative_offset_days IS NOT NULL""",
+                (parent_event_id,),
+            )
+            children = cur.fetchall()
+
+        for child in children:
+            from datetime import timedelta, date as date_type
+            offset = child["relative_offset_days"]
+            if hasattr(parent_start, "date"):
+                new_start = parent_start.date() + timedelta(days=offset)
+            else:
+                new_start = parent_start + timedelta(days=offset)
+            with c.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.event
+                       SET starts_at = %s, ends_at = %s, updated_at = now()
+                       WHERE id = %s""",
+                    (new_start, new_start, child["id"]),
+                )
+            updated += 1
+            # Recurse for grandchildren
+            updated += cascade_relative_events(child["id"])
+
+        c.commit()
+    return updated
 
 
 def get_sync_map(source_account_id: int, source_provider_id: str) -> Optional[dict]:

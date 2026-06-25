@@ -23,8 +23,9 @@ def _names_from_env(var: str) -> list[str]:
     raw = os.environ.get(var, "")
     return [n.strip().lower() for n in raw.split(",") if n.strip()]
 
-_CHILD1_NAMES = _names_from_env("CHILD1_NAMES")   # e.g. NDIS/therapy child
-_CHILD2_NAMES = _names_from_env("CHILD2_NAMES")   # e.g. younger child
+_CHILD1_NAMES   = _names_from_env("CHILD1_NAMES")   # e.g. NDIS/therapy child
+_CHILD2_NAMES   = _names_from_env("CHILD2_NAMES")   # e.g. younger child
+_PARTNER_NAMES  = _names_from_env("PARTNER_NAMES")  # partner — their appts go to family cal
 
 # ── Keywords ──────────────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ _HOLIDAY_KW = [
     "long weekend", "vacation", "annual leave",
 ]
 
-_FAMILY_KW = _CHILD1_NAMES + _CHILD2_NAMES + [
+_FAMILY_KW = _CHILD1_NAMES + _CHILD2_NAMES + _PARTNER_NAMES + [
     "pickup", "drop off", "drop-off", "school pick",
     "kindy", "daycare", "day care", "childcare",
     "swimming", "dance", "sport", "footy", "soccer", "netball",

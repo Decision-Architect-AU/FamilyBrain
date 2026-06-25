@@ -292,6 +292,7 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
                    WHERE  source = 'financial_doc'
                      AND  bill_event_id IS NOT NULL
                      AND  bill_event_enriched IS NOT TRUE
+                     AND  COALESCE(document_date, created_at::date) >= (CURRENT_DATE - INTERVAL '2 months')
                    ORDER  BY COALESCE(document_date, created_at::date)"""
             )
             notes = list(cur.fetchall())

@@ -45,15 +45,22 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         '  "title": short descriptive title (max 80 chars)\n'
         '  "detail": full context — what/who/where/how much/reference numbers etc.\n'
         '  "date": YYYY-MM-DD of the actual event/due date. '
+        f'Use {received_date[:10]} as the anchor date to resolve relative expressions '
+        f'like "+ 4 weeks", "in 6 weeks", "next Monday", "review in 3 months" — calculate the absolute date. '
         f'Must NOT be the email received date ({received_date[:10]}) unless the event genuinely falls on that day. '
-        'Null if no specific future or past date is stated in the content.\n'
+        'Null only if there is truly no date reference at all in the content.\n'
         '  "time": HH:MM (24h) if a specific time is mentioned, else null\n'
+        '  "relative_to": title of the parent event this date is relative to (e.g. "Initial Session"), or null if it is an anchor event\n'
+        '  "relative_offset_days": integer number of days after the parent event, or null if not relative\n'
+        '  "relative_anchor": human-readable description of the dependency (e.g. "4 weeks after initial session"), or null\n'
         "  -- extra fields for specific types:\n"
         '  calendar_event: "end_date": YYYY-MM-DD if multi-day, "location": string or null\n'
         '  payment: "amount": exact dollar amount or null, "biller": who to pay, "reference": invoice/ref or null\n'
         '  task: "priority": "high"|"normal"\n\n'
         "Type selection rules:\n"
-        "- calendar_event: a scheduled appointment, event, meeting, booking, or deadline with a specific date\n"
+        "- calendar_event: a scheduled appointment, meeting, booking, deadline, or ANY document/script/plan "
+        "  that references a date — including relative dates like '+ 4 weeks', 'review in 6 weeks', 'next session'. "
+        "  Each distinct date in a document becomes its own calendar_event.\n"
         "- payment: an invoice, bill, or payment request — even without an attachment\n"
         "- observation: a fact, decision, or piece of information worth remembering. "
         "  Use this for: birthday/anniversary mentions, policy updates, notifications, "
@@ -64,6 +71,7 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         "General rules:\n"
         "- Only extract real items — skip marketing, unsubscribe footers, auto-replies\n"
         "- A payment reminder and a meeting invite in the same email = two separate items\n"
+        "- A therapy script or medical plan with multiple dated steps = one calendar_event per step\n"
         "- Do NOT invent dates, amounts, or names not present in the text\n"
         "- If nothing worth capturing: return {\"items\": []}"
     )
@@ -109,21 +117,25 @@ def _create_note(cur, email_id: int, title: str, body: str,
 
 
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
-                             ingestor_url: str, received_date: str = "") -> None:
+                             ingestor_url: str, received_date: str = "",
+                             title_to_event_id: dict | None = None) -> int | None:
+    """Create a calendar event. Returns the new event id, or None on failure."""
     from .db import upsert_event
     title    = item.get("title", "")
     detail   = item.get("detail", "")
     date_str = item.get("date")
     time_str = item.get("time")
     end_str  = item.get("end_date")
+    relative_to     = item.get("relative_to")
+    offset_days     = item.get("relative_offset_days")
+    relative_anchor = item.get("relative_anchor")
 
     if not date_str:
-        return  # can't place on calendar without a date
+        return None
 
-    # Reject all-day events where the LLM defaulted to the email received date —
-    # that almost always means no real date was found in the content.
+    # Reject all-day events where the LLM defaulted to the email received date
     if not time_str and date_str == received_date[:10]:
-        return
+        return None
 
     try:
         if time_str:
@@ -133,10 +145,9 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             starts_at = date.fromisoformat(date_str)
             ends_at   = date.fromisoformat(end_str) + timedelta(days=1) if end_str else None
 
-        # Use a synthetic calendar_event_id so it deduplicates properly
         cal_id = f"decompose:{email_id}:{re.sub(r'[^a-z0-9]', '', title.lower()[:30])}:{date_str}"
 
-        upsert_event(
+        event_id = upsert_event(
             title=title,
             starts_at=starts_at,
             ends_at=ends_at,
@@ -146,8 +157,26 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             notes=detail[:500],
             ingestor_url=ingestor_url or None,
         )
+
+        # Store relative dependency if present
+        if event_id and (relative_to or offset_days or relative_anchor):
+            parent_id = (title_to_event_id or {}).get(relative_to.lower().strip()) if relative_to else None
+            cur.execute(
+                """UPDATE personal.event
+                   SET parent_event_id = %s,
+                       relative_offset_days = %s,
+                       relative_anchor = %s
+                   WHERE id = %s""",
+                (parent_id, offset_days, relative_anchor, event_id),
+            )
+
+        if title_to_event_id is not None and event_id:
+            title_to_event_id[title.lower().strip()] = event_id
+
+        return event_id
     except Exception as e:
         print(f"[decompose] calendar event failed for '{title}': {e}")
+        return None
 
 
 def _create_payment_note(cur, item: dict, email_id: int, received_at=None) -> None:
@@ -227,6 +256,7 @@ def decompose_emails(accounts: list[dict]) -> int:
 
             with psycopg2.connect(DB_URL) as wconn:
                 with wconn.cursor() as wcur:
+                    title_to_event_id: dict = {}  # maps title → event_id for relative linking
                     for item in items:
                         itype = item.get("type")
                         title = item.get("title", "")
@@ -235,7 +265,8 @@ def decompose_emails(accounts: list[dict]) -> int:
                         if itype == "calendar_event":
                             _create_calendar_event(wcur, item, calendar_source,
                                                     email_id, INGESTOR_URL,
-                                                    received_date=received_at)
+                                                    received_date=received_at,
+                                                    title_to_event_id=title_to_event_id)
 
                         elif itype == "payment":
                             _create_payment_note(wcur, item, email_id, received_at)

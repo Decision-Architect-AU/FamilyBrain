@@ -213,7 +213,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
         if not cursor:
             from datetime import timedelta
-            since_days = int(os.environ.get("GMAIL_INITIAL_DAYS", "90"))
+            since_days = int(os.environ.get("GMAIL_INITIAL_DAYS", "365"))
             since_date = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y/%m/%d")
             query = f"in:inbox OR in:sent -category:promotions -category:social -category:updates -is:spam -is:trash after:{since_date}"
             # Paginate through all results (Gmail caps each page at 500)
@@ -416,6 +416,44 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
         for ev in events_resp.get("items", []):
             if ev.get("status") == "cancelled":
+                provider_id = ev["id"]
+                sync_row = db.get_sync_map(account_id, provider_id)
+                if sync_row:
+                    # Delete from routed calendar (Bills/Family/Holiday copy)
+                    if sync_row.get("target_cal_provider_id"):
+                        try:
+                            svc.events().delete(
+                                calendarId=ac.default_cal_id,
+                                eventId=sync_row["target_cal_provider_id"],
+                            ).execute()
+                        except Exception:
+                            pass
+                    # Delete from Outlook mirror
+                    if sync_row.get("mirror_provider_id") and sync_row.get("mirror_account_id"):
+                        mirror_acct = mirror_by_id.get(sync_row["mirror_account_id"])
+                        if mirror_acct and mirror_acct["provider"] == "outlook":
+                            try:
+                                from .outlook import _headers, GRAPH_BASE
+                                import requests as _req
+                                _req.delete(
+                                    f"{GRAPH_BASE}/me/events/{sync_row['mirror_provider_id']}",
+                                    headers=_headers(mirror_acct), timeout=15,
+                                )
+                            except Exception:
+                                pass
+                    # Mark inactive in DB (preserve history)
+                    with db.conn() as c:
+                        with c.cursor() as cur:
+                            cur.execute(
+                                "UPDATE personal.event SET status='cancelled' WHERE calendar_event_id=%s",
+                                (f"gmail:{account['email_address']}:{provider_id}",),
+                            )
+                            cur.execute(
+                                "UPDATE personal.calendar_sync_map SET sync_status='cancelled' WHERE source_account_id=%s AND source_provider_id=%s",
+                                (account_id, provider_id),
+                            )
+                        c.commit()
+                    print(f"[gmail] marked cancelled: {provider_id}")
                 continue
             provider_id = ev["id"]
             summary     = ev.get("summary", "(no title)")

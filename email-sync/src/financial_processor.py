@@ -180,6 +180,41 @@ def _get_subfolder(entity_slug: str, text: str, prop_patterns: list[dict],
     return None
 
 
+# ── Document label extraction ─────────────────────────────────────────────────
+
+def _doc_label(subject: str, fname: str, pdf_snippet: str) -> str:
+    """
+    Ask the LLM for a short human-readable document label (2-4 words, Title Case).
+    Examples: 'Rates', 'Ownership Statement', 'Electrical Repair', 'Water Bill'.
+    Falls back to sanitized filename stem on failure.
+    """
+    import requests as req
+    context = f"Subject: {subject}\nFilename: {fname}\nContent snippet: {pdf_snippet[:500]}"
+    prompt = (
+        "You are labelling a financial document for a property investor's filing system.\n"
+        "Given the context below, produce a SHORT label (2-4 words, Title Case) that describes "
+        "the document type — e.g. 'Rates', 'Water Bill', 'Ownership Statement', 'Electrical Repair', "
+        "'Insurance Premium', 'Rental Statement', 'Body Corporate Levy', 'Land Tax'.\n"
+        "Do NOT include dates, property addresses, entity names, or amounts.\n"
+        "Reply with ONLY the label, nothing else.\n\n"
+        f"{context}"
+    )
+    try:
+        resp = req.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
+                  "options": {"temperature": 0.1, "num_predict": 20}},
+            timeout=20,
+        )
+        label = resp.json().get("response", "").strip().strip('"').strip("'")
+        # Sanity: must be short (≤50 chars) and not contain slashes/newlines
+        if label and len(label) <= 50 and "\n" not in label and "/" not in label:
+            return label
+    except Exception:
+        pass
+    return _sanitize(Path(fname).stem)
+
+
 # ── Entity classification ─────────────────────────────────────────────────────
 
 def _classify_entity(subject: str, body: str, from_addr: str,
@@ -897,9 +932,9 @@ def process_financial_emails(accounts: list[dict]) -> int:
 
         for fname, data, pdf_txt in pdf_texts:
 
-            safe = _sanitize(Path(fname).stem)
-            ext  = Path(fname).suffix or ".pdf"
-            dest_name = f"{date_str}_{safe}{ext}"
+            label = _doc_label(subject, fname, pdf_txt)
+            ext   = Path(fname).suffix or ".pdf"
+            dest_name = f"{date_str} {label}{ext}"
             try:
                 dest, is_new = _save_file(data, fy, entity_slug, dest_name, subfolder=subfolder)
                 if is_new:

@@ -15,13 +15,15 @@ models:
   qwen2.5:3b:
     path: C:\Users\Glenn\qwen2.5-3b-ov
     type: generate
-    device: HETERO:GPU,NPU,CPU
+    #device: AUTO:GPU,NPU,CPU
+    device: GPU
+
 
   # Primary extraction — GPU (convert qwen2.5:14b INT4 when ready)
   qwen2.5:14b:
     path: C:\Users\Glenn\qwen2.5-14b-ov
     type: generate
-    device: HETERO:GPU,CPU
+    device: AUTO:GPU,CPU
 
   # Reasoning — CPU/RAM
   qwen2.5:32b:
