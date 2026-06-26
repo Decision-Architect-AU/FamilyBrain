@@ -38,11 +38,32 @@ _STATEMENT_SUBJECT_KW = [
     "property statement", "owner's statement",
 ]
 
+_NOT_A_BILL_KW = [
+    "travel bank", "credit applied", "booking confirmation", "e-ticket",
+    "your booking", "itinerary", "receipt for", "payment received",
+    "thank you for your payment", "refund", "credit note",
+]
 
-def _is_statement_email(subject: str) -> bool:
-    """True when the email is an owner/rental statement — expenses are already settled."""
-    s = subject.lower()
-    return any(kw in s for kw in _STATEMENT_SUBJECT_KW)
+
+def _is_statement_email(subject: str, body: str = "") -> bool:
+    """True when the email is already-settled or not a payment request at all."""
+    text = (subject + " " + body[:500]).lower()
+    if any(kw in text for kw in _STATEMENT_SUBJECT_KW):
+        return True
+    if any(kw in text for kw in _NOT_A_BILL_KW):
+        return True
+    return False
+
+
+_PLACEHOLDER_RE = re.compile(
+    r'\b(123\s*main|example\.com|123456789|'
+    r'bsb\s*:\s*\d{3}-?\d{3}|account\s*:\s*123|'
+    r'your\s+(name|address|bsb|account|ref)|placeholder|lorem\s+ipsum|'
+    r'INV\s*1234|REF\s*1234|INV\s*123(?!\d{4,})|'  # INV123456 but not real refs with 7+ digits
+    r'xx+|00000|11111|99999|'
+    r'\d{1,3}\s+main\s+st|sample\s+st)\b',
+    re.IGNORECASE,
+)
 
 
 def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
@@ -50,6 +71,12 @@ def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
     _FAKE_AMOUNTS = {"$1,234.56", "1234.56", "$123.45", "123.45",
                      "$456.78", "456.78", "$1,000,000.00", "$0.00", "0.00"}
     _FAKE_DATES   = {"2023-04-15", "2023-10-15", "2024-10-01"}
+
+    # Null out any field that looks like a hallucinated placeholder
+    for field in ("for_what", "invoice_ref", "how_to_pay"):
+        val = str(data.get(field) or "")
+        if _PLACEHOLDER_RE.search(val):
+            data[field] = ""
 
     amt = str(data.get("amount_due") or "").strip()
     if not amt or amt.lower() in ("null", "none") or amt in _FAKE_AMOUNTS:
@@ -77,7 +104,7 @@ def _scrub_payment(data: dict, subject: str, received_date: str) -> dict:
             due = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
     data["due_date"] = due
 
-    if _is_statement_email(subject):
+    if _is_statement_email(subject, data.get("detail", "")):
         data["payment_status"] = "paid_via_statement"
 
     return data
@@ -173,7 +200,7 @@ def _extract_payment_details(subject: str, body: str, received_date: str) -> lis
         "for_what": "",
         "invoice_ref": "",
         "how_to_pay": "",
-        "payment_status": "paid_via_statement" if _is_statement_email(subject) else "pending",
+        "payment_status": "paid_via_statement" if _is_statement_email(subject, body) else "pending",
     }]
 
 

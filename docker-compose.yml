@@ -102,7 +102,7 @@ services:
     ports:
       - "4001:4001"
     volumes:
-      - /mnt/c/DataFiles:/data
+      - C:/DataFiles:/data
     depends_on:
       postgres:
         condition: service_healthy

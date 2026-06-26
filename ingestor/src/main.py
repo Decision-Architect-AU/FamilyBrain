@@ -19,7 +19,7 @@ import threading
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from src.extract import extract_text
+from src.extract import extract_text, extract_bytes
 from src.classify import classify
 from src.ingest import ingest_personal, ingest_property, ingest_decision, _find_closest_theme
 from src.extract_concepts import extract_quick, extract_deep, extract_deeper, extract_concepts
@@ -561,6 +561,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
             result = ingest_event(body)
         elif self.path == "/ingest/message":
             result = ingest_message(body)
+        elif self.path == "/ingest/extract":
+            # Body: {"content_b64": "<base64>", "filename": "<name>"}
+            # Returns: {"ok": true, "text": "..."} or {"ok": false, "error": "..."}
+            import base64
+            content_b64 = body.get("content_b64", "")
+            filename    = body.get("filename", "attachment.bin")
+            if not content_b64:
+                result = {"ok": False, "error": "content_b64 required"}
+            else:
+                try:
+                    data = base64.b64decode(content_b64)
+                    text = extract_bytes(data, filename)
+                    result = {"ok": True, "text": text}
+                except Exception as ex:
+                    result = {"ok": False, "error": str(ex)}
         elif self.path == "/ingest/reparse":
             # Body: {filename, schema, ollama_url (optional), model (optional)}
             result = reparse_document(body)

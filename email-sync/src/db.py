@@ -238,22 +238,32 @@ def upsert_event(
             if existing_dup:
                 return existing_dup["id"]
 
+            # Capture old starts_at before upsert so we can detect date changes in RETURNING
             cur.execute(
                 """
-                INSERT INTO personal.event
-                    (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (calendar_event_id) DO UPDATE
-                    SET title          = EXCLUDED.title,
-                        starts_at      = EXCLUDED.starts_at,
-                        ends_at        = EXCLUDED.ends_at,
-                        notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
-                        effective_date = EXCLUDED.effective_date,
-                        updated_at     = now()
-                RETURNING id, (xmax = 0) AS inserted,
-                          (personal.event.starts_at IS DISTINCT FROM EXCLUDED.starts_at) AS date_changed
+                WITH old AS (
+                    SELECT id, starts_at FROM personal.event WHERE calendar_event_id = %s
+                ),
+                upserted AS (
+                    INSERT INTO personal.event
+                        (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (calendar_event_id) DO UPDATE
+                        SET title          = EXCLUDED.title,
+                            starts_at      = EXCLUDED.starts_at,
+                            ends_at        = EXCLUDED.ends_at,
+                            notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
+                            effective_date = EXCLUDED.effective_date,
+                            updated_at     = now()
+                    RETURNING id, (xmax = 0) AS inserted, starts_at
+                )
+                SELECT u.id, u.inserted,
+                       (o.starts_at IS DISTINCT FROM u.starts_at) AS date_changed
+                FROM upserted u
+                LEFT JOIN old o ON o.id = u.id
                 """,
-                (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date),
+                (calendar_event_id,
+                 title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date),
             )
             row = cur.fetchone()
         c.commit()

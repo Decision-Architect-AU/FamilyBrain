@@ -285,6 +285,81 @@ def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: 
         print(f"[appt] outlook source patch error for event {ev_id}: {e}")
 
 
+def _write_outlook(outlook_acct: dict, ev: dict) -> str | None:
+    """
+    Create an event in the Outlook calendar via Microsoft Graph. Returns the Outlook event id.
+    Used to mirror GCal-written events to Outlook so the user sees them in both calendars.
+    """
+    from datetime import date as date_type
+    try:
+        from .outlook import _headers, GRAPH_BASE
+        import requests as req
+
+        starts = ev["starts_at"]
+        ends   = ev["ends_at"] or ev["starts_at"]
+
+        def _fmt(dt):
+            if isinstance(dt, date_type) and not isinstance(dt, datetime):
+                return {"dateTime": f"{dt}T00:00:00", "timeZone": "Australia/Brisbane"}
+            if hasattr(dt, "isoformat"):
+                return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
+            return {"dateTime": str(dt), "timeZone": "Australia/Brisbane"}
+
+        body = {
+            "subject": ev["title"],
+            "body": {"contentType": "text", "content": ev.get("notes") or ""},
+            "start": _fmt(starts),
+            "end":   _fmt(ends),
+        }
+        resp = req.post(
+            f"{GRAPH_BASE}/me/events",
+            headers={**_headers(outlook_acct), "Content-Type": "application/json"},
+            json=body,
+            timeout=20,
+        )
+        if resp.ok:
+            return resp.json().get("id")
+        print(f"[appt] outlook write failed: {resp.status_code} {resp.text[:100]}")
+    except Exception as e:
+        print(f"[appt] outlook write error: {e}")
+    return None
+
+
+def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -> None:
+    """Patch an existing Outlook mirror event with updated title/notes/times."""
+    from datetime import date as date_type
+    try:
+        from .outlook import _headers, GRAPH_BASE
+        import requests as req
+
+        starts = ev["starts_at"]
+        ends   = ev["ends_at"] or ev["starts_at"]
+
+        def _fmt(dt):
+            if isinstance(dt, date_type) and not isinstance(dt, datetime):
+                return {"dateTime": f"{dt}T00:00:00", "timeZone": "Australia/Brisbane"}
+            if hasattr(dt, "isoformat"):
+                return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
+            return {"dateTime": str(dt), "timeZone": "Australia/Brisbane"}
+
+        body = {
+            "subject": ev["title"],
+            "body": {"contentType": "text", "content": ev.get("notes") or ""},
+            "start": _fmt(starts),
+            "end":   _fmt(ends),
+        }
+        resp = req.patch(
+            f"{GRAPH_BASE}/me/events/{outlook_event_id}",
+            headers={**_headers(outlook_acct), "Content-Type": "application/json"},
+            json=body,
+            timeout=20,
+        )
+        if not resp.ok:
+            print(f"[appt] outlook mirror patch failed: {resp.status_code}")
+    except Exception as e:
+        print(f"[appt] outlook mirror patch error: {e}")
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
     """Insert event, return gcal event id."""
     from datetime import date as date_type
@@ -381,6 +456,9 @@ def run_appointment_updater(accounts: list[dict]) -> int:
     if not gmail_acct:
         print("[appt] no Gmail account — skipping")
         return 0
+
+    # Outlook mirror — write new/changed events to Outlook calendar as well
+    outlook_acct = next((a for a in accounts if a["provider"] == "outlook"), None)
 
     # Partner calendar — when connected, Shannon-tagged events mirror here too
     partner_acct = next(
@@ -508,10 +586,40 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     )
                 wconn.commit()
 
-            # Write enriched title+notes back to the original Outlook event
+            # Write enriched title+notes back to the original Outlook event (if sourced from Outlook)
             if ev.get("calendar_source", "").startswith("outlook:"):
                 outlook_accounts = [a for a in accounts if a["provider"] == "outlook"]
                 _patch_outlook_source(ev_id, title, notes, outlook_accounts)
+
+            # Mirror to Outlook for non-Outlook-sourced events (decomposed emails, calendar imports)
+            elif outlook_acct and not ev.get("calendar_source", "").startswith("outlook:"):
+                try:
+                    import psycopg2, psycopg2.extras as _extras, os as _os
+                    with psycopg2.connect(_os.environ["DATABASE_URL"],
+                                          cursor_factory=_extras.RealDictCursor) as _c:
+                        with _c.cursor() as _cur:
+                            _cur.execute(
+                                """SELECT mirror_provider_id FROM personal.calendar_sync_map
+                                   WHERE event_id = %s AND mirror_account_id = %s LIMIT 1""",
+                                (ev_id, outlook_acct["id"]),
+                            )
+                            _row = _cur.fetchone()
+                    existing_ol_id = _row["mirror_provider_id"] if _row else None
+                    if existing_ol_id:
+                        _patch_outlook_mirror(outlook_acct, existing_ol_id,
+                                              {**ev, "title": title, "notes": notes})
+                    else:
+                        ol_id = _write_outlook(outlook_acct, {**ev, "title": title, "notes": notes})
+                        if ol_id:
+                            from .db import upsert_sync_map
+                            upsert_sync_map(ev_id,
+                                source_account_id=outlook_acct["id"],
+                                source_provider_id=f"mirror:{ev_id}",
+                                mirror_account_id=outlook_acct["id"],
+                                mirror_provider_id=ol_id)
+                            print(f"[appt] mirrored '{title[:40]}' → Outlook")
+                except Exception as oe:
+                    print(f"[appt] outlook mirror error for '{title[:40]}': {oe}")
 
             # Mirror partner-tagged events to Shannon's calendar
             if partner_cal_svc and partner_routing and _PARTNER_NAMES:
