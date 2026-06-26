@@ -6,9 +6,9 @@ A fully self-hosted, multi-mode AI agent system built on a GMKtec Core Ultra 9 m
 
 ## What it does
 
-OpenClaw continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
+OpenClaw continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard and WhatsApp agent. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
 
-The core design principle is **adaptive self-improvement**: the system continuously learns from new information and updates its own state without manual intervention. Appointments evolve as context changes, bills auto-resolve when payment is detected, proactive reminders fire based on channel rules and real-world timelines, and extraction models refine themselves as they accumulate domain-specific ground truth.
+The core design principle is **adaptive self-improvement**: the system continuously learns from new information and updates its own state without manual intervention. Appointments evolve as context arrives, bills auto-resolve when payment is detected, proactive reminders fire based on channel rules and real-world timelines, and the graph accumulates rich typed facts that make every future answer more precise.
 
 ---
 
@@ -18,8 +18,13 @@ The core design principle is **adaptive self-improvement**: the system continuou
 
 ```
 Windows Host (Core Ultra 9)
-├── Ollama (native)            ← LLM API, GPU-accelerated (qwen2.5:14b default)
-├── OpenVINO Inference Server  ← OpenVINO GenAI on Intel Arc GPU/NPU
+├── OpenVINO Inference Server  ← OpenVINO GenAI on Intel Arc GPU + NPU
+│     ├── nomic-embed-text (NPU)        768-dim semantic embeddings
+│     ├── ms-marco-reranker (NPU)       Cross-encoder result reranking
+│     ├── qwen2.5:3b  (AUTO:GPU,CPU)    Fast classification
+│     ├── qwen2.5:14b (GPU)             Primary extraction
+│     ├── qwen2.5:32b (GPU,CPU)         Deep reasoning (optional)
+│     └── whisper-small (CPU)           Speech-to-text
 │
 └── WSL2 / Docker Compose
     ├── [core]   postgres          :5432   PostgreSQL + AGE + pgvector
@@ -107,66 +112,232 @@ The pipeline is split into three layers: **inbound channels**, a **centralised k
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Key design decisions
+---
 
-**Channels are symmetric** — inbound and outbound use the same registry (`personal.channel`). Rules live in `personal.channel_rule` ordered by priority. Adding a new source (SMS, WhatsApp) or destination (Notion, Linear) is a connector + channel row, no pipeline changes.
+## Events as First-Class Citizens
 
-**`next_update_at` materialised on ingest** — when an item enters the knowledge core, the channel rule resolver immediately writes the concrete datetime it should first be pushed outbound. The appointment updater is a single indexed query with no scheduling logic of its own.
+### The philosophy
 
-**`effective_date` is timezone-correct** — all events store a `DATE` column in Brisbane local time alongside the `TIMESTAMPTZ`. All-day events from any timezone resolve to the correct calendar date without UTC drift.
+Life is driven by events. Not just appointments — every meaningful moment in a household has a date, a state, and a consequence.
 
-**Email decomposer breaks emails into typed items** — a single email containing a meeting invite, a payment request, and an observation produces three independent items routed to three different outbound channels.
+A bill is an event. The moment it is paid is an event. A prescription is an event with a renewal date. A school holiday is an event that reshapes every other event around it. A travel booking is an event that triggers a chain of downstream events — passport check, insurance review, pet care reminder. A GP referral is an event that creates a specialist appointment, which creates a pathology order, which creates a results review. A salary payment is an event. An insurance renewal is an event. A child's therapy block is a recurring event with a funding expiry.
 
-**Separate sync cursors** — `sync_cursor` (email historyId / Outlook deltaLink) and `calendar_sync_cursor` (GCal syncToken / Outlook calendarView deltaLink) are independent columns on `personal.email_account`. They never overwrite each other.
+Most personal AI systems treat calendars as one data source among many. OpenClaw inverts this: **the event is the atomic unit of life, and everything else is context that enriches it.**
+
+This means:
+
+| What it looks like | What it is in OpenClaw |
+|---|---|
+| A bill arriving | `:Event { event_type: "bill", status: "unpaid" }` |
+| A payment made | `:Event { event_type: "payment" }` + `RESOLVES` edge to bill |
+| A prescription | `:Event { event_type: "medication", fact_supply: "30 days" }` |
+| A doctor appointment | `:Event { event_type: "medical", fact_provider: "…", fact_notes: "…" }` |
+| A placeholder ("remember to check X") | `:Event { event_type: "task" }` |
+| A school holiday | `:Event { event_type: "holiday" }` + individual day events via `TRIGGERED` |
+| A travel booking | `:Event { event_type: "booking" }` + passport/insurance reminders via `TRIGGERED` |
+| A funding plan expiry | `:Event { event_type: "review" }` + reminders at 3m, 6w, 2w via `TRIGGERED` |
+| An insurance renewal | `:Event { event_type: "renewal" }` + `Review insurance` reminder via `TRIGGERED` |
+
+Every one of these lives in the same graph, shares the same enrichment pipeline, and flows through the same outbound channel rules to the right calendar. The model does not distinguish between "important" and "administrative" — it honours them equally, because all of them have dates that matter to someone.
+
+### Contextual updating — why the event model matters
+
+By treating everything as an event connected to a person and a time, the system can do something no calendar app can: **enrich a future appointment with everything that has happened since the last one.**
+
+When a medical appointment is approaching, the nightly enrichment sweep traverses the graph outward from the `:Event` node — following `ENRICHES` edges to find every document, message, and note linked to that person over the past 3, 6, or 12 months. Pathology results, specialist letters, prescription changes, therapy progress notes, school reports, NDIS review documents — anything the system has ingested that is connected to the same person becomes context for the upcoming appointment.
+
+The result is an appointment description that arrives in the calendar already briefed:
+
+```
+Child1 Paediatrician — 6-month review
+Provider: Dr J Smith, City Paediatrics
+What's changed since last visit (6 months):
+  • Medication dose adjusted Feb 2026 (letter from prescriber)
+  • OT progress note Mar 2026 — fine motor goals met, sensory processing ongoing
+  • School report May 2026 — teacher flagged attention difficulties in afternoon sessions
+  • NDIS plan review due Aug 2026 — funding category breakdown attached
+Bring: referral (expires Jul 2026), Medicare card, previous reports
+Referral needed: current referral expires before appointment — reminder created
+```
+
+None of this was manually assembled. The graph knew the person, knew the appointment, and knew what had happened in between.
+
+This same pattern applies across every event type:
+
+- **Financial review** — enriched with the last 12 months of bills, payments, and outstanding items for that entity
+- **Insurance renewal** — enriched with any claims, correspondence, or policy changes since last renewal
+- **Specialist appointment** — enriched with the GP referral that triggered it, any pre-appointment pathology ordered, and the last visit summary
+- **Medication review** — enriched with dispensing history, dose change letters, and any side-effect notes
+
+The system also generates **proactive reminders** when it detects that an appointment requires something that hasn't arrived yet — a referral that is expiring, a pathology order with no results, a pre-appointment form that was sent but not returned. These become `TRIGGERED` events in their own right, routed to the calendar days or weeks before the appointment.
+
+### What makes an event
+
+An event in OpenClaw is more than a calendar entry. It is a **living knowledge node** in the AGE graph with typed facts attached:
+
+```
+:Event {
+  event_key        — stable dedup key (source:id)
+  title            — enriched display title (e.g. "Child1 Physio — bring report")
+  starts_at        — TIMESTAMPTZ
+  ends_at          — TIMESTAMPTZ
+  effective_date   — DATE in local timezone (no UTC drift on all-day events)
+  event_type       — medical | bill | family | holiday | task | appointment | …
+  gcal_event_id    — Google Calendar event ID after outbound write
+  next_update_at   — when the appointment updater should revisit this event
+  facts_updated_at — last time fact_* properties were written
+
+  fact_location    — resolved venue or address
+  fact_provider    — practitioner or organisation name
+  fact_notes       — preparation instructions, what to bring
+  fact_cost        — expected cost or Medicare gap
+  fact_duration    — expected duration
+  ref              — "personal.event:{row_id}" — hydration handle back to Postgres
+}
+```
+
+Facts (`fact_*` properties) are written by the graph enrichment pipeline and are never truncated — they carry the full extracted content. The `ref` field is a hydration handle that lets any service look up the full Postgres row without duplicating relational data in the graph.
+
+### Event lifecycle
+
+```
+Email / file arrives
+        │
+        ▼
+Email decomposer (qwen2.5:14b)
+  ├── Extracts: title, date, location, provider, notes
+  ├── Writes: personal.event row
+  └── Writes: :Event node in personal_graph
+              with fact_* properties from extraction
+
+        │
+        ▼
+Scheduler maintenance (nightly, before queue drain)
+  ├── Dedup:   merge duplicate Event nodes by event_key
+  ├── Enrich:  find documents/messages linked to each Event
+  │            via ENRICHES edges, update fact_* properties
+  └── Promote: escalate priority as effective_date approaches
+
+        │
+        ▼
+Appointment updater (polls next_update_at <= now())
+  ├── Reads enriched facts from graph node
+  ├── Builds enriched title + description from fact_* props
+  ├── Routes to correct Google Calendar
+  └── Sets next_update_at or NULL (past events)
+```
+
+### Time-contextual scheduling
+
+Rather than recalculating "should this event be updated now?" at query time, the re-check schedule is materialised as a single `next_update_at` column the moment an event is ingested. The appointment updater is a single indexed poll with no scheduling logic of its own.
+
+| Schedule type | When `next_update_at` is set | Used for |
+|---|---|---|
+| `immediate` | `now()` | Family events, tasks, catch-all |
+| `before_event:3d` | 06:00 AEST, 3 days before effective_date | Bill reminders |
+| `on_due_date` | 06:00 AEST on effective_date | Final bill / appointment check |
+| `batch:daily:07:00` | Next 07:00 AEST | Observation digests |
+| `never` | `NULL` | Only re-process on explicit change |
+
+As an appointment approaches, the schedule tightens automatically:
+
+| Days until event | Re-check cadence |
+|---|---|
+| > 7 days | Re-check 3 days before |
+| 2 – 7 days | Re-check day before |
+| Today or tomorrow | No further auto-check (final state written) |
+| Past | `next_update_at = NULL` (done) |
+
+This means a GP appointment created 3 months in advance will be quietly ignored until 3 days before, then checked again the day before, then written in final form on the morning of the appointment — picking up any enrichment that arrived in the intervening months.
+
+### Adaptive appointment enrichment
+
+Appointments are enriched continuously as new information arrives. Every inbound document, email, or message is cross-referenced against existing `Event` nodes:
+
+- If the sender domain matches a known provider linked to an event, an `ENRICHES` edge is created
+- If LLM extraction finds a date, person, or organisation that matches an upcoming event, the event's `fact_*` properties are updated
+- The scheduler `enrich` phase runs nightly and sweeps all upcoming events for new linked content
+
+**Example:** A specialist appointment is created from a GP referral letter in January. The description at creation: `"Referral to cardiologist."` By the appointment date in March, three more documents have arrived — a pre-appointment questionnaire, an appointment confirmation, and a pathology results email. The nightly enrich phase has written:
+
+```
+fact_provider    = "Dr J Smith — City Cardiology"
+fact_location    = "Level 3, 123 Main St"
+fact_notes       = "Bring referral letter, fasting bloods ordered, Medicare card required"
+fact_cost        = "Gap fee $85"
+```
+
+When the appointment updater writes the event to Google Calendar the day before, the description contains all of this context — automatically, with no manual input.
+
+### Proactive rule-triggered events
+
+When key facts are detected during extraction, the scheduler can generate proactive follow-up events via `TRIGGERED` edges:
+
+| Detected fact | Proactive event created |
+|---|---|
+| Travel / holiday booking | Passport expiry check (if < 6 months at departure date) |
+| Bill or invoice | `Bill due` event; auto-resolves to `Paid` when payment detected |
+| NDIS plan review date | Reminders at 3 months, 6 weeks, 2 weeks before plan expiry |
+| Insurance renewal | `Review insurance` reminder 6 weeks before renewal |
+| Medication noted | `Reorder medication` reminder based on estimated supply |
+| School term dates | Auto-populate school calendar events for all children |
+
+Triggered events are linked to their source event via `TRIGGERED` edges, so the graph retains the causal chain.
+
+---
+
+## Graph Facts — Storing Knowledge as Properties
+
+OpenClaw uses Apache AGE (PostgreSQL graph extension) as its knowledge layer. The key design decision is that structured facts extracted from documents are stored as **typed properties on graph nodes** — not just as text chunks for vector search.
+
+### The `fact_*` property pattern
+
+Every graph node that represents a real-world entity can carry `fact_*` properties — arbitrary key-value pairs written by the extraction pipeline:
+
+```cypher
+MATCH (e:Event {event_key: "gmail:abc123"})
+SET e.fact_provider    = "Dr J Smith"
+SET e.fact_location    = "City Medical Centre, Level 2"
+SET e.fact_notes       = "Bring previous scans. Fasting required."
+SET e.fact_cost        = "$180 gap"
+SET e.facts_updated_at = "2026-06-27T10:00:00+10:00"
+```
+
+These properties are:
+- **Never truncated** — unlike display fields capped at 500 chars, `fact_*` values carry the full extracted text
+- **Idempotently written** — `set_node_facts()` in `graph.py` uses MERGE + SET, safe to run multiple times
+- **Queryable via Cypher** — the graph agent can retrieve specific facts without scanning full document text
+- **Visible in the graph explorer** — the AGE Viewer shows all properties on each node
+
+### The `ref` hydration handle
+
+Every graph node that corresponds to a Postgres row carries a `ref` property:
+
+```
+ref = "personal.event:4721"
+ref = "personal.ingest_document:892"
+ref = "personal.note:103"
+```
+
+This is a lightweight pointer. When the wa-agent or any service needs the full relational row (all columns, joins, permissions), it resolves the ref back to Postgres rather than duplicating the data in the graph. The graph stores *what something is*; Postgres stores *everything about it*.
+
+### Why graph + relational together
+
+| Layer | What it stores | What it's good at |
+|---|---|---|
+| **Postgres** (`personal.*`) | Full structured rows — events, notes, emails, medications, contacts | Relational queries, ACID writes, calendar sync state, OAuth tokens |
+| **AGE graph** (`personal_graph`) | Entity relationships, typed facts, claims, enrichment history | Multi-hop traversal, entity disambiguation, context assembly for LLM |
+| **pgvector** (on `personal.note`) | Semantic embeddings | Similarity search across unstructured text |
+
+The wa-agent's search pipeline uses all three in a single request: Cypher for entity/relationship traversal, pgvector for semantic similarity (top-20 candidates), cross-encoder reranker (NPU) to re-score candidates, then the top-5 go to the LLM as context.
 
 ---
 
 ## Adaptive Intelligence
 
-### Adaptive Appointment Management
-
-Appointments are living entities. Their descriptions, priorities, and associated context are updated automatically as new information is ingested.
-
-**How it works:**
-- Every new email, file, or message is cross-referenced against existing `Event` nodes in `personal_graph`
-- If new content is semantically related to an upcoming event (same person, same organisation, same topic), the event description is enriched with the new context
-- As an appointment gets closer, **temporal reprioritisation** applies — events within 48 hours are surfaced more prominently; events that have passed are archived
-
-**Example:** A GP appointment ingested in January has a description of "annual checkup." In February an email arrives with blood test results. In March a referral letter arrives. Each enriches the event node so that by the appointment date the description reads: "Annual checkup — blood test results on file (Feb), referral to cardiologist noted (Mar), bring Medicare card."
-
-**Triggers:**
-- New document, email, or message linked to a known Person or Organisation associated with an event
-- Direct keyword or entity match against event title or existing description
-- LLM semantic similarity above a configurable threshold (`EVENT_ENRICH_THRESHOLD`, default `0.75`)
-
 ### next_update_at scheduling
 
-Rather than calculating "should this event be updated now?" at query time, the schedule is materialised as a single `TIMESTAMPTZ` column when the item is first ingested. Rules:
-
-| Schedule | When next_update_at is set | Used for |
-|----------|---------------------------|---------|
-| `immediate` | `now()` | Family events, tasks, catch-all |
-| `before_event:3d` | 06:00 AEST, 3 days before effective_date | Bill reminders |
-| `on_due_date` | 06:00 AEST on effective_date | Final bill check |
-| `batch:daily:07:00` | Next 07:00 AEST | Observation digests |
-| `never` | `NULL` | Only re-process on explicit change |
-
-After the outbound write, the appointment updater sets the next scheduled check or `NULL` if the event is past.
-
-### Rules-Based Proactive Scheduling
-
-OpenClaw applies a configurable rule engine to detected entities and dates to generate proactive follow-up events.
-
-**Built-in rule examples:**
-
-| Trigger | Detected entity / date | Action |
-|---------|------------------------|--------|
-| Holiday / travel booking detected | Departure date | Check passport expiry. If expiry < 6 months before departure → create `Passport renewal` reminder at 12 months before departure and `Passport organised` checkpoint at 3 months before |
-| Bill or invoice ingested | Due date | Create `Bill due` event. If payment later detected → auto-resolve to `Paid` |
-| NDIS plan review date detected | Plan expiry | Create reminders at 3 months, 6 weeks, and 2 weeks before expiry |
-| Insurance policy renewal | Renewal date | Create `Review insurance` reminder 6 weeks before |
-| Prescription / medication noted | Duration or quantity | Create `Reorder medication` reminder when supply is estimated to run low |
-| School term dates ingested | Term start/end | Auto-populate school calendar events for all children on file |
+See [Events as First-Class Citizens](#events-as-first-class-citizens) above for the full scheduling model.
 
 ### Auto-Resolving Bills
 
@@ -179,37 +350,60 @@ ingested → unpaid → [payment signal detected] → pending_confirmation → p
                                                                       ↘ disputed
 ```
 
-Bills that remain `unpaid` past their due date surface as `overdue` in the dashboard and generate a WhatsApp nudge.
+Bills that remain `unpaid` past their due date surface as `overdue` in the dashboard.
 
 ### Three knowledge domains
 
 | Domain | Schema | AGE Graph | What it captures |
-|--------|--------|-----------|-----------------|
-| **Personal** | `personal` | `personal_graph` | Family, NDIS care, household, appointments, personal notes |
+|---|---|---|---|
+| **Personal** | `personal` | `personal_graph` | Family, care, household, appointments, personal notes |
 | **Property** | `property_deals` | `property_graph` | Property listings, market research, financial analysis |
 | **Decision** | `decision_architect` | `decision_graph` | Organisational frameworks, thought leadership, PR content |
+
+---
+
+## Key design decisions
+
+**Channels are symmetric** — inbound and outbound use the same registry (`personal.channel`). Rules live in `personal.channel_rule` ordered by priority. Adding a new source (SMS, WhatsApp) or destination (Notion, Linear) is a connector + channel row, no pipeline changes.
+
+**`next_update_at` materialised on ingest** — when an item enters the knowledge core, the channel rule resolver immediately writes the concrete datetime it should first be pushed outbound. The appointment updater is a single indexed query with no scheduling logic of its own.
+
+**`effective_date` is timezone-correct** — all events store a `DATE` column in local time alongside the `TIMESTAMPTZ`. All-day events from any timezone resolve to the correct calendar date without UTC drift.
+
+**Email decomposer breaks emails into typed items** — a single email containing a meeting invite, a payment request, and an observation produces three independent items routed to three different outbound channels.
+
+**Separate sync cursors** — `sync_cursor` (email historyId / Outlook deltaLink) and `calendar_sync_cursor` (GCal syncToken) are independent columns on `personal.email_account`. They never overwrite each other.
+
+**Graph facts are never truncated** — `fact_*` properties on graph nodes carry the full extracted value. Display fields (`preview`, `description`) are capped at 500 chars for UI. The distinction is enforced in `build_props()` in `ingestor/src/graph.py`.
+
+**Single-pass classification** — the wa-agent runs one LLM call that returns both graph routing targets (`["personal_graph"]`) and persona selection as a single JSON response, replacing two previously separate calls.
+
+**Two-stage retrieval** — vector search and FTS retrieve 20 candidates; the cross-encoder reranker (NPU, `ms-marco-MiniLM-L-6-v2`) rescores them; the top 5 go to the LLM. This gives reranker-quality context at half the LLM token cost.
 
 ---
 
 ## Hardware
 
 | Component | Spec |
-|-----------|------|
+|---|---|
 | CPU | Intel Core Ultra 9 185H |
 | RAM | 96 GB DDR5 |
 | GPU | Intel Arc 140T — 48 GB shared VRAM |
-| NPU | Intel AI Boost (used for future NPU inference) |
+| NPU | Intel AI Boost |
 | OS | Windows 11 Pro + WSL2/Ubuntu |
 
 ### Model assignments
 
 | Model | Format | Device | Role |
-|-------|--------|--------|------|
-| qwen2.5:14b | OpenVINO INT4 | Intel Arc GPU | Email decomposition, financial extraction, bill calendar |
-| qwen2.5:3b | OpenVINO INT4 | Intel Arc GPU | Fast classification (Pass 1) |
-| qwen2.5:32b | OpenVINO INT4 | CPU/RAM | Deep extraction (Pass 3, optional) |
-| nomic-embed-text | OpenVINO | Intel Arc GPU | Semantic embeddings (768-dim) |
+|---|---|---|---|
+| qwen2.5:14b | OpenVINO INT4 | Arc GPU | Email decomposition, financial extraction, bill calendar |
+| qwen2.5:3b | OpenVINO INT4 | AUTO:GPU,CPU | Fast classification (Pass 1) |
+| qwen2.5:32b | OpenVINO INT4 | GPU,CPU | Deep extraction (Pass 3, optional) |
+| nomic-embed-text | OpenVINO | NPU | Semantic embeddings (768-dim) |
+| ms-marco-reranker | OpenVINO INT8 | NPU | Cross-encoder reranking of search candidates |
 | whisper-small | OpenVINO | CPU | Speech-to-text transcription |
+
+The NPU runs embedding and reranking continuously without competing with the GPU for LLM inference, giving low-latency semantic search at effectively zero GPU cost.
 
 ---
 
@@ -217,9 +411,8 @@ Bills that remain `unpaid` past their due date surface as `overdue` in the dashb
 
 - Docker Desktop for Windows (WSL2 backend)
 - WSL2 / Ubuntu
-- [Ollama for Windows](https://ollama.com) — `winget install Ollama.Ollama`
 - Python 3.11+ (for inference server)
-- OpenVINO GenAI runtime (for inference server)
+- OpenVINO GenAI runtime + optimum-intel (for inference server)
 
 ---
 
@@ -231,7 +424,7 @@ Bills that remain `unpaid` past their due date surface as `overdue` in the dashb
 git clone https://github.com/youruser/openclaw.git
 cd openclaw
 cp .env.example .env
-# Edit .env — fill in all required secrets
+# Edit .env — fill in all required secrets (see Environment variables below)
 ```
 
 ### 2. Create the data directory (Windows)
@@ -244,21 +437,35 @@ New-Item -ItemType Directory -Force C:\DataFiles\Processing
 New-Item -ItemType Directory -Force C:\DataFiles\Ingested
 ```
 
-### 3. Pull Ollama models
+### 3. Convert and place models
 
-```bash
-ollama pull qwen2.5:14b
-ollama pull qwen2.5:3b
-ollama pull nomic-embed-text
+Models are not included. Convert with `optimum-cli` and place at the paths in `inference-server/models.yaml`:
+
+```powershell
+# Embeddings (NPU)
+optimum-cli export openvino --model nomic-ai/nomic-embed-text-v1.5 --task feature-extraction C:\Users\<you>\embed-ov
+
+# Reranker (NPU, INT8)
+optimum-cli export openvino --model cross-encoder/ms-marco-MiniLM-L-6-v2 --task text-classification --weight-format int8 C:\Users\<you>\reranker-ov
+
+# LLMs (GPU)
+optimum-cli export openvino --model Qwen/Qwen2.5-14B-Instruct --weight-format int4 C:\Users\<you>\qwen2.5-14b-ov
 ```
 
-### 4. Start the core stack
+### 4. Start the inference server (Windows)
+
+```bat
+cd inference-server
+start.bat
+```
+
+### 5. Start the core stack
 
 ```bash
 docker compose --profile core up -d
 ```
 
-### 5. Start additional profiles as needed
+### 6. Start additional profiles as needed
 
 ```bash
 # Full normal mode (agents, scraper, email sync, graph viewer)
@@ -273,7 +480,7 @@ docker compose --profile podcast up -d
 ## Profiles
 
 | Profile | Services | Use case |
-|---------|----------|----------|
+|---|---|---|
 | `core` | postgres, dashboard, audit-logger, ingestor | Always running — minimum viable stack |
 | `normal` | + n8n, agents, scraper, email-sync, age-viewer | Day-to-day operation |
 | `podcast` | + whisper, tts, podcast-agents | Voice and podcast workflows |
@@ -299,13 +506,14 @@ Next.js application providing:
 - **Review queue** — emails pending categorisation
 - **Senders hub** — manage inbound channel senders (rescue, block, recategorise, learn multi-entity domains)
 - **Graph explorer** — Cypher console against any of the three graphs
+- **Chat** — WhatsApp-agent interface with thumbs-down feedback for review queue
 
 ### Email Sync (`email-sync`, internal)
 
 Runs five sequential stages after each email poll:
 
 | Stage | What it does |
-|-------|-------------|
+|---|---|
 | **Email sync** | Incremental Gmail (history API) + Outlook (delta query) → `personal.email_message` |
 | **Email decomposer** | LLM breaks each email into typed items (calendar_event / payment / observation / task) |
 | **Financial processor** | Structured attachment extraction (PDFs, invoices) → `personal.note` |
@@ -314,17 +522,17 @@ Runs five sequential stages after each email poll:
 
 **Calendar routing:**
 - Bills → Bills calendar (3 days before due, day-of reminder)
-- Family events → Family calendar (Child1=pink, Child2=purple, Holiday=green) — configure child names via `CHILD1_NAMES`/`CHILD2_NAMES` in `.env`
+- Family events → Family calendar (Child1/Child2 colour-coded) — configure names via `CHILD1_NAMES`/`CHILD2_NAMES` in `.env`
 - Holidays → Holidays calendar + individual day events in Family calendar
 - Everything else → Primary calendar
 
 **Key DB tables:**
 
 | Table | Purpose |
-|-------|---------|
+|---|---|
 | `personal.email_account` | One row per inbox; holds OAuth tokens, `sync_cursor`, `calendar_sync_cursor` |
 | `personal.email_message` | Dedup + ingestion state per message |
-| `personal.event` | All calendar events; `effective_date` (Brisbane date), `next_update_at`, `gcal_event_id` |
+| `personal.event` | All calendar events; `effective_date` (local date), `next_update_at`, `gcal_event_id` |
 | `personal.calendar_sync_map` | Source→target event ID mapping for bidirectional sync |
 | `personal.channel` | Channel registry (inbound + outbound) |
 | `personal.channel_rule` | Scheduling + routing rules per channel |
@@ -338,7 +546,7 @@ Watches `C:\DataFiles\ReadyToIngest\` and ingests any supported file. Also accep
 **Webhook endpoints:**
 
 | Method | Path | Description |
-|--------|------|-------------|
+|---|---|---|
 | `POST` | `/ingest/email` | Email payload from email-sync |
 | `POST` | `/ingest/event` | Calendar event (any source) |
 | `POST` | `/ingest/message` | Generic inbound (WhatsApp, SMS, voice) |
@@ -348,10 +556,14 @@ Watches `C:\DataFiles\ReadyToIngest\` and ingests any supported file. Also accep
 **Multi-pass extraction:**
 
 | Pass | Model | Mode |
-|------|-------|------|
+|---|---|---|
 | 1 (Quick) | qwen2.5:3b | Inline — concepts, people, orgs, claims |
-| 2 (Deep) | qwen2.5:14b | Background thread — full schema |
+| 2 (Deep) | qwen2.5:14b | Background thread — full schema + fact extraction |
 | 3 (Deeper) | qwen2.5:32b | Background, opt-in (`EXTRACT_DEEPER_PASS=true`) |
+
+### Inference Server (`inference-server`, Windows native)
+
+OpenVINO-backed server on port 11434 (Ollama-compatible API). Serves embeddings, reranking, generation, and transcription from a single process. Model registry driven by `inference-server/models.yaml`.
 
 ---
 
@@ -359,7 +571,7 @@ Watches `C:\DataFiles\ReadyToIngest\` and ingests any supported file. Also accep
 
 ```env
 # Postgres
-POSTGRES_SUPERUSER=geoff
+POSTGRES_SUPERUSER=<required>
 POSTGRES_SUPERUSER_PASSWORD=<required>
 DASHBOARD_DB_PASSWORD=<required>
 AUDIT_DB_PASSWORD=<required>
@@ -374,11 +586,23 @@ MICROSOFT_CLIENT_ID=<required>
 MICROSOFT_TENANT_ID=consumers
 
 # Model routing
-AGENT_MODEL=qwen2.5:14b          # email-sync LLM (decomposer, financial extraction)
+AGENT_MODEL=qwen2.5:14b
 EMBED_MODEL=nomic-embed-text
 EXTRACT_MODEL_QUICK=qwen2.5:3b
 EXTRACT_MODEL_DEEP=qwen2.5:14b
 EXTRACT_DEEPER_PASS=false
+
+# Search / reranker
+RERANK_ENABLED=true
+RERANK_MODEL=ms-marco-reranker
+WA_SEARCH_TOP_K=5
+
+# Family calendar routing (comma-separated name variants, no real names in repo)
+CHILD1_NAMES=<firstname,nickname>
+CHILD2_NAMES=<firstname,nickname>
+CALENDAR_MIRROR_PRIMARY_EMAIL=<email>
+CALENDAR_MIRROR_SECONDARY_EMAIL=<email>
+CALENDAR_MIRROR_PARTNER_EMAIL=<email>
 
 # Poll intervals
 EMAIL_POLL_INTERVAL_SECS=300
@@ -392,22 +616,24 @@ CALENDAR_POLL_INTERVAL_SECS=900
 ### Node labels
 
 | Label | Key properties |
-|-------|---------------|
-| `Document` | `filename`, `row_id`, `schema`, `preview` |
-| `Concept` | `name`, `description` |
-| `Person` | `name`, `description` |
-| `Organisation` | `name`, `description` |
+|---|---|
+| `Document` | `filename`, `row_id`, `schema`, `preview`, `ref` |
+| `Concept` | `name`, `description`, `type` |
+| `Person` | `name`, `description`, `ref` |
+| `Organisation` | `name`, `description`, `ref` |
 | `Claim` | `claim_id`, `text`, `significance`, `confidence`, `framework` |
 | `Framework` | `name`, `description`, `domain` |
-| `Message` | `source`, `source_id`, `from_handle`, `subject`, `received_at`, `preview` |
+| `Message` | `source`, `source_id`, `from_handle`, `subject`, `received_at`, `preview`, `ref` |
 | `Sender` | `handle`, `name`, `source` |
-| `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `effective_date`, `event_type`, `calendar_source`, `gcal_event_id`, `next_update_at` |
+| `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `effective_date`, `event_type`, `gcal_event_id`, `next_update_at`, `fact_*`, `ref` |
 | `Bill` | `bill_id`, `payee`, `amount`, `due_date`, `status`, `reference`, `resolved_at` |
+
+`fact_*` properties on `Event` and other nodes are open-ended — extracted fields such as `fact_provider`, `fact_location`, `fact_notes`, `fact_cost`, `fact_duration` are written by the enrichment pipeline and are never truncated. The `ref` field on each node is a hydration handle (`"schema.table:id"`) for resolving back to the full Postgres row.
 
 ### Edge types
 
 | Edge | From → To | Notes |
-|------|-----------|-------|
+|---|---|---|
 | `MENTIONS` | Document → Concept/Person/Organisation | |
 | `ASSERTS` | Document → Claim | |
 | `RELATES_TO` | Document → Theme | |
@@ -449,6 +675,9 @@ Always use `--no-deps` when restarting a single service:
 docker compose up -d --no-deps email-sync
 ```
 
+### NPU model shapes
+OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshaped to `[1, max_length]` at startup in `inference-server/src/model_registry.py`. If you see `ZE_RESULT_ERROR_INVALID_ARGUMENT` during model load, check that `max_length` in `models.yaml` matches the tokenizer's expected sequence length.
+
 ---
 
 ## Roadmap
@@ -457,16 +686,24 @@ docker compose up -d --no-deps email-sync
 - [x] Channel + rule architecture — inbound/outbound channels with per-channel scheduling rules
 - [x] `next_update_at` materialised on ingest — appointment updater is a single indexed poll
 - [x] Email decomposer — LLM breaks emails into typed items (event / payment / task / observation)
-- [x] `effective_date` — timezone-correct calendar date on all events (Brisbane local, no UTC drift)
+- [x] `effective_date` — timezone-correct calendar date on all events (local time, no UTC drift)
 - [x] Separate email/calendar sync cursors — no cursor overwrite between email and calendar loops
 - [x] Holiday day expansion — multi-day holidays create individual day events in Family calendar
 - [x] Multi-entity domain support — `financial_domain.entity_slug = NULL` triggers per-email LLM classification
 - [x] Senders management hub — rescue/block/recategorise senders, learn multi-entity domains
+- [x] `fact_*` property pattern — typed, non-truncated facts on graph nodes
+- [x] `ref` hydration handle — every graph node carries a pointer back to its Postgres row
+- [x] `set_node_facts()` — idempotent fact writer in graph.py
+- [x] NPU embedding — nomic-embed-text on Intel AI Boost NPU
+- [x] NPU reranker — cross-encoder ms-marco on NPU, 20-candidate → top-5 pipeline
+- [x] Single-pass classifier — one LLM call returns graph routing + persona selection as JSON
+- [x] Thumbs-down feedback — chat UI flags poor responses to `config.query_feedback` review queue
+- [ ] Adaptive appointment enrichment — nightly enrich sweep updates `fact_*` from linked documents
+- [ ] Temporal reprioritisation — event priority escalation as effective_date approaches
 - [ ] Voice notes channel — direct `upsert_event` / `personal.note` write, channel rules handle routing
 - [ ] SMS / WhatsApp inbound channel
 - [ ] Bank feed ingestion — parse transaction emails, match against open bills
 - [ ] Bill auto-resolution — `Bill` node status lifecycle; payment signal matching
-- [ ] Adaptive appointment enrichment — `ENRICHES` edge when new docs relate to existing `Event` nodes
-- [ ] Temporal reprioritisation — event priority escalation as appointment date approaches
 - [ ] Entity correction feedback loop — dashboard UI writes to `extraction_feedback`
 - [ ] Azure app registration for Outlook (refresh token flow)
+- [ ] Graph hydration endpoint — `POST /hydrate` in graph-api resolves `ref` back to full Postgres row

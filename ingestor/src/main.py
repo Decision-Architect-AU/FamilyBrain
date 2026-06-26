@@ -35,6 +35,7 @@ PROCESSING_DIR = pathlib.Path(os.environ.get("INGEST_PROCESSING_DIR", "/data/Pro
 INGESTED_DIR   = pathlib.Path(os.environ.get("INGEST_DONE_DIR", "/data/Ingested"))
 
 SUPPORTED = {".pdf", ".docx", ".doc", ".txt", ".md", ".text", ".csv",
+             ".xlsx", ".xls",
              ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
 
 ENABLE_DEEP_PASS   = os.environ.get("EXTRACT_DEEP_PASS",   "true").lower() == "true"
@@ -118,22 +119,27 @@ def process_file(src: pathlib.Path) -> None:
         extract_quick(text, on_chunk=on_chunk)
         graph_writer.stamp_parse(schema, src.name, extract_concepts.QUICK_MODEL)
 
+        # Spreadsheets always get the 32b deeper pass — they're dense with structured data
+        # that smaller models miss (formulas rendered as values, cross-sheet references, etc.)
+        is_spreadsheet = src.suffix.lower() in (".xlsx", ".xls")
+
         # ── Pass 2: deep extraction (14b) — runs in background, enriches existing nodes ──
-        if ENABLE_DEEP_PASS:
-            def _deep_pass(t=text, s=schema, n=src.name, nid=node_id, tid=theme_id):
+        if ENABLE_DEEP_PASS or is_spreadsheet:
+            def _deep_pass(t=text, s=schema, n=src.name, nid=node_id, tid=theme_id,
+                           deeper=ENABLE_DEEPER_PASS or is_spreadsheet):
                 print(f"[ingestor] Pass 2 (deep) starting for {n}...")
                 def on_chunk_deep(chunk_result):
                     graph_writer.write_extracted_nodes(s, n, nid, _normalize_chunk(chunk_result), tid, embed)
                 extract_deep(t, on_chunk=on_chunk_deep)
                 graph_writer.stamp_parse(s, n, extract_concepts.DEEP_MODEL)
                 print(f"[ingestor] Pass 2 (deep) complete for {n}")
-                if ENABLE_DEEPER_PASS:
+                if deeper:
                     def on_chunk_deeper(chunk_result):
                         graph_writer.write_extracted_nodes(s, n, nid, _normalize_chunk(chunk_result), tid, embed)
-                    print(f"[ingestor] Pass 3 (deeper) starting for {n}...")
+                    print(f"[ingestor] Pass 3 (deeper/32b) starting for {n}...")
                     extract_deeper(t, on_chunk=on_chunk_deeper)
                     graph_writer.stamp_parse(s, n, extract_concepts.DEEPER_MODEL)
-                    print(f"[ingestor] Pass 3 (deeper) complete for {n}")
+                    print(f"[ingestor] Pass 3 (deeper/32b) complete for {n}")
             threading.Thread(target=_deep_pass, daemon=True).start()
 
         # Determine source type: PDFs/DOCXs from personal folder are financial_doc by convention

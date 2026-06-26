@@ -9,6 +9,8 @@ def extract_text(path: pathlib.Path) -> str:
         return _extract_pdf(path)
     elif suffix in (".docx", ".doc"):
         return _extract_docx(path)
+    elif suffix in (".xlsx", ".xls"):
+        return _extract_excel(path)
     elif suffix in (".md", ".txt", ".text"):
         return path.read_text(encoding="utf-8", errors="replace")
     elif suffix in (".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"):
@@ -71,6 +73,48 @@ def extract_bytes(data: bytes, filename: str) -> str:
         return extract_text(tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _extract_excel(path: pathlib.Path) -> str:
+    suffix = path.suffix.lower()
+    # Primary: openpyxl for .xlsx
+    if suffix == ".xlsx":
+        try:
+            import openpyxl  # type: ignore
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            parts = []
+            for ws in wb.worksheets:
+                sheet_rows = []
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) for c in row if c is not None]
+                    if cells:
+                        sheet_rows.append("\t".join(cells))
+                if sheet_rows:
+                    parts.append(f"[Sheet: {ws.title}]\n" + "\n".join(sheet_rows))
+            wb.close()
+            text = "\n\n".join(parts)
+            if text.strip():
+                return text
+        except Exception as e:
+            print(f"[extract] openpyxl failed for {path.name}: {e}")
+    # Fallback: xlrd for .xls (and older .xlsx)
+    try:
+        import xlrd  # type: ignore
+        wb = xlrd.open_workbook(str(path))
+        parts = []
+        for ws in wb.sheets():
+            sheet_rows = []
+            for rx in range(ws.nrows):
+                cells = [str(ws.cell_value(rx, cx)) for cx in range(ws.ncols)
+                         if ws.cell_value(rx, cx) not in (None, "")]
+                if cells:
+                    sheet_rows.append("\t".join(cells))
+            if sheet_rows:
+                parts.append(f"[Sheet: {ws.name}]\n" + "\n".join(sheet_rows))
+        return "\n\n".join(parts)
+    except Exception as e:
+        print(f"[extract] xlrd failed for {path.name}: {e}")
+        return ""
 
 
 def _extract_docx(path: pathlib.Path) -> str:
