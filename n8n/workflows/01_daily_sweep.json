@@ -1,0 +1,109 @@
+{
+  "name": "OpenClaw — Daily Morning Sweep",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * *" }]
+        }
+      },
+      "name": "Every day 7am AEST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "id": "trigger-daily"
+    },
+    {
+      "parameters": {
+        "url": "http://ingestor:4001/notifications/run-rules",
+        "options": { "timeout": 60000 }
+      },
+      "name": "Run rule watcher",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [480, 300],
+      "id": "run-rules"
+    },
+    {
+      "parameters": {
+        "url": "http://ingestor:4001/notifications/run-detectors",
+        "options": { "timeout": 60000 }
+      },
+      "name": "Run notification detectors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [720, 300],
+      "id": "run-detectors"
+    },
+    {
+      "parameters": {
+        "url": "http://ingestor:4001/api/notifications",
+        "options": {}
+      },
+      "name": "Fetch active notifications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [960, 300],
+      "id": "fetch-notifications"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "id": "has-high",
+              "leftValue": "={{ $json.notifications.filter(n => n.severity === 'HIGH').length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "name": "Any HIGH notifications?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "id": "check-high"
+    },
+    {
+      "parameters": {
+        "jsCode": "const notifications = $('Fetch active notifications').first().json.notifications || [];\nconst high = notifications.filter(n => n.severity === 'HIGH');\nconst medium = notifications.filter(n => n.severity === 'MEDIUM');\n\nlet msg = '🔔 *OpenClaw Morning Briefing*\\n';\nconst today = new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Australia/Brisbane' });\nmsg += `_${today}_\\n\\n`;\n\nif (high.length > 0) {\n  msg += `⚡ *${high.length} HIGH priority:*\\n`;\n  high.slice(0, 5).forEach(n => {\n    msg += `• ${n.title}\\n`;\n  });\n  if (high.length > 5) msg += `  _...and ${high.length - 5} more_\\n`;\n  msg += '\\n';\n}\n\nif (medium.length > 0) {\n  msg += `⚠️ *${medium.length} medium:* ${medium.slice(0,3).map(n=>n.title).join(', ')}`;\n  if (medium.length > 3) msg += ` +${medium.length-3} more`;\n  msg += '\\n';\n}\n\nmsg += `\\n_View all: http://localhost:3000/notifications_`;\n\nreturn [{ json: { message: msg } }];"
+      },
+      "name": "Build WA message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 220],
+      "id": "build-message"
+    },
+    {
+      "parameters": {
+        "url": "http://wa-agent:4002/notify",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"message\": $json.message } }}",
+        "options": {}
+      },
+      "name": "Push to WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1680, 220],
+      "id": "push-wa"
+    }
+  ],
+  "connections": {
+    "Every day 7am AEST": { "main": [[{ "node": "Run rule watcher", "type": "main", "index": 0 }]] },
+    "Run rule watcher":   { "main": [[{ "node": "Run notification detectors", "type": "main", "index": 0 }]] },
+    "Run notification detectors": { "main": [[{ "node": "Fetch active notifications", "type": "main", "index": 0 }]] },
+    "Fetch active notifications": { "main": [[{ "node": "Any HIGH notifications?", "type": "main", "index": 0 }]] },
+    "Any HIGH notifications?": {
+      "main": [
+        [{ "node": "Build WA message", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Build WA message": { "main": [[{ "node": "Push to WhatsApp", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "openclaw" }
+}

@@ -1,0 +1,61 @@
+{
+  "name": "OpenClaw — WhatsApp Notification Push",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "openclaw-notify",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "id": "webhook",
+      "webhookId": "openclaw-notify"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Payload: { type, severity, title, summary }\nconst n = $input.first().json.body || $input.first().json;\nconst icon = n.severity === 'HIGH' ? '🚨' : n.severity === 'MEDIUM' ? '⚠️' : 'ℹ️';\nconst typeLabel = {\n  COLLISION: 'Schedule conflict',\n  SYSTEM_HEALTH: 'System health',\n  PATTERN_GAP: 'Pattern gap',\n  STALENESS: 'Stale data',\n  ACTION_REQUIRED: 'Action required'\n}[n.type] || n.type;\n\nconst msg = `${icon} *${typeLabel}*\\n${n.title}\\n${n.summary || ''}`;\nreturn [{ json: { message: msg } }];"
+      },
+      "name": "Format notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "id": "format"
+    },
+    {
+      "parameters": {
+        "url": "http://wa-agent:4002/notify",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"message\": $json.message } }}",
+        "options": { "timeout": 10000 }
+      },
+      "name": "Push to WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [720, 300],
+      "id": "push-wa"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }"
+      },
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [960, 300],
+      "id": "respond"
+    }
+  ],
+  "connections": {
+    "Webhook trigger":    { "main": [[{ "node": "Format notification", "type": "main", "index": 0 }]] },
+    "Format notification": { "main": [[{ "node": "Push to WhatsApp", "type": "main", "index": 0 }]] },
+    "Push to WhatsApp":   { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "openclaw" }
+}

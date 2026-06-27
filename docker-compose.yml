@@ -160,6 +160,8 @@ services:
       EMAIL_SMTP_PORT:    ${EMAIL_SMTP_PORT:-587}
       EMAIL_SMTP_USER:    ${EMAIL_SMTP_USER:-}
       EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+      WA_BRIDGE_URL: http://whatsapp:3002
+      WA_SELF_NUMBER: ${WA_SELF_NUMBER:-}
     ports:
       - "4002:4002"
     depends_on:

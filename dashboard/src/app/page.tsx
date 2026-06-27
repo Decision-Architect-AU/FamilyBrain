@@ -18,6 +18,23 @@ function ReviewBadge() {
     </Link>
   );
 }
+
+function NotificationsBadge() {
+  const { data } = useSWR('/api/notifications', (url: string) => fetch(url).then(r => r.json()), { refreshInterval: 30000 });
+  const notifications = data?.notifications ?? [];
+  const high = notifications.filter((n: { severity: string }) => n.severity === 'HIGH').length;
+  const total = notifications.length;
+  return (
+    <Link href="/notifications" className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
+      Notifications
+      {total > 0 && (
+        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${high > 0 ? 'bg-red-500 text-white' : 'bg-gray-600 text-gray-200'}`}>
+          {total}
+        </span>
+      )}
+    </Link>
+  );
+}
 import { ModePanel } from '@/components/ModePanel';
 import { AuditFeed } from '@/components/AuditFeed';
 import { StatsPanel } from '@/components/StatsPanel';
@@ -46,6 +63,10 @@ export default function Home() {
             Chat
           </Link>
           <ReviewBadge />
+          <NotificationsBadge />
+          <Link href="/assets" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Assets
+          </Link>
           <Link href="/senders" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Senders
           </Link>

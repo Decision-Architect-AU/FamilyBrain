@@ -1,7 +1,7 @@
 """Write AGE graph nodes for ingested documents and extracted concepts."""
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -14,7 +14,29 @@ GRAPH_MAP = {
     "decision":  "decision_graph",
 }
 
-# Property keys whose values are capped at DISPLAY_CAP chars (human-readable labels).
+# ── Collision awareness by node label ────────────────────────────────────────
+# collision_aware=True means the notification detector compares commitment windows.
+# Reminders, medications, bin nights etc. never collide — they are informational only.
+
+COLLISION_AWARE_LABELS = {
+    "Appointment":    True,
+    "SchoolEvent":    True,
+    "SportingEvent":  True,
+    "PropertyEvent":  True,
+    "FinancialEvent": True,
+    "Travel":         True,
+    "Event":          True,   # generic fallback — most events should participate
+    "BinNight":       False,
+    "SchoolHoliday":  False,
+    "PublicHoliday":  False,
+    "Reminder":       False,
+    "Medication":     False,
+    "Script":         False,
+}
+
+ATTENDANCE_MODES = ("IN_PERSON", "ONLINE", "HYBRID")
+
+# ── Property keys whose values are capped at DISPLAY_CAP chars (human-readable labels).
 # fact_* and ref are intentionally absent — lookup facts must never be truncated.
 _DISPLAY_KEYS = frozenset({"description", "preview", "notes", "subject", "text",
                             "significance", "body_preview"})
@@ -68,6 +90,44 @@ def _build_set(alias: str, d: dict) -> str:
         if lit is not None:
             parts.append(f"{alias}.{k} = {lit}")
     return ", ".join(parts)
+
+
+# ── Commitment window ─────────────────────────────────────────────────────────
+
+def derive_commitment_window(event: dict) -> tuple[str, str]:
+    """
+    Returns (commitment_start_iso, commitment_end_iso) for collision comparison.
+    Extends raw event window by travel buffers for IN_PERSON events.
+    Stored on the graph node so the collision detector only reads properties.
+    """
+    def _parse(ts):
+        if not ts:
+            return None
+        if isinstance(ts, datetime):
+            return ts
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc) \
+                    if ts.endswith("Z") or "+" not in ts else datetime.fromisoformat(ts)
+            except ValueError:
+                continue
+        return None
+
+    start = _parse(event.get("starts_at") or event.get("event_start") or event.get("event_date"))
+    end   = _parse(event.get("ends_at")   or event.get("event_end"))
+    if not start:
+        now = datetime.now(timezone.utc)
+        return now.isoformat(), now.isoformat()
+    if not end:
+        end = start + timedelta(hours=1)
+
+    if event.get("attendance_mode", "IN_PERSON") != "ONLINE":
+        before = event.get("travel_buffer_before_min") or 0
+        after  = event.get("travel_buffer_after_min")  or 0
+        start  = start - timedelta(minutes=before)
+        end    = end   + timedelta(minutes=after)
+
+    return start.isoformat(), end.isoformat()
 
 
 # ── Connection helper ─────────────────────────────────────────────────────────
@@ -463,25 +523,176 @@ def write_event_node(
     calendar_source: str = "",
     calendar_event_id: str = "",
     notes: str = "",
+    label: str = "Event",
+    attendance_mode: str = "IN_PERSON",
+    travel_buffer_before_min: int | None = None,
+    travel_buffer_after_min: int | None = None,
+    asset_id: int | None = None,
+    generated_by_rule: str | None = None,
 ) -> None:
-    """Write a generic (:Event) node in personal_graph."""
+    """Write a graph event node in personal_graph."""
     graph     = "personal_graph"
     event_key = f"event:{event_row_id}"
     ref       = f"personal.event:{event_row_id}"
-    props     = build_props({
-        "event_key":         event_key,
-        "event_row_id":      event_row_id,
-        "title":             title,
+
+    collision_aware = COLLISION_AWARE_LABELS.get(label, True)
+
+    ev = {
         "starts_at":         starts_at,
         "ends_at":           ends_at,
-        "event_type":        event_type,
-        "calendar_source":   calendar_source,
-        "calendar_event_id": calendar_event_id,
-        "notes":             notes,
-        "ref":               ref,
+        "attendance_mode":   attendance_mode,
+        "travel_buffer_before_min": travel_buffer_before_min,
+        "travel_buffer_after_min":  travel_buffer_after_min,
+    }
+    commitment_start, commitment_end = derive_commitment_window(ev)
+
+    props = build_props({
+        "event_key":              event_key,
+        "event_row_id":           event_row_id,
+        "title":                  title,
+        "starts_at":              starts_at,
+        "ends_at":                ends_at,
+        "event_type":             event_type,
+        "calendar_source":        calendar_source,
+        "calendar_event_id":      calendar_event_id,
+        "notes":                  notes,
+        "ref":                    ref,
+        "collision_aware":        collision_aware,
+        "attendance_mode":        attendance_mode,
+        "travel_buffer_before_min": travel_buffer_before_min,
+        "travel_buffer_after_min":  travel_buffer_after_min,
+        "commitment_start":       commitment_start,
+        "commitment_end":         commitment_end,
+        "asset_id":               asset_id,
+        "generated_by_rule":      generated_by_rule,
     })
     try:
-        _cypher1(graph, f"MERGE (e:Event {{{props}}}) RETURN e")
-        print(f"[graph] Event node: {title} @ {starts_at}")
+        _cypher1(graph, f"MERGE (e:{label} {{{props}}}) RETURN e")
+        print(f"[graph] {label} node: {title} @ {starts_at}")
     except Exception as e:
-        print(f"[graph] Event node error '{title}': {e}")
+        print(f"[graph] {label} node error '{title}': {e}")
+
+
+def write_asset_node(asset: dict) -> None:
+    """Write an :Asset node in personal_graph linked to its personal.asset row."""
+    graph = "personal_graph"
+    ref   = f"personal.asset:{asset['id']}"
+    facts = asset.get("facts", {})
+
+    node_props = {
+        "ref":        ref,
+        "name":       asset["name"],
+        "asset_type": asset["asset_type"],
+        "status":     asset.get("status", "active"),
+        "asset_id":   asset["id"],
+    }
+    # Promote facts to fact_* properties on the node
+    for k, v in facts.items():
+        node_props[f"fact_{k}"] = v
+
+    props = build_props(node_props)
+    try:
+        _cypher1(graph, f"MERGE (a:Asset {{ref: {_cypher_val('ref', ref)}}}) SET {_build_set('a', node_props)} RETURN a")
+        print(f"[graph] Asset node: {asset['name']} ({asset['asset_type']})")
+    except Exception as e:
+        print(f"[graph] Asset node error '{asset['name']}': {e}")
+
+
+def spawn_travel_nodes(
+    event_row_id: int,
+    starts_at: str,
+    ends_at: str,
+    buffer_before_min: int,
+    buffer_after_min: int,
+    location: str = "",
+) -> None:
+    """
+    Create TravelTo / TravelFrom nodes flanking an IN_PERSON event and link them.
+    These nodes participate in collision detection via their own commitment windows.
+    """
+    graph     = "personal_graph"
+    event_ref = f"personal.event:{event_row_id}"
+
+    try:
+        dt_start = datetime.fromisoformat(starts_at)
+        dt_end   = datetime.fromisoformat(ends_at) if ends_at else dt_start + timedelta(hours=1)
+    except ValueError:
+        return
+
+    travel_to_start   = (dt_start - timedelta(minutes=buffer_before_min)).isoformat()
+    travel_to_end     = dt_start.isoformat()
+    travel_from_start = dt_end.isoformat()
+    travel_from_end   = (dt_end + timedelta(minutes=buffer_after_min)).isoformat()
+
+    to_props   = build_props({
+        "ref":              f"travel_to:{event_row_id}",
+        "travel_type":      "TO",
+        "linked_event_ref": event_ref,
+        "starts_at":        travel_to_start,
+        "ends_at":          travel_to_end,
+        "location":         location,
+        "collision_aware":  True,
+        "commitment_start": travel_to_start,
+        "commitment_end":   travel_to_end,
+    })
+    from_props = build_props({
+        "ref":              f"travel_from:{event_row_id}",
+        "travel_type":      "FROM",
+        "linked_event_ref": event_ref,
+        "starts_at":        travel_from_start,
+        "ends_at":          travel_from_end,
+        "location":         location,
+        "collision_aware":  True,
+        "commitment_start": travel_from_start,
+        "commitment_end":   travel_from_end,
+    })
+
+    try:
+        _cypher1(graph, f"MERGE (t:Travel {{{to_props}}}) RETURN t")
+        _cypher1(graph, f"MERGE (t:Travel {{{from_props}}}) RETURN t")
+        # Link travel nodes to the event
+        _merge_edge(
+            graph,
+            f"MATCH (t:Travel {{ref: \"travel_to:{event_row_id}\"}}) ",
+            f"MATCH (e {{ref: \"{event_ref}\"}}) ",
+            "TRAVEL_TO",
+        )
+        _merge_edge(
+            graph,
+            f"MATCH (e {{ref: \"{event_ref}\"}}) ",
+            f"MATCH (t:Travel {{ref: \"travel_from:{event_row_id}\"}}) ",
+            "TRAVEL_FROM",
+        )
+        print(f"[graph] Travel nodes spawned for event {event_row_id}")
+    except Exception as e:
+        print(f"[graph] Travel node error for event {event_row_id}: {e}")
+
+
+def on_event_date_change(event_row_id: int, new_starts_at: str, new_ends_at: str = "") -> None:
+    """
+    Update commitment_start/commitment_end on an existing event node and its travel nodes
+    when the event date is changed (e.g. rescheduled from WhatsApp).
+    """
+    graph     = "personal_graph"
+    event_ref = f"personal.event:{event_row_id}"
+
+    try:
+        dt_start = datetime.fromisoformat(new_starts_at)
+        dt_end   = datetime.fromisoformat(new_ends_at) if new_ends_at else dt_start + timedelta(hours=1)
+    except ValueError:
+        return
+
+    # Update event node timestamps
+    try:
+        _cypher1(
+            graph,
+            f"MATCH (e {{ref: \"{event_ref}\"}}) "
+            f"SET e.starts_at = \"{_esc(new_starts_at)}\", "
+            f"    e.ends_at   = \"{_esc(dt_end.isoformat())}\", "
+            f"    e.commitment_start = \"{_esc(new_starts_at)}\", "
+            f"    e.commitment_end   = \"{_esc(dt_end.isoformat())}\" "
+            f"RETURN e"
+        )
+        print(f"[graph] Event {event_row_id} date updated → {new_starts_at}")
+    except Exception as e:
+        print(f"[graph] on_event_date_change error for {event_row_id}: {e}")

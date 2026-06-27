@@ -20,6 +20,7 @@ import time
 from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import httpx
 
 from src.classify import classify
 from src.search import retrieve
@@ -261,6 +262,36 @@ async def health():
     return {"status": "ok", "smtp": smtp_configured()}
 
 
+class NotifyRequest(BaseModel):
+    message: str
+    to: str | None = None  # defaults to WA_SELF_NUMBER
+
+
+WA_BRIDGE_URL  = os.environ.get("WA_BRIDGE_URL", "http://whatsapp:3002")
+WA_SELF_NUMBER = os.environ.get("WA_SELF_NUMBER", "")  # E.164 without +, e.g. 61412345678
+
+import httpx
+
+@app.post("/notify")
+async def notify(req: NotifyRequest):
+    """
+    Push a message to WhatsApp (Saved Messages / self-chat).
+    Called by n8n daily sweep and alert workflows.
+    """
+    if not WA_SELF_NUMBER:
+        return {"ok": False, "error": "WA_SELF_NUMBER not configured"}
+    to = req.to or WA_SELF_NUMBER
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{WA_BRIDGE_URL}/send",
+                json={"to": to, "message": req.message},
+            )
+        return {"ok": resp.status_code == 200}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 _UPDATE_PATTERNS = re.compile(
@@ -273,11 +304,155 @@ def _is_update_intent(message: str) -> bool:
     return bool(_UPDATE_PATTERNS.match(message.strip()))
 
 
+INGESTOR_URL = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
+
+
 async def _handle_command(sender: str, cmd: dict, t0: float) -> QueryResponse:
     if cmd["type"] == "send_email":
         return await _prepare_email(sender, cmd["topic"], cmd["to"], t0)
+    if cmd["type"] == "upcoming_events":
+        return await _handle_upcoming_events(cmd["window"], t0)
+    if cmd["type"] == "notifications":
+        return await _handle_notifications(t0)
+    if cmd["type"] == "assets":
+        return await _handle_assets(t0)
+    if cmd["type"] == "add_event":
+        return await _handle_add_event(sender, cmd["description"], cmd.get("when"), t0)
     elapsed = int((time.time() - t0) * 1000)
     return QueryResponse(response="Unknown command.", graphs_used=[], elapsed_ms=elapsed)
+
+
+async def _handle_upcoming_events(window: str, t0: float) -> QueryResponse:
+    """Pull upcoming events from personal.event and summarise them."""
+    import psycopg2
+    import psycopg2.extras
+    DB_URL = os.environ.get("DATABASE_URL")
+    window_sql = {
+        "today":     "interval '1 day'",
+        "tomorrow":  "interval '2 days'",
+        "week":      "interval '7 days'",
+        "next_week": "interval '14 days'",
+        "month":     "interval '30 days'",
+    }.get(window, "interval '7 days'")
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT title, event_type, starts_at, notes
+                FROM personal.event
+                WHERE starts_at BETWEEN now() AND now() + {window_sql}
+                  AND status NOT IN ('cancelled', 'done')
+                ORDER BY starts_at
+                LIMIT 15
+                """,
+            )
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response=f"⚠️ Couldn't fetch events: {e}", graphs_used=[], elapsed_ms=elapsed)
+
+    if not rows:
+        label = {"today": "today", "tomorrow": "tomorrow", "week": "this week", "next_week": "the next two weeks", "month": "the next month"}.get(window, "this week")
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response=f"Nothing on for {label}.", graphs_used=[], elapsed_ms=elapsed)
+
+    lines = []
+    for r in rows:
+        dt   = r["starts_at"]
+        label = dt.strftime("%a %d %b") if hasattr(dt, "strftime") else str(dt)[:10]
+        lines.append(f"• {label} — {r['title']}")
+
+    msg = f"📅 *Upcoming ({window.replace('_', ' ')})*\n" + "\n".join(lines)
+    elapsed = int((time.time() - t0) * 1000)
+    return QueryResponse(response=msg, graphs_used=["personal_graph"], elapsed_ms=elapsed)
+
+
+async def _handle_notifications(t0: float) -> QueryResponse:
+    """Fetch active notifications and summarise for WhatsApp."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(f"{INGESTOR_URL}/api/notifications")
+        data = resp.json()
+    except Exception as e:
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response=f"⚠️ Couldn't fetch notifications: {e}", graphs_used=[], elapsed_ms=elapsed)
+
+    notifications = data.get("notifications", [])
+    if not notifications:
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response="✅ No active notifications — all clear.", graphs_used=[], elapsed_ms=elapsed)
+
+    high   = [n for n in notifications if n["severity"] == "HIGH"]
+    medium = [n for n in notifications if n["severity"] == "MEDIUM"]
+    low    = [n for n in notifications if n["severity"] == "LOW"]
+
+    lines = [f"🔔 *{len(notifications)} notification{'s' if len(notifications) != 1 else ''}*\n"]
+    if high:
+        lines.append(f"🚨 *High ({len(high)})*")
+        for n in high[:4]:
+            lines.append(f"  • {n['title']}")
+        if len(high) > 4:
+            lines.append(f"  _+{len(high)-4} more_")
+    if medium:
+        lines.append(f"⚠️ *Medium ({len(medium)})*")
+        for n in medium[:3]:
+            lines.append(f"  • {n['title']}")
+    if low:
+        lines.append(f"ℹ️ Low: {len(low)} item{'s' if len(low) != 1 else ''}")
+
+    elapsed = int((time.time() - t0) * 1000)
+    return QueryResponse(response="\n".join(lines), graphs_used=[], elapsed_ms=elapsed)
+
+
+async def _handle_assets(t0: float) -> QueryResponse:
+    """Fetch assets and summarise for WhatsApp."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(f"{INGESTOR_URL}/api/assets")
+        data = resp.json()
+    except Exception as e:
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response=f"⚠️ Couldn't fetch assets: {e}", graphs_used=[], elapsed_ms=elapsed)
+
+    assets = data.get("assets", [])
+    if not assets:
+        elapsed = int((time.time() - t0) * 1000)
+        return QueryResponse(response="No assets tracked yet.", graphs_used=[], elapsed_ms=elapsed)
+
+    from collections import Counter
+    counts = Counter(a["asset_type"] for a in assets)
+    icons  = {"vehicle": "🚗", "medication": "💊", "property": "🏠",
+              "subscription": "📦", "person": "👤", "device": "💻", "pet": "🐾"}
+
+    lines = [f"📁 *{len(assets)} asset{'s' if len(assets) != 1 else ''}*\n"]
+    for atype, count in sorted(counts.items()):
+        icon  = icons.get(atype, "•")
+        names = [a["name"] for a in assets if a["asset_type"] == atype]
+        lines.append(f"{icon} *{atype.capitalize()}s ({count})*: {', '.join(names)}")
+
+    # Flag any with upcoming events
+    with_next = [a for a in assets if a.get("next_event_date")]
+    if with_next:
+        lines.append(f"\n⏰ *Upcoming:*")
+        for a in sorted(with_next, key=lambda x: x["next_event_date"])[:4]:
+            lines.append(f"  • {a['name']} — {a['next_event_date'][:10]}")
+
+    elapsed = int((time.time() - t0) * 1000)
+    return QueryResponse(response="\n".join(lines), graphs_used=[], elapsed_ms=elapsed)
+
+
+async def _handle_add_event(sender: str, description: str, when: str | None, t0: float) -> QueryResponse:
+    """Route 'add event' intent to ingest pipeline for extraction and storage."""
+    body = f"Add event: {description}" + (f" on {when}" if when else "")
+    result = ingest_text(sender, body)
+    elapsed = int((time.time() - t0) * 1000)
+    return QueryResponse(
+        response=result.get("response", "✅ Event noted — I'll extract the details and add it."),
+        graphs_used=["personal_graph"],
+        elapsed_ms=elapsed,
+    )
 
 
 async def _prepare_email(sender: str, topic: str, to: str, t0: float) -> QueryResponse:

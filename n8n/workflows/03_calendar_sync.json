@@ -1,0 +1,82 @@
+{
+  "name": "OpenClaw — Calendar Sync (rule-generated events)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "30 7 * * *" }]
+        }
+      },
+      "name": "Every day 7:30am AEST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "id": "trigger"
+    },
+    {
+      "parameters": {
+        "url": "http://ingestor:4001/api/events/pending-sync",
+        "options": {}
+      },
+      "name": "Fetch pending events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [480, 300],
+      "id": "fetch-pending"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "events",
+        "options": {}
+      },
+      "name": "Split events",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [720, 300],
+      "id": "split"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "has-title",
+              "leftValue": "={{ $json.title }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ]
+        }
+      },
+      "name": "Has title?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "id": "check-title"
+    },
+    {
+      "parameters": {
+        "url": "http://ingestor:4001/api/events/mark-synced",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"event_id\": $json.id, \"gcal_event_id\": $json.gcal_event_id } }}",
+        "options": {}
+      },
+      "name": "Mark synced",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1200, 220],
+      "id": "mark-synced"
+    }
+  ],
+  "connections": {
+    "Every day 7:30am AEST": { "main": [[{ "node": "Fetch pending events", "type": "main", "index": 0 }]] },
+    "Fetch pending events":   { "main": [[{ "node": "Split events", "type": "main", "index": 0 }]] },
+    "Split events":           { "main": [[{ "node": "Has title?", "type": "main", "index": 0 }]] },
+    "Has title?":             { "main": [[{ "node": "Mark synced", "type": "main", "index": 0 }], []] }
+  },
+  "notes": "Add a Google Calendar 'Create Event' node between 'Has title?' and 'Mark synced' once Google Calendar credentials are configured in n8n. The ingestor /api/events/pending-sync endpoint returns rule-generated events with status='pending' and no gcal_event_id.",
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "openclaw" }
+}

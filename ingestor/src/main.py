@@ -29,6 +29,7 @@ from src import graph as graph_writer
 from src.categorise import categorise_email, save_category, backfill_categories
 from src.config_index import record_ingest
 from src.triage import triage_email
+from src.asset_router import try_asset_routing
 
 WATCH_DIR      = pathlib.Path(os.environ.get("INGEST_WATCH_DIR", "/data/ReadyToIngest"))
 PROCESSING_DIR = pathlib.Path(os.environ.get("INGEST_PROCESSING_DIR", "/data/Processing"))
@@ -91,6 +92,7 @@ def process_file(src: pathlib.Path) -> None:
         if schema == "personal":
             node_id = ingest_personal(text, src.name)
             target_table = "personal.note"
+            try_asset_routing(text, f"file:{src.name}")
         elif schema == "property":
             node_id = ingest_property(text, src.name)
             target_table = "property_deals.scraped_listing"
@@ -254,6 +256,7 @@ def ingest_email(payload: dict) -> dict:
             note_id = ingest_personal(full_text, f"email:{provider_msg_id}", tags)
             target_table = "personal.note"
             row_id = note_id
+            try_asset_routing(full_text, f"email:{provider_msg_id}")
         elif schema == "property":
             row_id = ingest_property(full_text, f"email:{provider_msg_id}")
             target_table = "property_deals.scraped_listing"
@@ -546,6 +549,132 @@ def ingest_observation(payload: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _api_get_notifications() -> dict:
+    """Return unread/snoozed notifications ordered by severity then created_at."""
+    import psycopg2
+    import psycopg2.extras
+    DB_URL = os.environ.get("DATABASE_URL")
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, type, severity, status, title, summary,
+                           options, payload, node_refs,
+                           created_at, expires_at
+                    FROM personal.notifications
+                    WHERE status IN ('DETECTED', 'TRIAGED', 'PENDING')
+                      AND (expires_at IS NULL OR expires_at > now())
+                    ORDER BY
+                        CASE severity WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
+                        created_at DESC
+                    LIMIT 100
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        for r in rows:
+            for k in ("created_at", "expires_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat()
+        return {"ok": True, "notifications": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "notifications": []}
+
+
+def _api_get_pending_sync() -> dict:
+    """Return rule-generated events that haven't been pushed to Google Calendar yet."""
+    import psycopg2
+    import psycopg2.extras
+    DB_URL = os.environ.get("DATABASE_URL")
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT e.id, e.title, e.event_type, e.starts_at, e.ends_at,
+                           e.notes, e.generated_by_rule, e.asset_id,
+                           a.name AS asset_name, a.asset_type
+                    FROM personal.event e
+                    LEFT JOIN personal.asset a ON a.id = e.asset_id
+                    WHERE e.status = 'pending'
+                      AND e.generated_by_rule IS NOT NULL
+                      AND (e.gcal_event_id IS NULL OR e.gcal_event_id = '')
+                      AND e.starts_at > now()
+                    ORDER BY e.starts_at
+                    LIMIT 50
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        for r in rows:
+            for k in ("starts_at", "ends_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat()
+        return {"ok": True, "events": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "events": []}
+
+
+def _api_mark_event_synced(event_id: int, gcal_event_id: str) -> dict:
+    """Mark an event as having been pushed to Google Calendar."""
+    import psycopg2
+    DB_URL = os.environ.get("DATABASE_URL")
+    if not event_id:
+        return {"ok": False, "error": "event_id required"}
+    try:
+        conn = psycopg2.connect(DB_URL)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE personal.event
+                    SET gcal_event_id = %s,
+                        calendar_written_at = now(),
+                        status = CASE WHEN status = 'pending' THEN 'upcoming' ELSE status END
+                    WHERE id = %s
+                    """,
+                    (gcal_event_id or f"rule:{event_id}", event_id),
+                )
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _api_get_assets() -> dict:
+    """Return active assets with their next_event_date and rule count."""
+    import psycopg2
+    import psycopg2.extras
+    DB_URL = os.environ.get("DATABASE_URL")
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, asset_type, subtype, status, facts,
+                           next_event_date, last_event_date,
+                           jsonb_array_length(COALESCE(rules, '[]'::jsonb)) AS rule_count,
+                           created_at, updated_at
+                    FROM personal.asset
+                    WHERE status = 'active'
+                    ORDER BY asset_type, name
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        for r in rows:
+            for k in ("next_event_date", "last_event_date", "created_at", "updated_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat() if hasattr(r[k], "isoformat") else str(r[k])
+        return {"ok": True, "assets": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "assets": []}
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -553,6 +682,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         elif self.path == "/scan":
             threading.Thread(target=scan_existing, daemon=True).start()
             self._respond(200, {"status": "scan triggered"})
+        elif self.path.startswith("/api/notifications"):
+            self._respond(200, _api_get_notifications())
+        elif self.path.startswith("/api/events/pending-sync"):
+            self._respond(200, _api_get_pending_sync())
+        elif self.path.startswith("/api/assets"):
+            self._respond(200, _api_get_assets())
         else:
             self._respond(404, {"error": "not found"})
 
@@ -585,6 +720,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         elif self.path == "/ingest/reparse":
             # Body: {filename, schema, ollama_url (optional), model (optional)}
             result = reparse_document(body)
+        elif self.path == "/api/events/mark-synced":
+            event_id    = body.get("event_id")
+            gcal_id     = body.get("gcal_event_id", "")
+            result      = _api_mark_event_synced(event_id, gcal_id)
+        elif self.path == "/notifications/run-detectors":
+            def _run():
+                from src.notification_detectors import run_all_detectors
+                totals = run_all_detectors()
+                print(f"[detectors] {totals}")
+            threading.Thread(target=_run, daemon=True).start()
+            result = {"ok": True, "message": "Detector sweep started"}
+        elif self.path == "/notifications/run-rules":
+            def _run_rules():
+                from src.rule_watcher import run_all_assets
+                created = run_all_assets()
+                print(f"[rule_watcher] created {len(created)} events")
+            threading.Thread(target=_run_rules, daemon=True).start()
+            result = {"ok": True, "message": "Rule watcher started"}
         elif self.path == "/ingest/categorise-batch":
             # Backfill categories for previously ingested emails with no category.
             # Optional body: {"limit": 200}
