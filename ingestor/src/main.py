@@ -243,7 +243,13 @@ def ingest_email(payload: dict) -> dict:
         return {"ok": True, "skipped": triage_action}
 
     # Build full text for classify + embed
-    full_text = f"From: {from_name} <{from_address}>\nSubject: {subject}\n\n{body_text}"
+    is_sent      = payload.get("is_sent", False)
+    to_addresses = payload.get("to_addresses") or []
+    to_str       = ", ".join(to_addresses)
+    if is_sent:
+        full_text = f"To: {to_str}\nSubject: {subject}\n\n{body_text}"
+    else:
+        full_text = f"From: {from_name} <{from_address}>\nSubject: {subject}\n\n{body_text}"
 
     try:
         # Classify schema
@@ -251,6 +257,8 @@ def ingest_email(payload: dict) -> dict:
 
         # Ingest into schema
         tags = [f"email", f"from:{from_address}", subject[:80]]
+        if is_sent:
+            tags = ["email", "sent", f"to:{to_str[:80]}", subject[:80]]
         note_id = None  # only set for personal schema (FK to personal.note)
         if schema == "personal":
             note_id = ingest_personal(full_text, f"email:{provider_msg_id}", tags)

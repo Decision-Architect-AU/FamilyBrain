@@ -51,24 +51,15 @@ _VECTOR_SEARCH = {
             "extra_cols": "'note' AS source_type, id, tags::text AS meta",
         },
         # upcoming events window: next 14 days + last 7
-        "event_sql": """
-            SELECT 'health_event' AS source_type, e.id,
-                   e.title || COALESCE(' (' || e.event_type || ')', '') AS text,
-                   e.starts_at::text AS meta,
-                   NULL::float AS dist
-            FROM personal.event e
-            WHERE e.event_type = 'medical'
-              AND e.starts_at BETWEEN now() - interval '7 days' AND now() + interval '14 days'
-            ORDER BY e.starts_at LIMIT 10
-        """,
         "schedule_sql": """
             SELECT 'event' AS source_type, id,
-                   title || COALESCE(' (' || event_type || ')', '') AS text,
+                   title || COALESCE(' — ' || notes, '') || COALESCE(' (' || event_type || ')', '') AS text,
                    starts_at::text AS meta,
                    NULL::float AS dist
             FROM personal.event
-            WHERE starts_at BETWEEN now() - interval '7 days' AND now() + interval '60 days'
-            ORDER BY starts_at LIMIT 15
+            WHERE starts_at BETWEEN now() - interval '30 days' AND now() + interval '90 days'
+              AND status NOT IN ('cancelled', 'done')
+            ORDER BY starts_at LIMIT 20
         """,
         "medication_sql": """
             SELECT 'medication' AS source_type, m.id,
@@ -137,6 +128,53 @@ _VECTOR_SEARCH = {
         """,
     },
 }
+
+
+_APPOINTMENT_KW = re.compile(
+    r'\b(appointment|appointments|session|sessions|schedule|medical|speech|therapy|'
+    r'physio|ot\b|psycholog|dentist|gp|doctor|specialist|referral|clinic|hospital)\b',
+    re.I,
+)
+
+
+def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
+    """
+    Query-aware event search: filter personal.event by query terms in title/notes.
+    Runs when the query mentions appointments or schedule keywords.
+    Returns matching events across all time (past and future) so history is visible.
+    """
+    if not _APPOINTMENT_KW.search(query) or not terms:
+        return []
+
+    # Build ILIKE conditions for each meaningful term
+    conditions = " OR ".join(
+        f"(e.title ILIKE %s OR COALESCE(e.notes,'') ILIKE %s)"
+        for _ in terms[:6]
+    )
+    params = []
+    for t in terms[:6]:
+        params += [f"%{t}%", f"%{t}%"]
+
+    sql = f"""
+        SELECT 'health_event' AS source_type, e.id,
+               e.title || COALESCE(' — ' || e.notes, '') || ' (' || e.starts_at::date::text || ')' AS text,
+               e.starts_at::text AS meta,
+               3 AS match_score,
+               NULL::float AS dist
+        FROM personal.event e
+        WHERE ({conditions})
+          AND e.status NOT IN ('cancelled', 'done')
+        ORDER BY e.starts_at DESC
+        LIMIT 20
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[search] Targeted event search error: {e}")
+        conn.rollback()
+        return []
 
 
 def _rerank(query: str, rows: list[dict]) -> list[dict]:
@@ -592,7 +630,11 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                             print(f"[search] Ownership query error: {e}")
                             conn.rollback()
 
-                # 3. Supplementary SQL queries (events, schedule, medications, framework)
+                # 3a. Targeted event search — query-aware, all-time, high priority
+                if graph == "personal_graph":
+                    _add_rows(_targeted_event_search(conn, query, terms))
+
+                # 3b. Supplementary SQL queries (schedule, medications, framework)
                 for extra_key in ("event_sql", "schedule_sql", "medication_sql", "framework_sql"):
                     extra_sql = cfg.get(extra_key)
                     if not extra_sql:

@@ -68,6 +68,23 @@ def detect_collisions(conn) -> int:
     (graph query would be ideal but keeps this portable).
     Only checks events in the next 30 days.
     """
+    # Auto-resolve collision notifications whose events are now in the past
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE personal.notifications n
+            SET status = 'RESOLVED', updated_at = now()
+            WHERE n.type = 'COLLISION'
+              AND n.status NOT IN ('RESOLVED', 'IGNORED')
+              AND EXISTS (
+                SELECT 1 FROM personal.event e
+                WHERE e.id = (n.payload->>'event_id_a')::bigint
+                  AND e.starts_at < now()
+              )
+            """
+        )
+    conn.commit()
+
     created = 0
     with conn.cursor() as cur:
         cur.execute(

@@ -48,6 +48,18 @@ def update_sync_cursor(account_id: int, cursor: str) -> None:
         c.commit()
 
 
+def update_sent_sync_cursor(account_id: int, cursor: str) -> None:
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_account
+                   SET sent_sync_cursor = %s, updated_at = now()
+                   WHERE id = %s""",
+                (cursor, account_id),
+            )
+        c.commit()
+
+
 def update_calendar_sync_cursor(account_id: int, cursor: str) -> None:
     with conn() as c:
         with c.cursor() as cur:

@@ -237,6 +237,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     "received_at":     msg.get("receivedDateTime"),
                     "body_text":       body_text,
                     "attachments":     [],
+                    "is_sent":         False,
                 }
                 r2 = requests.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
                 if r2.ok:
@@ -280,6 +281,111 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
     if skipped:
         print(f"[outlook] {skipped} messages skipped (junk/filtered) for {account['email_address']}")
+
+    # Sync SentItems folder separately
+    ingested += _sync_sent_items(account, ingestor_url)
+
+    return ingested
+
+
+def _sync_sent_items(account: dict, ingestor_url: str) -> int:
+    """Sync Outlook SentItems folder using its own delta cursor."""
+    import requests as req_lib
+    account_id = account["id"]
+    cursor     = account.get("sent_sync_cursor")
+    ingested   = 0
+
+    try:
+        if cursor:
+            url = cursor
+        else:
+            initial_days = int(os.environ.get("OUTLOOK_INITIAL_DAYS", "90"))
+            since = (datetime.now(timezone.utc) - timedelta(days=initial_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            url = (
+                f"{GRAPH_BASE}/me/mailFolders/SentItems/messages"
+                f"?$top=50&$orderby=receivedDateTime+desc"
+                f"&$select=id,subject,from,toRecipients,receivedDateTime,body,conversationId"
+                f"&$filter=receivedDateTime+ge+{since}"
+            )
+
+        while url:
+            resp = req_lib.get(url, headers=_headers(account), timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for msg in data.get("value", []):
+                msg_id = msg["id"]
+                if db.is_already_ingested(account_id, msg_id):
+                    continue
+
+                from_name, from_addr = _parse_address(msg.get("from") or {})
+                to_addrs = [
+                    r["emailAddress"]["address"]
+                    for r in msg.get("toRecipients") or []
+                    if r.get("emailAddress", {}).get("address")
+                ]
+                body_obj  = msg.get("body") or {}
+                body_text = (
+                    _strip_html(body_obj.get("content", ""))
+                    if (body_obj.get("contentType") or "").lower() == "html"
+                    else body_obj.get("content", "")
+                )
+                subject = msg.get("subject") or "(no subject)"
+
+                ok, reason = should_ingest(
+                    from_address=from_addr,
+                    subject=subject,
+                    body_text=body_text,
+                )
+                if not ok:
+                    db.mark_skipped(account_id, msg_id, from_addr, subject,
+                                    msg.get("receivedDateTime"), reason)
+                    continue
+
+                payload = {
+                    "account_id":      account_id,
+                    "provider_msg_id": msg_id,
+                    "thread_id":       msg.get("conversationId"),
+                    "from_address":    from_addr,
+                    "from_name":       from_name,
+                    "to_addresses":    to_addrs,
+                    "subject":         subject,
+                    "received_at":     msg.get("receivedDateTime"),
+                    "body_text":       body_text,
+                    "attachments":     [],
+                    "is_sent":         True,
+                }
+                r2 = req_lib.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
+                if r2.ok:
+                    ingested += 1
+                else:
+                    print(f"[outlook] sent ingestor rejected {msg_id}: {r2.text}")
+
+            next_link  = data.get("@odata.nextLink")
+            delta_link = data.get("@odata.deltaLink")
+            if next_link:
+                url = next_link
+                db.update_sent_sync_cursor(account_id, next_link)
+            elif delta_link:
+                db.update_sent_sync_cursor(account_id, delta_link)
+                url = None
+            else:
+                if not cursor:
+                    seed_resp = req_lib.get(
+                        f"{GRAPH_BASE}/me/mailFolders/SentItems/messages/delta?$top=1&$select=id",
+                        headers=_headers(account), timeout=30,
+                    )
+                    seed_data = seed_resp.json()
+                    while seed_data.get("@odata.nextLink"):
+                        seed_resp = req_lib.get(seed_data["@odata.nextLink"], headers=_headers(account), timeout=30)
+                        seed_data = seed_resp.json()
+                    if seed_data.get("@odata.deltaLink"):
+                        db.update_sent_sync_cursor(account_id, seed_data["@odata.deltaLink"])
+                url = None
+
+    except Exception as e:
+        print(f"[outlook] _sync_sent_items failed for {account['email_address']}: {e}")
+
     return ingested
 
 

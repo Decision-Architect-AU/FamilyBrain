@@ -108,6 +108,7 @@ def _parse_message(msg: dict) -> dict:
     body_text    = _extract_body(payload)
     internal_ms  = int(msg.get("internalDate", 0))
     received_at  = datetime.fromtimestamp(internal_ms / 1000, tz=timezone.utc).isoformat()
+    is_sent      = "SENT" in msg.get("labelIds", [])
     return {
         "provider_msg_id": msg["id"],
         "thread_id":       msg.get("threadId"),
@@ -118,6 +119,7 @@ def _parse_message(msg: dict) -> dict:
         "received_at":     received_at,
         "body_text":       body_text,
         "attachments":     [],
+        "is_sent":         is_sent,
     }
 
 

@@ -1,14 +1,18 @@
 # OpenClaw — Self-Hosted Personal AI Stack
 
-A fully self-hosted, multi-mode AI agent system built on a GMKtec Core Ultra 9 mini PC (96 GB RAM, Intel Arc GPU 48 GB VRAM, NPU). Runs entirely on-device — no cloud APIs, no data leaving the machine.
+OpenClaw treats events as the atomic unit of life and builds a knowledge graph around them. Every bill, appointment, prescription, and booking is a node that gets richer over time as new information arrives — automatically enriched, contextually assembled, and routed to the right calendar without manual input.
+
+The problem it solves: a household generates hundreds of documents, emails, and appointments a year, each carrying facts that are relevant to something else. A GP referral letter contains the specialist's name and a follow-up date. A prescription email contains a supply duration that determines when the next script is due. A travel booking triggers a passport check, an insurance review, and a pet care reminder. None of this gets connected unless someone connects it manually — and nobody does.
+
+OpenClaw connects it automatically. Every inbound email, file, or message is decomposed into typed items, stored as graph nodes with structured facts, and cross-referenced against everything already known. Appointments are enriched continuously as new documents arrive. Bills resolve when payments are detected. Reminders are generated when the graph detects something that should exist but doesn't yet. The right information ends up in the right place — calendar, dashboard, or WhatsApp — without manual routing.
+
+It runs entirely on-device. No cloud APIs. No data leaving the machine.
 
 ---
 
 ## What it does
 
 OpenClaw continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard and WhatsApp agent. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
-
-The core design principle is **adaptive self-improvement**: the system continuously learns from new information and updates its own state without manual intervention. Appointments evolve as context arrives, bills auto-resolve when payment is detected, proactive reminders fire based on channel rules and real-world timelines, and the graph accumulates rich typed facts that make every future answer more precise.
 
 ---
 
@@ -372,38 +376,19 @@ Bills that remain `unpaid` past their due date surface as `overdue` in the dashb
 
 **Email decomposer breaks emails into typed items** — a single email containing a meeting invite, a payment request, and an observation produces three independent items routed to three different outbound channels.
 
-**Separate sync cursors** — `sync_cursor` (email historyId / Outlook deltaLink) and `calendar_sync_cursor` (GCal syncToken) are independent columns on `personal.email_account`. They never overwrite each other.
+**Separate sync cursors** — `sync_cursor` (inbox historyId / Outlook deltaLink), `sent_sync_cursor` (Outlook SentItems deltaLink), and `calendar_sync_cursor` (GCal syncToken) are independent columns on `personal.email_account`. They never overwrite each other.
+
+**Sent item ingestion** — both Gmail and Outlook sync sent items alongside received mail. Gmail includes `in:sent` in the initial query and detects the `SENT` label on incremental history events. Outlook runs a separate `SentItems` delta query with its own cursor. Sent emails are stored with `is_sent = true`, formatted as `To: <recipients>` in the knowledge base, and tagged `sent` so they are retrievable as outbound context. This is important when multiple household members' accounts are connected: your side of every email thread is captured even if you sent rather than received it.
+
+**Inter-party forwarding awareness** — when two accounts are connected (e.g. primary and partner), emails sent from one account that arrive in the other's inbox are ingested as received mail on the second account. This is intentional: because sent items are now also ingested from the originating account, both sides of every conversation exist in the knowledge base. Deduplication is keyed on `(account_id, provider_msg_id)` so the same message appears once per account — the received copy carries the recipient's perspective (any annotations, labels, or reply context) while the sent copy carries the full outbound text.
+
+**Collision awareness** — the notification detector only raises schedule conflicts for events in the next 30 days, automatically excludes holidays, birthdays, and anniversaries (which span days and would collide with everything), and auto-resolves any existing collision notification when the earlier of the two conflicting events has passed.
 
 **Graph facts are never truncated** — `fact_*` properties on graph nodes carry the full extracted value. Display fields (`preview`, `description`) are capped at 500 chars for UI. The distinction is enforced in `build_props()` in `ingestor/src/graph.py`.
 
 **Single-pass classification** — the wa-agent runs one LLM call that returns both graph routing targets (`["personal_graph"]`) and persona selection as a single JSON response, replacing two previously separate calls.
 
 **Two-stage retrieval** — vector search and FTS retrieve 20 candidates; the cross-encoder reranker (NPU, `ms-marco-MiniLM-L-6-v2`) rescores them; the top 5 go to the LLM. This gives reranker-quality context at half the LLM token cost.
-
----
-
-## Hardware
-
-| Component | Spec |
-|---|---|
-| CPU | Intel Core Ultra 9 185H |
-| RAM | 96 GB DDR5 |
-| GPU | Intel Arc 140T — 48 GB shared VRAM |
-| NPU | Intel AI Boost |
-| OS | Windows 11 Pro + WSL2/Ubuntu |
-
-### Model assignments
-
-| Model | Format | Device | Role |
-|---|---|---|---|
-| qwen2.5:14b | OpenVINO INT4 | Arc GPU | Email decomposition, financial extraction, bill calendar |
-| qwen2.5:3b | OpenVINO INT4 | AUTO:GPU,CPU | Fast classification (Pass 1) |
-| qwen2.5:32b | OpenVINO INT4 | GPU,CPU | Deep extraction (Pass 3, optional) |
-| nomic-embed-text | OpenVINO | NPU | Semantic embeddings (768-dim) |
-| ms-marco-reranker | OpenVINO INT8 | NPU | Cross-encoder reranking of search candidates |
-| whisper-small | OpenVINO | CPU | Speech-to-text transcription |
-
-The NPU runs embedding and reranking continuously without competing with the GPU for LLM inference, giving low-latency semantic search at effectively zero GPU cost.
 
 ---
 
@@ -530,7 +515,7 @@ Runs five sequential stages after each email poll:
 
 | Table | Purpose |
 |---|---|
-| `personal.email_account` | One row per inbox; holds OAuth tokens, `sync_cursor`, `calendar_sync_cursor` |
+| `personal.email_account` | One row per inbox; holds OAuth tokens, `sync_cursor`, `sent_sync_cursor`, `calendar_sync_cursor` |
 | `personal.email_message` | Dedup + ingestion state per message |
 | `personal.event` | All calendar events; `effective_date` (local date), `next_update_at`, `gcal_event_id` |
 | `personal.calendar_sync_map` | Source→target event ID mapping for bidirectional sync |
@@ -647,6 +632,31 @@ CALENDAR_POLL_INTERVAL_SECS=900
 
 ---
 
+## Hardware
+
+| Component | Spec |
+|---|---|
+| CPU | Intel Core Ultra 9 185H |
+| RAM | 96 GB DDR5 |
+| GPU | Intel Arc 140T — 48 GB shared VRAM |
+| NPU | Intel AI Boost |
+| OS | Windows 11 Pro + WSL2/Ubuntu |
+
+### Model assignments
+
+| Model | Format | Device | Role |
+|---|---|---|---|
+| qwen2.5:14b | OpenVINO INT4 | Arc GPU | Email decomposition, financial extraction, bill calendar |
+| qwen2.5:3b | OpenVINO INT4 | AUTO:GPU,CPU | Fast classification (Pass 1) |
+| qwen2.5:32b | OpenVINO INT4 | GPU,CPU | Deep extraction (Pass 3, optional) |
+| nomic-embed-text | OpenVINO | NPU | Semantic embeddings (768-dim) |
+| ms-marco-reranker | OpenVINO INT8 | NPU | Cross-encoder reranking of search candidates |
+| whisper-small | OpenVINO | CPU | Speech-to-text transcription |
+
+The NPU runs embedding and reranking continuously without competing with the GPU for LLM inference, giving low-latency semantic search at effectively zero GPU cost.
+
+---
+
 ## Port map
 
 See [PORT_MAP.md](PORT_MAP.md).
@@ -687,7 +697,10 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] `next_update_at` materialised on ingest — appointment updater is a single indexed poll
 - [x] Email decomposer — LLM breaks emails into typed items (event / payment / task / observation)
 - [x] `effective_date` — timezone-correct calendar date on all events (local time, no UTC drift)
-- [x] Separate email/calendar sync cursors — no cursor overwrite between email and calendar loops
+- [x] Separate email/calendar sync cursors — no cursor overwrite between email, sent, and calendar loops
+- [x] Sent item ingestion — Gmail (`SENT` label) and Outlook (`SentItems` delta) ingested alongside received mail; formatted as outbound context in the knowledge base
+- [x] Inter-party forwarding awareness — sent items from one connected account appear as received mail on others; both copies retained with `(account_id, provider_msg_id)` dedup
+- [x] Collision auto-resolution — past conflicts auto-resolve; holidays, birthdays, and anniversaries excluded from collision detection
 - [x] Holiday day expansion — multi-day holidays create individual day events in Family calendar
 - [x] Multi-entity domain support — `financial_domain.entity_slug = NULL` triggers per-email LLM classification
 - [x] Senders management hub — rescue/block/recategorise senders, learn multi-entity domains

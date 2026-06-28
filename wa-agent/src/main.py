@@ -17,6 +17,7 @@ Per-sender state:
 import os
 import re
 import time
+from datetime import datetime
 from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -213,7 +214,9 @@ async def query(req: QueryRequest):
             f"Note: No relevant information found in the knowledge base.\n\nAssistant:"
         )
 
-    system = build_system_prompt(SYSTEM_PROMPT, intent.persona_prompt)
+    today_str = datetime.now().strftime("%A, %-d %B %Y")
+    date_injection = f"Today is {today_str} ({TIMEZONE_ABBR}). All date references should be interpreted relative to this date."
+    system = build_system_prompt(SYSTEM_PROMPT + "\n" + date_injection, intent.persona_prompt)
     if intent.persona_name:
         print(f"[wa-agent] persona={intent.persona_name}")
 
