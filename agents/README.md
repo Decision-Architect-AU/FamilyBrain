@@ -1,4 +1,4 @@
-# agents
+﻿# agents
 
 CrewAI-based agent suite. Runs scheduled PR and research workflows.
 
@@ -17,7 +17,7 @@ CrewAI-based agent suite. Runs scheduled PR and research workflows.
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://pr_agent:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://pr_agent:<password>@postgres:5432/familybrain
 AUDIT_SERVICE_URL=http://audit-logger:4000
 OLLAMA_URL=http://172.23.96.1:11434
 AGENT_MODEL=qwen2.5:32b

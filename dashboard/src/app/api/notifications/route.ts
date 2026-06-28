@@ -1,8 +1,8 @@
-import { NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-const INGESTOR = process.env.INGESTOR_URL ?? 'http://openclaw-ingestor:4001';
+const INGESTOR = process.env.INGESTOR_URL ?? 'http://familybrain-ingestor:4001';
 
 export async function GET() {
   try {

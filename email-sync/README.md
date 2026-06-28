@@ -1,4 +1,4 @@
-# email-sync
+﻿# email-sync
 
 Polls Gmail and Outlook accounts and pushes email and calendar data into the knowledge base.
 
@@ -51,7 +51,7 @@ When multiple accounts are connected (e.g. yours and your partner's), emails you
 ## Key env vars
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
 GOOGLE_CLIENT_ID=<required>
 GOOGLE_CLIENT_SECRET=<required>
 MICROSOFT_CLIENT_ID=<required>

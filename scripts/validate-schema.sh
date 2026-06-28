@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Quick sanity check: connect as superuser and verify all tables exist
 set -euo pipefail
 
 PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" psql \
     -h localhost -p 5432 \
     -U "${POSTGRES_SUPERUSER:-geoff}" \
-    -d openclaw \
+    -d familybrain \
     -c "
 SELECT schemaname, tablename
 FROM pg_tables
@@ -18,7 +18,7 @@ echo "-- Extensions:"
 PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" psql \
     -h localhost -p 5432 \
     -U "${POSTGRES_SUPERUSER:-geoff}" \
-    -d openclaw \
+    -d familybrain \
     -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('vector','age','pg_trgm');"
 
 echo ""
@@ -26,7 +26,7 @@ echo "-- AGE graphs:"
 PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" psql \
     -h localhost -p 5432 \
     -U "${POSTGRES_SUPERUSER:-geoff}" \
-    -d openclaw \
+    -d familybrain \
     -c "SELECT name FROM ag_catalog.ag_graph;"
 
 echo ""
@@ -34,5 +34,5 @@ echo "-- Seed themes:"
 PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" psql \
     -h localhost -p 5432 \
     -U "${POSTGRES_SUPERUSER:-geoff}" \
-    -d openclaw \
+    -d familybrain \
     -c "SELECT name, priority FROM decision_architect.theme ORDER BY priority;"

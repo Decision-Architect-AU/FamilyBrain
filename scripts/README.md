@@ -1,4 +1,4 @@
-# scripts
+﻿# scripts
 
 Utility scripts for managing the stack.
 
@@ -13,7 +13,7 @@ Utility scripts for managing the stack.
 
 ## Usage
 
-Always run from the `openclaw/` root directory (where `docker-compose.yml` lives):
+Always run from the `familybrain/` root directory (where `docker-compose.yml` lives):
 
 ```bash
 bash scripts/start-core.sh

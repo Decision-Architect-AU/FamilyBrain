@@ -1,4 +1,4 @@
-# age-viewer
+﻿# age-viewer
 
 Apache AGE Viewer — raw Cypher query interface against the AGE graph. Kept for direct graph inspection and debugging.
 
@@ -16,7 +16,7 @@ Open `http://localhost:8888` and connect with:
 |-------|-------|
 | Host | `postgres` |
 | Port | `5432` |
-| Database | `openclaw` |
+| Database | `familybrain` |
 | User | `geoff` |
 | Password | *(from `.env` `POSTGRES_SUPERUSER_PASSWORD`)* |
 

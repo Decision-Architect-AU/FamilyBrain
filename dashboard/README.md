@@ -1,4 +1,4 @@
-# dashboard
+﻿# dashboard
 
 Next.js web UI. Central control surface for the stack.
 
@@ -34,7 +34,7 @@ Direct Postgres reads (via `DATABASE_URL`) are used for audit log, review queue,
 ## Key env vars
 
 ```env
-DATABASE_URL=postgresql://dashboard_ro:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://dashboard_ro:<password>@postgres:5432/familybrain
 WA_AGENT_URL=http://wa-agent:4002
 MODE_FILE=/shared/current_mode
 ```

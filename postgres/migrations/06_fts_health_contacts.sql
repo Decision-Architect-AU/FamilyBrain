@@ -1,5 +1,5 @@
--- Migration 06: Full-text search, health tables, contact fields, new intent rules
--- Apply with: docker exec -i openclaw-postgres psql -U openclaw -d openclaw < migrations/06_fts_health_contacts.sql
+﻿-- Migration 06: Full-text search, health tables, contact fields, new intent rules
+-- Apply with: docker exec -i familybrain-postgres psql -U familybrain -d familybrain < migrations/06_fts_health_contacts.sql
 
 -- ── Extensions ────────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -98,10 +98,10 @@ CREATE TRIGGER trg_medication_updated BEFORE UPDATE ON personal.medication
     FOR EACH ROW EXECUTE FUNCTION personal.set_medication_updated_at();
 
 -- Grants
-GRANT SELECT, INSERT, UPDATE ON personal.medication TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE personal.medication_id_seq TO openclaw_curator_role;
-GRANT SELECT, INSERT, UPDATE ON personal.medication TO openclaw_n8n_role;
-GRANT USAGE ON SEQUENCE personal.medication_id_seq TO openclaw_n8n_role;
+GRANT SELECT, INSERT, UPDATE ON personal.medication TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE personal.medication_id_seq TO familybrain_curator_role;
+GRANT SELECT, INSERT, UPDATE ON personal.medication TO familybrain_n8n_role;
+GRANT USAGE ON SEQUENCE personal.medication_id_seq TO familybrain_n8n_role;
 
 -- ── New intent rules ──────────────────────────────────────────────────────────
 

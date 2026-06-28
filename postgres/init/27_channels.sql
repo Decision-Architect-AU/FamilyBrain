@@ -1,4 +1,4 @@
--- Channel registry + scheduling rules
+﻿-- Channel registry + scheduling rules
 -- Channels are inbound sources (gmail, outlook, voice) and outbound destinations
 -- (gcal_family, gcal_bills, task_list, etc.).
 -- Rules per channel control: what matches, when to push (schedule), how to route.
@@ -111,7 +111,7 @@ FROM personal.channel WHERE slug = 'gcal_primary'
 ON CONFLICT DO NOTHING;
 
 -- ── Grants ────────────────────────────────────────────────────────────────────
-GRANT SELECT ON personal.channel TO openclaw_curator_role, dashboard_ro;
-GRANT SELECT ON personal.channel_rule TO openclaw_curator_role, dashboard_ro;
-GRANT INSERT, UPDATE ON personal.channel_rule TO openclaw_curator_role, dashboard_ro;
-GRANT USAGE ON SEQUENCE personal.channel_rule_id_seq TO openclaw_curator_role, dashboard_ro;
+GRANT SELECT ON personal.channel TO familybrain_curator_role, dashboard_ro;
+GRANT SELECT ON personal.channel_rule TO familybrain_curator_role, dashboard_ro;
+GRANT INSERT, UPDATE ON personal.channel_rule TO familybrain_curator_role, dashboard_ro;
+GRANT USAGE ON SEQUENCE personal.channel_rule_id_seq TO familybrain_curator_role, dashboard_ro;

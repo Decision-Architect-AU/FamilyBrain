@@ -1,4 +1,4 @@
-# OpenClaw n8n Workflows
+﻿# FamilyBrain n8n Workflows
 
 Three workflow files in `workflows/` — import each via n8n UI: **Workflows → Import from file**.
 
@@ -15,7 +15,7 @@ Runs every day at 7am AEST.
 
 ## 02 — WhatsApp Notification Push (webhook)
 
-Webhook trigger at `/webhook/openclaw-notify`. Any service can POST:
+Webhook trigger at `/webhook/familybrain-notify`. Any service can POST:
 
 ```json
 { "type": "COLLISION", "severity": "HIGH", "title": "Schedule conflict", "summary": "..." }
@@ -23,7 +23,7 @@ Webhook trigger at `/webhook/openclaw-notify`. Any service can POST:
 
 Formats and pushes to WhatsApp immediately. Use for real-time alerts from external systems.
 
-**Webhook URL:** `http://localhost:5678/webhook/openclaw-notify`
+**Webhook URL:** `http://localhost:5678/webhook/familybrain-notify`
 
 ## 03 — Calendar Sync
 

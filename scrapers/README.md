@@ -1,4 +1,4 @@
-# scrapers
+﻿# scrapers
 
 Property listing scraper. Watches configured suburbs and ingests listings into the property deals pipeline.
 
@@ -12,7 +12,7 @@ Property listing scraper. Watches configured suburbs and ingests listings into t
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://scraper:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://scraper:<password>@postgres:5432/familybrain
 AUDIT_SERVICE_URL=http://audit-logger:4000
 OLLAMA_URL=http://172.23.96.1:11434
 SCRAPE_SUBURBS=Brisbane,QLD

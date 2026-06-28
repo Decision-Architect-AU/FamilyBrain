@@ -1,5 +1,5 @@
-/**
- * OpenClaw WhatsApp Bridge
+﻿/**
+ * FamilyBrain WhatsApp Bridge
  *
  * Connects to WhatsApp Web via QR scan (no Meta Business API needed).
  *

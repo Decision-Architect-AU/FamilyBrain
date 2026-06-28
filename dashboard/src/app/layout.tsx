@@ -1,9 +1,9 @@
-import type { Metadata } from 'next';
+﻿import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'OpenClaw',
-  description: 'OpenClaw AI Stack Dashboard',
+  title: 'FamilyBrain',
+  description: 'FamilyBrain AI Stack Dashboard',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

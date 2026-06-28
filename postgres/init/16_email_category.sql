@@ -1,4 +1,4 @@
--- Add category fields to email_message
+﻿-- Add category fields to email_message
 -- Run this as a migration on existing databases
 -- (New installs get it via 15_schema_email.sql order — this file runs after)
 
@@ -29,4 +29,4 @@ CREATE INDEX IF NOT EXISTS idx_email_message_uncategorised
 
 -- Grant curator access (email-sync + ingestor run as curator role)
 GRANT UPDATE (category, category_confidence, categorised_at)
-    ON personal.email_message TO openclaw_curator_role;
+    ON personal.email_message TO familybrain_curator_role;

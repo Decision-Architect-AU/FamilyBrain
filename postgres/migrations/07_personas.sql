@@ -1,5 +1,5 @@
--- Migration 07: Response personas — structured output templates per intent
--- Apply: docker exec -i openclaw-postgres psql -U geoff -d openclaw < migrations/07_personas.sql
+﻿-- Migration 07: Response personas — structured output templates per intent
+-- Apply: docker exec -i familybrain-postgres psql -U geoff -d familybrain < migrations/07_personas.sql
 
 CREATE TABLE IF NOT EXISTS config.response_persona (
     id          serial      PRIMARY KEY,

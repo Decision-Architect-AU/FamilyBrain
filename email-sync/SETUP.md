@@ -1,8 +1,8 @@
-# Email Sync Setup
+﻿# Email Sync Setup
 
 ## 1. Google OAuth2 App (once — covers all Gmail accounts)
 
-1. Go to https://console.cloud.google.com → New Project → "OpenClaw"
+1. Go to https://console.cloud.google.com → New Project → "FamilyBrain"
 2. Enable APIs: **Gmail API** and **Google Calendar API**
 3. Credentials → Create OAuth 2.0 Client ID → Desktop app
 4. Download client_secret JSON → note `client_id` and `client_secret`
@@ -15,7 +15,7 @@
 ## 2. Microsoft OAuth2 App (once — covers all Outlook/Hotmail accounts)
 
 1. Go to https://portal.azure.com → App registrations → New registration
-2. Name: "OpenClaw", Supported account types: **Personal Microsoft accounts only**
+2. Name: "FamilyBrain", Supported account types: **Personal Microsoft accounts only**
 3. Add Redirect URI: `http://localhost` (public client / mobile)
 4. API permissions → Add: `Mail.Read`, `Calendars.ReadWrite`, `offline_access`
 5. Note the Application (client) ID
@@ -30,7 +30,7 @@
 Use the helper script to authorise each account and get its refresh token:
 
 ```bash
-# From openclaw root
+# From familybrain root
 docker compose run --rm email-sync python -m src.auth_helper
 ```
 

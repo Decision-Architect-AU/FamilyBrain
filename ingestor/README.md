@@ -1,4 +1,4 @@
-# ingestor
+﻿# ingestor
 
 Central ingestion service. Accepts documents from all channels and routes them into the knowledge base.
 
@@ -70,7 +70,7 @@ After any personal-schema ingest, `asset_router.py` runs in a background thread:
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
 AUDIT_SERVICE_URL=http://audit-logger:4000
 OLLAMA_URL=http://172.23.96.1:11434
 AGENT_MODEL=qwen2.5:3b

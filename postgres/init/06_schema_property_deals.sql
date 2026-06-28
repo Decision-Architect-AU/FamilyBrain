@@ -1,4 +1,4 @@
--- property_deals schema: property portfolio, deal pipeline, scraping jobs
+﻿-- property_deals schema: property portfolio, deal pipeline, scraping jobs
 -- Relational tables for structured data; AGE graph (property_graph) for case studies
 
 SET search_path = property_deals, public;
@@ -109,28 +109,28 @@ GRANT SELECT, INSERT, UPDATE ON
     property_deals.scrape_job,
     property_deals.scraped_listing,
     property_deals.event
-TO openclaw_scraper_role;
+TO familybrain_scraper_role;
 
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA property_deals TO openclaw_scraper_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA property_deals TO familybrain_scraper_role;
 
 GRANT SELECT ON
     property_deals.property,
     property_deals.deal,
     property_deals.event
-TO openclaw_pr_agent_role, openclaw_curator_role, openclaw_readonly;
+TO familybrain_pr_agent_role, familybrain_curator_role, familybrain_readonly;
 
 GRANT SELECT ON
     property_deals.scrape_job,
     property_deals.scraped_listing
-TO openclaw_curator_role, openclaw_readonly;
+TO familybrain_curator_role, familybrain_readonly;
 
 -- Curator can write to property (for case-study promotion)
-GRANT INSERT, UPDATE ON property_deals.property TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE property_deals.property_id_seq TO openclaw_curator_role;
+GRANT INSERT, UPDATE ON property_deals.property TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE property_deals.property_id_seq TO familybrain_curator_role;
 
 -- n8n needs full access for orchestration
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA property_deals TO openclaw_n8n_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA property_deals TO openclaw_n8n_role;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA property_deals TO familybrain_n8n_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA property_deals TO familybrain_n8n_role;
 
 -- Trigger: keep updated_at current
 CREATE OR REPLACE FUNCTION property_deals.set_updated_at()

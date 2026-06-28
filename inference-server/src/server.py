@@ -1,7 +1,7 @@
-"""
-OpenClaw Inference Server — Ollama-compatible API backed by OpenVINO.
+﻿"""
+FamilyBrain Inference Server — Ollama-compatible API backed by OpenVINO.
 
-Serves on port 11434 (same as Ollama) so all OpenClaw services work unchanged.
+Serves on port 11434 (same as Ollama) so all FamilyBrain services work unchanged.
 
 Endpoints implemented:
   GET  /api/tags              — list loaded models
@@ -26,7 +26,7 @@ from src.model_registry import (
     load_registry, list_models, get_generate_pipeline, embed_text, rerank_pairs, get_whisper_pipeline
 )
 
-app = FastAPI(title="OpenClaw Inference Server")
+app = FastAPI(title="FamilyBrain Inference Server")
 
 
 @app.middleware("http")

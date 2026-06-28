@@ -6,7 +6,7 @@ services:
     build:
       context: ./postgres
       dockerfile: Dockerfile
-    container_name: openclaw-postgres
+    container_name: familybrain-postgres
     profiles: [core, normal, podcast]
     restart: unless-stopped
     environment:
@@ -32,7 +32,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ollama container removed — using native Windows Ollama on host.docker.internal:11434
   # Install: winget install Ollama.Ollama --source winget
@@ -41,7 +41,7 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile.dev
-    container_name: openclaw-dashboard
+    container_name: familybrain-dashboard
     profiles: [core, normal, podcast]
     restart: unless-stopped
     environment:
@@ -58,13 +58,13 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - openclaw-net
+      - familybrain-net
 
   audit-logger:
     build:
       context: ./audit
       dockerfile: Dockerfile
-    container_name: openclaw-audit
+    container_name: familybrain-audit
     profiles: [core, normal, podcast]
     restart: unless-stopped
     environment:
@@ -75,13 +75,13 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - openclaw-net
+      - familybrain-net
 
   ingestor:
     build:
       context: ./ingestor
       dockerfile: Dockerfile
-    container_name: openclaw-ingestor
+    container_name: familybrain-ingestor
     profiles: [core, normal, podcast]
     restart: unless-stopped
     environment:
@@ -109,7 +109,7 @@ services:
       audit-logger:
         condition: service_started
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ─── NORMAL PROFILE ───────────────────────────────────────────────────────────
 
@@ -117,8 +117,8 @@ services:
     build:
       context: ./whatsapp
       dockerfile: Dockerfile
-    container_name: openclaw-whatsapp
-    hostname: openclaw-whatsapp
+    container_name: familybrain-whatsapp
+    hostname: familybrain-whatsapp
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -130,13 +130,13 @@ services:
     ports:
       - "3002:3002"                                   # QR scanner: http://localhost:3002/qr
     networks:
-      - openclaw-net
+      - familybrain-net
 
   wa-agent:
     build:
       context: ./wa-agent
       dockerfile: Dockerfile
-    container_name: openclaw-wa-agent
+    container_name: familybrain-wa-agent
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -155,7 +155,7 @@ services:
       TZ_NAME: Australia/Brisbane
       TZ_ABBR: AEST (UTC+10)
       EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
-      EMAIL_FROM_NAME:    ${EMAIL_FROM_NAME:-OpenClaw}
+      EMAIL_FROM_NAME:    ${EMAIL_FROM_NAME:-FamilyBrain}
       EMAIL_SMTP_HOST:    ${EMAIL_SMTP_HOST:-smtp.gmail.com}
       EMAIL_SMTP_PORT:    ${EMAIL_SMTP_PORT:-587}
       EMAIL_SMTP_USER:    ${EMAIL_SMTP_USER:-}
@@ -170,11 +170,11 @@ services:
       ingestor:
         condition: service_started
     networks:
-      - openclaw-net
+      - familybrain-net
 
   maintenance-cron:
     image: alpine:3.19
-    container_name: openclaw-maintenance-cron
+    container_name: familybrain-maintenance-cron
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -187,11 +187,11 @@ services:
     depends_on:
       - wa-agent
     networks:
-      - openclaw-net
+      - familybrain-net
 
   n8n:
     image: n8nio/n8n:latest
-    container_name: openclaw-n8n
+    container_name: familybrain-n8n
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -211,13 +211,13 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - openclaw-net
+      - familybrain-net
 
   scraper:
     build:
       context: ./scrapers
       dockerfile: Dockerfile
-    container_name: openclaw-scraper
+    container_name: familybrain-scraper
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -235,13 +235,13 @@ services:
       audit-logger:
         condition: service_started
     networks:
-      - openclaw-net
+      - familybrain-net
 
   agents:
     build:
       context: ./agents
       dockerfile: Dockerfile
-    container_name: openclaw-agents
+    container_name: familybrain-agents
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -258,13 +258,13 @@ services:
       audit-logger:
         condition: service_started
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ─── PODCAST PROFILE ─────────────────────────────────────────────────────────
 
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest
-    container_name: openclaw-whisper
+    container_name: familybrain-whisper
     profiles: [podcast]
     restart: unless-stopped
     environment:
@@ -273,25 +273,25 @@ services:
     ports:
       - "9000:9000"
     networks:
-      - openclaw-net
+      - familybrain-net
 
   tts:
     build:
       context: ./voice
       dockerfile: Dockerfile.piper
-    container_name: openclaw-tts
+    container_name: familybrain-tts
     profiles: [podcast]
     restart: unless-stopped
     ports:
       - "5500:5500"
     networks:
-      - openclaw-net
+      - familybrain-net
 
   podcast-agents:
     build:
       context: ./agents
       dockerfile: Dockerfile.podcast
-    container_name: openclaw-podcast-agents
+    container_name: familybrain-podcast-agents
     profiles: [podcast]
     restart: unless-stopped
     environment:
@@ -304,7 +304,7 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ─── FAMILY BRAIN GRAPH EXPLORER ─────────────────────────────────────────────
   # graph-api: FastAPI backend — graph CRUD, ingest, quality, templates
@@ -315,7 +315,7 @@ services:
     build:
       context: ./graph-api
       dockerfile: Dockerfile
-    container_name: openclaw-graph-api
+    container_name: familybrain-graph-api
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -329,13 +329,13 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - openclaw-net
+      - familybrain-net
 
   graph-explorer:
     build:
       context: ./graph-explorer
       dockerfile: Dockerfile
-    container_name: openclaw-graph-explorer
+    container_name: familybrain-graph-explorer
     profiles: [normal]
     restart: unless-stopped
     ports:
@@ -343,7 +343,7 @@ services:
     depends_on:
       - graph-api
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ─── AGE VIEWER (legacy) ─────────────────────────────────────────────────────
   # Apache AGE Viewer — kept for raw Cypher access
@@ -353,13 +353,13 @@ services:
     build:
       context: ./age-viewer
       dockerfile: Dockerfile
-    container_name: openclaw-age-viewer
+    container_name: familybrain-age-viewer
     profiles: [normal]
     restart: unless-stopped
     ports:
       - "8888:3001"
     networks:
-      - openclaw-net
+      - familybrain-net
 
   # ─── EMAIL + CALENDAR SYNC ───────────────────────────────────────────────────
 
@@ -367,7 +367,7 @@ services:
     build:
       context: ./email-sync
       dockerfile: Dockerfile
-    container_name: openclaw-email-sync
+    container_name: familybrain-email-sync
     profiles: [normal]
     restart: unless-stopped
     environment:
@@ -414,7 +414,7 @@ services:
       ingestor:
         condition: service_started
     networks:
-      - openclaw-net
+      - familybrain-net
 
 volumes:
   postgres_data:
@@ -423,5 +423,5 @@ volumes:
   whatsapp_session:
 
 networks:
-  openclaw-net:
+  familybrain-net:
     driver: bridge

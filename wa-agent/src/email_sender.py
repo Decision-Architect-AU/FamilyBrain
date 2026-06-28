@@ -1,4 +1,4 @@
-"""
+﻿"""
 Email composition and sending for the WhatsApp agent.
 
 Compose: LLM drafts a subject + body based on knowledge base context.
@@ -24,7 +24,7 @@ from src.llm import generate
 from src.search import retrieve
 
 EMAIL_FROM    = os.environ.get("EMAIL_FROM_ADDRESS", "")
-EMAIL_NAME    = os.environ.get("EMAIL_FROM_NAME", "OpenClaw")
+EMAIL_NAME    = os.environ.get("EMAIL_FROM_NAME", "FamilyBrain")
 SMTP_HOST     = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT     = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
 SMTP_USER     = os.environ.get("EMAIL_SMTP_USER", EMAIL_FROM)

@@ -1,5 +1,5 @@
-"""
-OpenClaw WhatsApp Agent
+﻿"""
+FamilyBrain WhatsApp Agent
 
 Receives messages from the WhatsApp bridge, routes to the right knowledge
 graph(s), retrieves context, and generates a response via LLM.
@@ -33,7 +33,7 @@ from src.maintenance import run_maintenance
 from src.feedback import detect_feedback, save_feedback
 from src.persona import build_system_prompt
 
-app = FastAPI(title="OpenClaw WhatsApp Agent")
+app = FastAPI(title="FamilyBrain WhatsApp Agent")
 
 MAX_HISTORY        = int(os.environ.get("WA_MAX_HISTORY", "6"))
 CONTEXT_WINDOW_SEC = int(os.environ.get("WA_CONTEXT_WINDOW_SEC", "300"))  # 5 min default
@@ -41,7 +41,7 @@ CONTEXT_WINDOW_SEC = int(os.environ.get("WA_CONTEXT_WINDOW_SEC", "300"))  # 5 mi
 TIMEZONE     = os.environ.get("TZ_NAME", "Australia/Brisbane")  # AEST = UTC+10, no DST
 TIMEZONE_ABBR = os.environ.get("TZ_ABBR", "AEST (UTC+10)")
 
-SYSTEM_PROMPT = f"""You are OpenClaw, a personal AI assistant for Glenn, running on his home server in Brisbane, Australia.
+SYSTEM_PROMPT = f"""You are FamilyBrain, a personal AI assistant for Glenn, running on his home server in Brisbane, Australia.
 The local time zone is {TIMEZONE_ABBR}. Always express times and dates in AEST unless explicitly asked otherwise.
 The knowledge base contains personal notes, family information, property research, and organisational frameworks.
 Default to searching personal information unless the query is clearly about property or business frameworks.

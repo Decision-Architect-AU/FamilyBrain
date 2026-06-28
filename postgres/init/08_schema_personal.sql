@@ -1,4 +1,4 @@
--- personal schema: family, NDIS, household finance
+﻿-- personal schema: family, NDIS, household finance
 -- Read/write restricted to curator agent + superuser only
 -- Dashboard gets NO access to this schema
 
@@ -98,12 +98,12 @@ CREATE INDEX idx_personal_note_tags  ON personal.note USING gin (tags);
 -- ── Grants ────────────────────────────────────────────────────────────────────
 -- personal schema is curator + superuser only
 -- dashboard_ro gets NO access (intentional — private family data)
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA personal TO openclaw_curator_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA personal TO openclaw_curator_role;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA personal TO familybrain_curator_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA personal TO familybrain_curator_role;
 
 -- n8n needs access for calendar sync and WhatsApp orchestration
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA personal TO openclaw_n8n_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA personal TO openclaw_n8n_role;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA personal TO familybrain_n8n_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA personal TO familybrain_n8n_role;
 
 -- Trigger
 CREATE OR REPLACE FUNCTION personal.set_updated_at()

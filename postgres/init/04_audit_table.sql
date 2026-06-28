@@ -1,4 +1,4 @@
--- Central audit log — append-only, all agents write here from day one
+﻿-- Central audit log — append-only, all agents write here from day one
 
 CREATE TABLE audit.log (
     id              BIGSERIAL PRIMARY KEY,
@@ -17,17 +17,17 @@ CREATE TABLE audit.log (
 REVOKE UPDATE, DELETE, TRUNCATE ON audit.log FROM PUBLIC;
 
 -- Only audit_writer can INSERT
-GRANT INSERT ON audit.log TO openclaw_audit_writer_role;
-GRANT USAGE ON SEQUENCE audit.log_id_seq TO openclaw_audit_writer_role;
+GRANT INSERT ON audit.log TO familybrain_audit_writer_role;
+GRANT USAGE ON SEQUENCE audit.log_id_seq TO familybrain_audit_writer_role;
 
 -- All agent roles and readonly get SELECT
 GRANT SELECT ON audit.log TO
-    openclaw_readonly,
-    openclaw_scraper_role,
-    openclaw_pr_agent_role,
-    openclaw_curator_role,
-    openclaw_podcast_role,
-    openclaw_n8n_role;
+    familybrain_readonly,
+    familybrain_scraper_role,
+    familybrain_pr_agent_role,
+    familybrain_curator_role,
+    familybrain_podcast_role,
+    familybrain_n8n_role;
 
 -- Indexes for dashboard queries
 CREATE INDEX idx_audit_log_ts         ON audit.log (ts DESC);

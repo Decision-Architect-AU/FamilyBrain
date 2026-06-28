@@ -1,10 +1,10 @@
-{
-  "name": "OpenClaw — WhatsApp Notification Push",
+﻿{
+  "name": "FamilyBrain — WhatsApp Notification Push",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
-        "path": "openclaw-notify",
+        "path": "familybrain-notify",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -13,7 +13,7 @@
       "typeVersion": 2,
       "position": [240, 300],
       "id": "webhook",
-      "webhookId": "openclaw-notify"
+      "webhookId": "familybrain-notify"
     },
     {
       "parameters": {

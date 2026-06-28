@@ -1,4 +1,4 @@
--- Email account registry + message deduplication
+﻿-- Email account registry + message deduplication
 -- Supports multiple Gmail accounts and Outlook/Hotmail accounts
 -- Tokens stored here; email-sync service reads/updates them
 
@@ -160,15 +160,15 @@ CREATE TRIGGER trg_cal_sync_updated BEFORE UPDATE ON personal.calendar_sync_map
 
 -- ── Grants ────────────────────────────────────────────────────────────────────
 -- email-sync service runs as curator role
-GRANT SELECT, INSERT, UPDATE ON personal.email_account TO openclaw_curator_role;
-GRANT SELECT, INSERT, UPDATE ON personal.email_message TO openclaw_curator_role;
-GRANT SELECT, INSERT, UPDATE ON personal.calendar_sync_map TO openclaw_curator_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON personal.email_filter TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE personal.email_account_id_seq TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE personal.email_message_id_seq TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE personal.calendar_sync_map_id_seq TO openclaw_curator_role;
-GRANT USAGE ON SEQUENCE personal.email_filter_id_seq TO openclaw_curator_role;
+GRANT SELECT, INSERT, UPDATE ON personal.email_account TO familybrain_curator_role;
+GRANT SELECT, INSERT, UPDATE ON personal.email_message TO familybrain_curator_role;
+GRANT SELECT, INSERT, UPDATE ON personal.calendar_sync_map TO familybrain_curator_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON personal.email_filter TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE personal.email_account_id_seq TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE personal.email_message_id_seq TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE personal.calendar_sync_map_id_seq TO familybrain_curator_role;
+GRANT USAGE ON SEQUENCE personal.email_filter_id_seq TO familybrain_curator_role;
 
 -- n8n may need to read email accounts for workflow triggers
-GRANT SELECT ON personal.email_account TO openclaw_n8n_role;
-GRANT SELECT ON personal.email_message TO openclaw_n8n_role;
+GRANT SELECT ON personal.email_account TO familybrain_n8n_role;
+GRANT SELECT ON personal.email_message TO familybrain_n8n_role;

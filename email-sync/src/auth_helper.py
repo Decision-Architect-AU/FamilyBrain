@@ -1,7 +1,7 @@
-"""
+﻿"""
 auth_helper.py — run once per account to get OAuth2 refresh tokens.
 
-Usage (from openclaw root):
+Usage (from familybrain root):
     docker compose run --rm email-sync python -m src.auth_helper
 
 Prints the refresh_token for each account you authorise.
@@ -75,7 +75,7 @@ def auth_outlook():
 
 
 if __name__ == "__main__":
-    print("OpenClaw Email Auth Helper")
+    print("FamilyBrain Email Auth Helper")
     print("=" * 40)
     print("1) Authorise a Gmail account")
     print("2) Authorise an Outlook/Hotmail account")

@@ -1,4 +1,4 @@
-# OpenClaw Inference Server — model registry
+﻿# FamilyBrain Inference Server — model registry
 # Each entry maps an Ollama-style model name to a local OpenVINO model path and device.
 # Paths are relative to this file or absolute Windows paths.
 

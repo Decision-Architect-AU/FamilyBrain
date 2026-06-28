@@ -1,4 +1,4 @@
-# OpenClaw Port Map
+﻿# FamilyBrain Port Map
 
 ## Docker services
 
@@ -13,7 +13,7 @@
 | 5678 | n8n | normal | Workflow orchestration |
 | 4003 | Graph API | normal | Family Brain Graph API — `/graph/*`, `/ingest/*`, `/quality/*`, `/templates/*`, `/schemas/*`; docs at `/docs` |
 | 5173 | Graph Explorer | normal | Family Brain Graph Explorer (React/Vite) — graph canvas, ingestor, quality lab, templates |
-| 8888 | AGE Viewer | normal | Legacy graph viewer — connect: host=`postgres` db=`openclaw` user=`geoff` flavor=`Apache AGE` |
+| 8888 | AGE Viewer | normal | Legacy graph viewer — connect: host=`postgres` db=`familybrain` user=`geoff` flavor=`Apache AGE` |
 | 9000 | Whisper (STT) | podcast | OpenAI-compatible ASR: `POST /asr` |
 | 5500 | Piper (TTS) | podcast | Text-to-speech synthesis |
 
@@ -28,10 +28,10 @@
 
 | Service | Profile | Internal address |
 |---------|---------|-----------------|
-| Scraper | normal | `openclaw-scraper` |
-| Agents | normal | `openclaw-agents` |
-| Email Sync | normal | `openclaw-email-sync` |
-| Podcast Agents | podcast | `openclaw-podcast-agents` |
+| Scraper | normal | `familybrain-scraper` |
+| Agents | normal | `familybrain-agents` |
+| Email Sync | normal | `familybrain-email-sync` |
+| Podcast Agents | podcast | `familybrain-podcast-agents` |
 
 ## Notes
 

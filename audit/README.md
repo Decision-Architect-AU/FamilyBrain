@@ -1,4 +1,4 @@
-# audit
+﻿# audit
 
 Append-only audit logger. All services POST activity here; the dashboard reads it back.
 
@@ -39,5 +39,5 @@ Append-only audit logger. All services POST activity here; the dashboard reads i
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://audit_writer:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://audit_writer:<password>@postgres:5432/familybrain
 ```

@@ -1,5 +1,5 @@
-{
-  "name": "openclaw-scraper",
+﻿{
+  "name": "familybrain-scraper",
   "version": "1.0.0",
   "scripts": {
     "start": "node src/index.js",

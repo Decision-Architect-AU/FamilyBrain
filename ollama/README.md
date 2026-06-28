@@ -1,6 +1,6 @@
-# ollama
+﻿# ollama
 
-Legacy placeholder. OpenClaw originally used an Ollama container for LLM inference.
+Legacy placeholder. FamilyBrain originally used an Ollama container for LLM inference.
 
 ## Current status
 

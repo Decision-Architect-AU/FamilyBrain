@@ -1,4 +1,4 @@
-# postgres
+﻿# postgres
 
 PostgreSQL 16 with Apache AGE 1.6, pgvector, and pg_trgm. The single source of truth for all structured data.
 
@@ -48,13 +48,13 @@ This is handled automatically in `graph.py` and `search.py`. The AGE Viewer (por
 `postgres/init/` contains ordered SQL scripts that run on first container start. To re-run a migration manually:
 
 ```bash
-docker exec openclaw-postgres psql -U geoff -d openclaw -f /path/to/migration.sql
+docker exec familybrain-postgres psql -U geoff -d familybrain -f /path/to/migration.sql
 ```
 
 Migrations in `postgres/migrations/` must be applied manually after initial setup:
 
 ```bash
-docker exec openclaw-postgres psql -U geoff -d openclaw -f /docker-entrypoint-initdb.d/<migration>.sql
+docker exec familybrain-postgres psql -U geoff -d familybrain -f /docker-entrypoint-initdb.d/<migration>.sql
 ```
 
 ## Environment variables
@@ -62,7 +62,7 @@ docker exec openclaw-postgres psql -U geoff -d openclaw -f /docker-entrypoint-in
 ```env
 POSTGRES_USER=geoff
 POSTGRES_PASSWORD=<required>
-POSTGRES_DB=openclaw
+POSTGRES_DB=familybrain
 DASHBOARD_DB_PASSWORD=<required>
 AUDIT_DB_PASSWORD=<required>
 N8N_DB_PASSWORD=<required>

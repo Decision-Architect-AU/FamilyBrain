@@ -1,10 +1,10 @@
-# OpenClaw — Self-Hosted Personal AI Stack
+﻿# FamilyBrain — Self-Hosted Personal AI Stack
 
-OpenClaw treats events as the atomic unit of life and builds a knowledge graph around them. Every bill, appointment, prescription, and booking is a node that gets richer over time as new information arrives — automatically enriched, contextually assembled, and routed to the right calendar without manual input.
+FamilyBrain treats events as the atomic unit of life and builds a knowledge graph around them. Every bill, appointment, prescription, and booking is a node that gets richer over time as new information arrives — automatically enriched, contextually assembled, and routed to the right calendar without manual input.
 
 The problem it solves: a household generates hundreds of documents, emails, and appointments a year, each carrying facts that are relevant to something else. A GP referral letter contains the specialist's name and a follow-up date. A prescription email contains a supply duration that determines when the next script is due. A travel booking triggers a passport check, an insurance review, and a pet care reminder. None of this gets connected unless someone connects it manually — and nobody does.
 
-OpenClaw connects it automatically. Every inbound email, file, or message is decomposed into typed items, stored as graph nodes with structured facts, and cross-referenced against everything already known. Appointments are enriched continuously as new documents arrive. Bills resolve when payments are detected. Reminders are generated when the graph detects something that should exist but doesn't yet. The right information ends up in the right place — calendar, dashboard, or WhatsApp — without manual routing.
+FamilyBrain connects it automatically. Every inbound email, file, or message is decomposed into typed items, stored as graph nodes with structured facts, and cross-referenced against everything already known. Appointments are enriched continuously as new documents arrive. Bills resolve when payments are detected. Reminders are generated when the graph detects something that should exist but doesn't yet. The right information ends up in the right place — calendar, dashboard, or WhatsApp — without manual routing.
 
 It runs entirely on-device. No cloud APIs. No data leaving the machine.
 
@@ -12,7 +12,7 @@ It runs entirely on-device. No cloud APIs. No data leaving the machine.
 
 ## What it does
 
-OpenClaw continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard and WhatsApp agent. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
+FamilyBrain continuously ingests your digital life — emails, files, calendar events, messages — classifies and enriches them with LLM extraction, stores structured knowledge in a graph database, and surfaces insights through a dashboard and WhatsApp agent. It supports three operational modes (core, normal, podcast) that can be toggled without restarting the whole stack.
 
 ---
 
@@ -126,11 +126,11 @@ Life is driven by events. Not just appointments — every meaningful moment in a
 
 A bill is an event. The moment it is paid is an event. A prescription is an event with a renewal date. A school holiday is an event that reshapes every other event around it. A travel booking is an event that triggers a chain of downstream events — passport check, insurance review, pet care reminder. A GP referral is an event that creates a specialist appointment, which creates a pathology order, which creates a results review. A salary payment is an event. An insurance renewal is an event. A child's therapy block is a recurring event with a funding expiry.
 
-Most personal AI systems treat calendars as one data source among many. OpenClaw inverts this: **the event is the atomic unit of life, and everything else is context that enriches it.**
+Most personal AI systems treat calendars as one data source among many. FamilyBrain inverts this: **the event is the atomic unit of life, and everything else is context that enriches it.**
 
 This means:
 
-| What it looks like | What it is in OpenClaw |
+| What it looks like | What it is in FamilyBrain |
 |---|---|
 | A bill arriving | `:Event { event_type: "bill", status: "unpaid" }` |
 | A payment made | `:Event { event_type: "payment" }` + `RESOLVES` edge to bill |
@@ -177,7 +177,7 @@ The system also generates **proactive reminders** when it detects that an appoin
 
 ### What makes an event
 
-An event in OpenClaw is more than a calendar entry. It is a **living knowledge node** in the AGE graph with typed facts attached:
+An event in FamilyBrain is more than a calendar entry. It is a **living knowledge node** in the AGE graph with typed facts attached:
 
 ```
 :Event {
@@ -292,7 +292,7 @@ Triggered events are linked to their source event via `TRIGGERED` edges, so the 
 
 ## Graph Facts — Storing Knowledge as Properties
 
-OpenClaw uses Apache AGE (PostgreSQL graph extension) as its knowledge layer. The key design decision is that structured facts extracted from documents are stored as **typed properties on graph nodes** — not just as text chunks for vector search.
+FamilyBrain uses Apache AGE (PostgreSQL graph extension) as its knowledge layer. The key design decision is that structured facts extracted from documents are stored as **typed properties on graph nodes** — not just as text chunks for vector search.
 
 ### The `fact_*` property pattern
 
@@ -406,8 +406,8 @@ Bills that remain `unpaid` past their due date surface as `overdue` in the dashb
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/youruser/openclaw.git
-cd openclaw
+git clone https://github.com/youruser/familybrain.git
+cd familybrain
 cp .env.example .env
 # Edit .env — fill in all required secrets (see Environment variables below)
 ```

@@ -1,10 +1,10 @@
-# wa-agent
+﻿# wa-agent
 
 WhatsApp-facing agent. Receives messages from the WhatsApp bridge, retrieves knowledge graph context, generates responses, and handles structured commands.
 
 ## What it does
 
-- Accepts text and voice messages from the WhatsApp bridge (`openclaw-whatsapp`)
+- Accepts text and voice messages from the WhatsApp bridge (`familybrain-whatsapp`)
 - Routes structured commands (calendar, notifications, assets, add event, send email) to dedicated handlers that query Postgres directly
 - For open knowledge queries, runs a three-stage retrieval pipeline: Cypher graph traversal → FTS + vector search → cross-encoder rerank → LLM synthesis
 - Detects appointment/schedule queries and runs a targeted event search across all time (not just a fixed window), so historical appointments surface alongside upcoming ones
@@ -55,7 +55,7 @@ WhatsApp-facing agent. Receives messages from the WhatsApp bridge, retrieves kno
 ## Key env vars
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
 OLLAMA_URL=http://172.23.96.1:11434
 AGENT_MODEL=qwen2.5:14b
 EMBED_MODEL=nomic-embed-text

@@ -1,4 +1,4 @@
--- decision_architect schema: PR/content graph
+﻿-- decision_architect schema: PR/content graph
 -- Relational tables for content pipeline; AGE graph (decision_graph) for Themes/Frameworks/etc.
 
 SET search_path = decision_architect, public;
@@ -101,13 +101,13 @@ CREATE INDEX idx_staging_created ON decision_architect.curator_staging (created_
 
 -- ── Grants ────────────────────────────────────────────────────────────────────
 -- PR agent: read all, write content (drafts only)
-GRANT SELECT ON ALL TABLES IN SCHEMA decision_architect TO openclaw_pr_agent_role;
-GRANT INSERT, UPDATE ON decision_architect.published_content TO openclaw_pr_agent_role;
-GRANT USAGE ON SEQUENCE decision_architect.published_content_id_seq TO openclaw_pr_agent_role;
+GRANT SELECT ON ALL TABLES IN SCHEMA decision_architect TO familybrain_pr_agent_role;
+GRANT INSERT, UPDATE ON decision_architect.published_content TO familybrain_pr_agent_role;
+GRANT USAGE ON SEQUENCE decision_architect.published_content_id_seq TO familybrain_pr_agent_role;
 
 -- Curator: read all, write all (themes, frameworks, staging, questions)
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA decision_architect TO openclaw_curator_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA decision_architect TO openclaw_curator_role;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA decision_architect TO familybrain_curator_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA decision_architect TO familybrain_curator_role;
 
 -- Podcast agent: read themes/frameworks/questions, write questions
 GRANT SELECT ON
@@ -115,16 +115,16 @@ GRANT SELECT ON
     decision_architect.framework,
     decision_architect.published_content,
     decision_architect.podcast_question
-TO openclaw_podcast_role;
-GRANT INSERT, UPDATE ON decision_architect.podcast_question TO openclaw_podcast_role;
-GRANT USAGE ON SEQUENCE decision_architect.podcast_question_id_seq TO openclaw_podcast_role;
+TO familybrain_podcast_role;
+GRANT INSERT, UPDATE ON decision_architect.podcast_question TO familybrain_podcast_role;
+GRANT USAGE ON SEQUENCE decision_architect.podcast_question_id_seq TO familybrain_podcast_role;
 
 -- Dashboard + readonly
-GRANT SELECT ON ALL TABLES IN SCHEMA decision_architect TO openclaw_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA decision_architect TO familybrain_readonly;
 
 -- n8n
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA decision_architect TO openclaw_n8n_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA decision_architect TO openclaw_n8n_role;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA decision_architect TO familybrain_n8n_role;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA decision_architect TO familybrain_n8n_role;
 
 -- Triggers
 CREATE OR REPLACE FUNCTION decision_architect.set_updated_at()

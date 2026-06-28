@@ -1,5 +1,5 @@
-{
-  "name": "OpenClaw — Daily Morning Sweep",
+﻿{
+  "name": "FamilyBrain — Daily Morning Sweep",
   "nodes": [
     {
       "parameters": {
@@ -68,7 +68,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const notifications = $('Fetch active notifications').first().json.notifications || [];\nconst high = notifications.filter(n => n.severity === 'HIGH');\nconst medium = notifications.filter(n => n.severity === 'MEDIUM');\n\nlet msg = '🔔 *OpenClaw Morning Briefing*\\n';\nconst today = new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Australia/Brisbane' });\nmsg += `_${today}_\\n\\n`;\n\nif (high.length > 0) {\n  msg += `⚡ *${high.length} HIGH priority:*\\n`;\n  high.slice(0, 5).forEach(n => {\n    msg += `• ${n.title}\\n`;\n  });\n  if (high.length > 5) msg += `  _...and ${high.length - 5} more_\\n`;\n  msg += '\\n';\n}\n\nif (medium.length > 0) {\n  msg += `⚠️ *${medium.length} medium:* ${medium.slice(0,3).map(n=>n.title).join(', ')}`;\n  if (medium.length > 3) msg += ` +${medium.length-3} more`;\n  msg += '\\n';\n}\n\nmsg += `\\n_View all: http://localhost:3000/notifications_`;\n\nreturn [{ json: { message: msg } }];"
+        "jsCode": "const notifications = $('Fetch active notifications').first().json.notifications || [];\nconst high = notifications.filter(n => n.severity === 'HIGH');\nconst medium = notifications.filter(n => n.severity === 'MEDIUM');\n\nlet msg = '🔔 *FamilyBrain Morning Briefing*\\n';\nconst today = new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Australia/Brisbane' });\nmsg += `_${today}_\\n\\n`;\n\nif (high.length > 0) {\n  msg += `⚡ *${high.length} HIGH priority:*\\n`;\n  high.slice(0, 5).forEach(n => {\n    msg += `• ${n.title}\\n`;\n  });\n  if (high.length > 5) msg += `  _...and ${high.length - 5} more_\\n`;\n  msg += '\\n';\n}\n\nif (medium.length > 0) {\n  msg += `⚠️ *${medium.length} medium:* ${medium.slice(0,3).map(n=>n.title).join(', ')}`;\n  if (medium.length > 3) msg += ` +${medium.length-3} more`;\n  msg += '\\n';\n}\n\nmsg += `\\n_View all: http://localhost:3000/notifications_`;\n\nreturn [{ json: { message: msg } }];"
       },
       "name": "Build WA message",
       "type": "n8n-nodes-base.code",
