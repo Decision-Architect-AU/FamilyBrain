@@ -1,4 +1,4 @@
-﻿"""
+"""
 Email composition and sending for the WhatsApp agent.
 
 Compose: LLM drafts a subject + body based on knowledge base context.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Session 3 smoke test — run directly inside the ingestor container.
 Creates one asset of each type and verifies DB rows and graph nodes.
 

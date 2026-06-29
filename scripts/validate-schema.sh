@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Quick sanity check: connect as superuser and verify all tables exist
 set -euo pipefail
 

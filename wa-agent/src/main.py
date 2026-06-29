@@ -1,4 +1,4 @@
-﻿"""
+"""
 FamilyBrain WhatsApp Agent
 
 Receives messages from the WhatsApp bridge, routes to the right knowledge
@@ -66,6 +66,7 @@ class QueryRequest(BaseModel):
     from_: str | None = None
     body: str
     timestamp: int | None = None
+    model: str | None = None
 
     class Config:
         populate_by_name = True
@@ -76,6 +77,8 @@ class QueryResponse(BaseModel):
     response: str
     graphs_used: list[str]
     elapsed_ms: int
+    context: dict | None = None   # raw retrieval sections sent to LLM
+    prompt_preview: str | None = None  # first 2000 chars of the prompt
 
 
 class IngestTextRequest(BaseModel):
@@ -220,7 +223,7 @@ async def query(req: QueryRequest):
     if intent.persona_name:
         print(f"[wa-agent] persona={intent.persona_name}")
 
-    response = generate(prompt, system=system)
+    response = generate(prompt, system=system, model=req.model or None)
 
     graphs_used = list(context_sections.keys()) if context_sections else graphs
     _history[sender].append({"role": "user",      "text": message, "ts": now})
@@ -228,7 +231,13 @@ async def query(req: QueryRequest):
 
     elapsed = int((time.time() - t0) * 1000)
     print(f"[wa-agent] query {sender}: {message[:60]} → {graphs_used} persona={intent.persona_name} ({elapsed}ms)")
-    return QueryResponse(response=response, graphs_used=graphs_used, elapsed_ms=elapsed)
+    return QueryResponse(
+        response=response,
+        graphs_used=graphs_used,
+        elapsed_ms=elapsed,
+        context=context_sections or {},
+        prompt_preview=prompt[:3000] if prompt else None,
+    )
 
 
 @app.post("/ingest/text")

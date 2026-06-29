@@ -71,15 +71,19 @@ def save_feedback(
     feedback: str,
     sentiment: str,
     correction: str | None,
+    context: dict | None = None,
+    prompt_preview: str | None = None,
 ) -> None:
+    import json
     try:
         with psycopg2.connect(DB_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO config.query_feedback
-                        (sender, query, response, graphs_used, feedback, sentiment, correction)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (sender, query, response, graphs_used, feedback, sentiment, correction))
+                        (sender, query, response, graphs_used, feedback, sentiment, correction, context, prompt_preview)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (sender, query, response, graphs_used, feedback, sentiment, correction,
+                      json.dumps(context) if context else None, prompt_preview))
             conn.commit()
     except Exception as e:
         print(f"[feedback] save failed: {e}")

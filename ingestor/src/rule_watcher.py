@@ -126,11 +126,11 @@ def create_event_from_rule(asset: dict, rule: dict, due_date: date, conn) -> int
         cur.execute(
             """
             INSERT INTO personal.event (
-                title, event_type, starts_at, status,
+                title, event_type, starts_at, effective_date, status,
                 asset_id, generated_by_rule,
                 calendar_source, notes
             )
-            VALUES (%s, %s, %s::timestamptz, 'pending',
+            VALUES (%s, %s, %s::timestamptz, %s, 'pending',
                     %s, %s,
                     'rule_watcher', %s)
             RETURNING id
@@ -139,6 +139,7 @@ def create_event_from_rule(asset: dict, rule: dict, due_date: date, conn) -> int
                 title,
                 rule.get("event_type", "EVENT"),
                 f"{event_date.isoformat()}T09:00:00+10:00",
+                event_date,
                 asset["id"],
                 rule.get("name"),
                 notes,

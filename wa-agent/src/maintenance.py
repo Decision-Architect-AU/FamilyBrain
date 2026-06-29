@@ -2,19 +2,22 @@
 Nightly maintenance agent.
 
 Tasks (run in order):
-1. re_embed   — find notes/themes missing embeddings and embed them
-2. link       — run concept linker (ALIAS_OF / SIMILAR_TO edges)
-3. dedup      — merge Concept nodes with identical names
-4. prune      — remove orphan Concept nodes (no edges, no documents)
+1. re_embed          — find notes/themes missing embeddings and embed them
+2. link              — run concept linker (ALIAS_OF / SIMILAR_TO edges)
+3. dedup             — merge Concept nodes with identical names
+4. prune             — remove orphan Concept nodes (no edges, no documents)
+5. appointment_digest — pre-compute appointment summaries for common windows
 
 Triggered via POST /maintenance or the nightly cron.
 """
 import os
 import json
 import time
+import re
 import requests
 import psycopg2
 import psycopg2.extras
+from datetime import datetime, timezone
 
 from src.linker import run_linker, _conn, _embed, _cypher, GRAPHS
 
@@ -236,12 +239,177 @@ def task_monitor_queries() -> dict:
     }
 
 
+_DIGEST_WINDOWS = [
+    # (label, days_ahead, detail_level)
+    ("TODAY",    0,   "full"),   # today only — every appointment, full detail
+    ("3_DAYS",   3,   "full"),   # next 3 days — full detail
+    ("1_WEEK",   7,   "full"),   # next 7 days — full detail
+    ("1_MONTH",  30,  "summary"),  # next month — brief summary per event
+    ("3_MONTHS", 90,  "summary"),  # 3 months — high level only
+]
+
+_BATCH_SIZE = 15
+
+_DIGEST_PROMPT = """You are a family scheduling assistant. Below is a list of upcoming appointments and events.
+
+For each section marked === WINDOW: <name> ===, write a clear, natural summary of the appointments that fall within that window.
+- FULL detail windows: include time, who it's for, type, provider/location if known.
+- SUMMARY windows: one line per event, grouped by week or month.
+- Use plain text, no markdown headers. Write as if briefing the family verbally.
+- If no events fall in a window, write "Nothing scheduled."
+- End each window section with === END ===
+
+Today is {today}.
+
+Appointments:
+{events}
+
+{windows}"""
+
+
+def _fetch_events(conn, days_ahead: int) -> list[dict]:
+    """Fetch upcoming events ordered nearest-first, limited to days_ahead from now."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.title, e.event_type, e.starts_at, e.ends_at,
+                   e.notes, e.calendar_source,
+                   p.name AS person_name
+            FROM personal.event e
+            LEFT JOIN personal.person p ON p.id = e.person_id
+            WHERE e.starts_at BETWEEN now() AND now() + interval '%s days'
+              AND e.status NOT IN ('cancelled', 'done')
+            ORDER BY e.starts_at ASC
+        """, (days_ahead,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _format_events_for_prompt(events: list[dict]) -> str:
+    lines = []
+    for e in events:
+        ts = e["starts_at"]
+        if hasattr(ts, "strftime"):
+            date_str = ts.strftime("%-d %b %Y %I:%M%p").replace("AM", "am").replace("PM", "pm")
+        else:
+            date_str = str(ts)
+        line = f"- {date_str}: {e['title']}"
+        if e.get("person_name"):
+            line += f" (for {e['person_name']})"
+        if e.get("event_type"):
+            line += f" [{e['event_type']}]"
+        if e.get("notes"):
+            line += f" — {e['notes'][:100]}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "No events found."
+
+
+def _build_window_blocks(today: datetime) -> str:
+    blocks = []
+    for label, days, detail in _DIGEST_WINDOWS:
+        detail_note = "Full detail (time, person, type, notes)." if detail == "full" else "Brief summary only."
+        blocks.append(f"=== WINDOW: {label} (next {days} day{'s' if days != 1 else ''} from today) ===\n{detail_note}")
+    return "\n\n".join(blocks)
+
+
+def _parse_windows(llm_response: str) -> dict[str, str]:
+    """Split LLM response on === WINDOW: X === ... === END === markers."""
+    results = {}
+    pattern = re.compile(r'===\s*WINDOW:\s*(\S+)[^\n]*===\s*(.*?)(?===\s*END\s*===|===\s*WINDOW:|\Z)',
+                         re.DOTALL)
+    for m in pattern.finditer(llm_response):
+        label = m.group(1).strip()
+        text  = m.group(2).strip()
+        if text:
+            results[label] = text
+    return results
+
+
+def _save_digest_note(conn, label: str, text: str, days_ahead: int) -> None:
+    """Delete old digest note for this window and insert fresh one with embedding."""
+    vec = _embed(text[:2000])
+    vec_str = "[" + ",".join(str(v) for v in vec) + "]"
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM personal.note
+            WHERE tags @> ARRAY['digest','appointments']
+              AND tags @> ARRAY[%s]
+        """, (f"window:{label}",))
+        cur.execute("""
+            INSERT INTO personal.note (body, tags, embedding, created_at)
+            VALUES (%s, %s, %s::vector, now())
+        """, (
+            f"[Appointment digest — {label}]\n{text}",
+            ["digest", "appointments", f"window:{label}"],
+            vec_str,
+        ))
+    conn.commit()
+
+
+def task_appointment_digest() -> dict:
+    """
+    Pre-compute appointment summaries for all windows.
+    Fetches up to 3 months of events, batches by _BATCH_SIZE,
+    calls LLM once per batch (all windows in one prompt), parses + saves.
+    Nearest windows get priority — batches are ordered by starts_at ASC.
+    """
+    from src.llm import generate
+
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    today = datetime.now(timezone.utc)
+    today_str = today.strftime("%A, %-d %B %Y")
+
+    try:
+        events = _fetch_events(conn, days_ahead=90)
+        if not events:
+            print("[maintenance] appointment_digest: no upcoming events")
+            return {"batches": 0, "windows_saved": 0}
+
+        # Collect window text across all batches — later batches append
+        window_accumulator: dict[str, list[str]] = {label: [] for label, _, _ in _DIGEST_WINDOWS}
+
+        batches = [events[i:i + _BATCH_SIZE] for i in range(0, len(events), _BATCH_SIZE)]
+        print(f"[maintenance] appointment_digest: {len(events)} events → {len(batches)} batches")
+
+        for i, batch in enumerate(batches):
+            events_text  = _format_events_for_prompt(batch)
+            window_blocks = _build_window_blocks(today)
+            prompt = _DIGEST_PROMPT.format(
+                today=today_str,
+                events=events_text,
+                windows=window_blocks,
+            )
+            try:
+                response = generate(prompt, system="You are a concise family scheduling assistant.")
+                parsed   = _parse_windows(response)
+                for label, text in parsed.items():
+                    if label in window_accumulator:
+                        window_accumulator[label].append(text)
+                print(f"[maintenance] appointment_digest: batch {i+1}/{len(batches)} → {list(parsed.keys())}")
+            except Exception as e:
+                print(f"[maintenance] appointment_digest: batch {i+1} LLM error: {e}")
+
+        # Merge and save each window
+        saved = 0
+        for label, days, _ in _DIGEST_WINDOWS:
+            parts = window_accumulator.get(label, [])
+            combined = "\n\n".join(p for p in parts if p and p.lower() != "nothing scheduled.")
+            if not combined:
+                combined = "Nothing scheduled."
+            _save_digest_note(conn, label, combined, days)
+            saved += 1
+            print(f"[maintenance] appointment_digest: saved window {label}")
+
+        return {"batches": len(batches), "windows_saved": saved, "total_events": len(events)}
+
+    finally:
+        conn.close()
+
+
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     Run maintenance tasks. Default order: re_embed → link → dedup → prune.
     Pass task names to run a subset.
     """
-    all_tasks = tasks or ["re_embed", "link", "dedup", "prune", "monitor", "tune_weights"]
+    all_tasks = tasks or ["re_embed", "link", "dedup", "prune", "monitor", "tune_weights", "appointment_digest"]
     results   = {}
     t0        = time.time()
 
@@ -280,6 +448,10 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     if "tune_weights" in all_tasks:
         results["tune_weights"] = task_tune_weights()
         print(f"[maintenance] tune_weights done: {results['tune_weights']}")
+
+    if "appointment_digest" in all_tasks:
+        results["appointment_digest"] = task_appointment_digest()
+        print(f"[maintenance] appointment_digest done: {results['appointment_digest']}")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")

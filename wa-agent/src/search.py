@@ -17,12 +17,28 @@ import psycopg2
 import psycopg2.extras
 from src.llm import embed, generate
 
+_HTML_TAG = re.compile(r'<[^>]+>')
+_HTML_ENTITY = re.compile(r'&[a-z]+;|&#\d+;')
+
+def _strip_html(text: str) -> str:
+    if not text:
+        return text
+    text = _HTML_TAG.sub(' ', text)
+    text = _HTML_ENTITY.sub(' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+# Names from env that should be treated as "self" — suppress from person-query results
+_SELF_NAMES = re.compile(
+    r'\b(Glenn|West Investment|WEST-PROPERTY|SMSF|Booking\.com|Netflix|Velocity)\b', re.I
+)
+
 DB_URL          = os.environ.get("DATABASE_URL")
-TOP_K           = int(os.environ.get("WA_SEARCH_TOP_K", "5"))
+TOP_K           = int(os.environ.get("WA_SEARCH_TOP_K", "15"))
 RULES_CACHE_TTL = int(os.environ.get("RULES_CACHE_TTL", "300"))  # seconds
 RERANK_ENABLED  = os.environ.get("RERANK_ENABLED", "true").lower() == "true"
 RERANK_MODEL    = os.environ.get("RERANK_MODEL", "ms-marco-reranker")
-_RERANK_FETCH   = 20  # candidates fetched before reranking
+_RERANK_FETCH   = 40  # candidates fetched before reranking
 
 # Stop-words excluded from entity name matching
 _STOP = {
@@ -50,16 +66,25 @@ _VECTOR_SEARCH = {
             "text_col": "body",
             "extra_cols": "'note' AS source_type, id, tags::text AS meta",
         },
-        # upcoming events window: next 14 days + last 7
         "schedule_sql": """
-            SELECT 'event' AS source_type, id,
-                   title || COALESCE(' — ' || notes, '') || COALESCE(' (' || event_type || ')', '') AS text,
-                   starts_at::text AS meta,
+            SELECT 'event' AS source_type, e.id,
+                   e.title
+                     || COALESCE(' | type: ' || e.event_type, '')
+                     || COALESCE(' | for: ' || p.name, '')
+                     || COALESCE(' | ends: ' || e.ends_at::text, '')
+                     || COALESCE(' | source: ' || e.calendar_source, '')
+                     || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                   AS text,
+                   e.starts_at::text
+                     || COALESCE(' → ' || e.ends_at::text, '')
+                     || COALESCE(' [' || e.gcal_calendar_id || ']', '')
+                   AS meta,
                    NULL::float AS dist
-            FROM personal.event
-            WHERE starts_at BETWEEN now() - interval '30 days' AND now() + interval '90 days'
-              AND status NOT IN ('cancelled', 'done')
-            ORDER BY starts_at LIMIT 20
+            FROM personal.event e
+            LEFT JOIN personal.person p ON p.id = e.person_id
+            WHERE e.starts_at BETWEEN now() - interval '90 days' AND now() + interval '365 days'
+              AND e.status NOT IN ('cancelled', 'done')
+            ORDER BY e.starts_at LIMIT 60
         """,
         "medication_sql": """
             SELECT 'medication' AS source_type, m.id,
@@ -130,9 +155,422 @@ _VECTOR_SEARCH = {
 }
 
 
+_person_cache: dict[str, dict] = {}   # name → {id, name, relationship}
+_person_cache_ts: float = 0.0
+_PERSON_CACHE_TTL = 300
+
+
+def _get_persons(conn) -> list[dict]:
+    """Load all persons from personal.person, cached."""
+    global _person_cache, _person_cache_ts
+    now = time.time()
+    if _person_cache and now - _person_cache_ts < _PERSON_CACHE_TTL:
+        return list(_person_cache.values())
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, relationship FROM personal.person")
+            rows = [dict(r) for r in cur.fetchall()]
+        _person_cache = {r["name"].lower(): r for r in rows}
+        _person_cache_ts = now
+        return rows
+    except Exception:
+        return []
+
+
+def _detect_person(query: str, conn) -> dict | None:
+    """Return the Person row if the query names a specific person."""
+    persons = _get_persons(conn)
+    q_lower = query.lower()
+    # Match on full name or first name — longer matches win
+    best = None
+    best_len = 0
+    for p in persons:
+        name = p["name"]
+        parts = name.lower().split()
+        for part in ([name.lower()] + parts):
+            if len(part) > 2 and part in q_lower and len(part) > best_len:
+                best = p
+                best_len = len(part)
+    return best
+
+
+# ── Hierarchy traversal ────────────────────────────────────────────────────────
+# Each hierarchy is a named, independently-tunable weighting profile: a budget
+# plus per-direction hop costs. New hierarchy types (e.g. a future "financial"
+# hierarchy for trust/super structures) get their own profile here instead of
+# sharing constants with unrelated traversals.
+#
+# Family hierarchy: own records (3), sibling records (8+3=11), parent records (10+3=13).
+# Entity hierarchy: own docs (3), property/bills (3 or 6), trustee/director/beneficiary (10).
+
+class HierarchyProfile:
+    def __init__(self, name: str, budget: int, down: int, sideways: int, up: int):
+        self.name = name
+        self.budget = budget
+        self.down = down
+        self.sideways = sideways
+        self.up = up
+
+
+def _profile_from_env(name: str, env_prefix: str, budget: int, down: int, sideways: int, up: int) -> HierarchyProfile:
+    return HierarchyProfile(
+        name=name,
+        budget=int(os.environ.get(f"{env_prefix}_BUDGET", str(budget))),
+        down=int(os.environ.get(f"{env_prefix}_COST_DOWN", str(down))),
+        sideways=int(os.environ.get(f"{env_prefix}_COST_SIDEWAYS", str(sideways))),
+        up=int(os.environ.get(f"{env_prefix}_COST_UP", str(up))),
+    )
+
+
+FAMILY_HIERARCHY = _profile_from_env("family", "FAMILY_HIERARCHY", 30, 3, 8, 10)
+ENTITY_HIERARCHY = _profile_from_env("entity", "ENTITY_HIERARCHY", 30, 3, 8, 10)
+# Future: FINANCIAL_HIERARCHY = _profile_from_env("financial", "FINANCIAL_HIERARCHY", ...)
+
+_REL_DIRECTION = {
+    # relationship value on personal.person → direction FROM that person TO focal node
+    "daughter": "down",   # focal is parent of this person → this person is DOWN from focal
+    "son":      "down",
+    "child":    "down",
+    "sibling":  "sideways",
+    "brother":  "sideways",
+    "sister":   "sideways",
+    "partner":  "sideways",
+    "spouse":   "sideways",
+    "parent":   "up",
+    "mother":   "up",
+    "father":   "up",
+}
+
+
+def _hop_cost(relationship: str, focal_rel: str) -> int:
+    """
+    Cost to reach a related person from the focal person, per FAMILY_HIERARCHY.
+    focal_rel = relationship value of the focal node (e.g. 'daughter').
+    other_rel = relationship value of the candidate.
+    """
+    h = FAMILY_HIERARCHY
+    # Both are children of the same parent → siblings → SIDEWAYS
+    if focal_rel in ("daughter", "son", "child") and relationship in ("daughter", "son", "child"):
+        return h.sideways
+    direction = _REL_DIRECTION.get(relationship.lower(), "sideways")
+    return {"down": h.down, "sideways": h.sideways, "up": h.up}[direction]
+
+
+def _fetch_person_records(conn, pid: int, name: str, base_cost: int) -> list[dict]:
+    """Fetch all records owned by person pid, tagged with traversal_cost."""
+    rows = []
+    name_like = f"%{name}%"
+
+    # Events (own)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 'event' AS source_type, e.id,
+                       e.title
+                         || COALESCE(' | type: ' || e.event_type, '')
+                         || COALESCE(' | ' || to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'Dy DD Mon YYYY HH12:MIam'), '')
+                         || COALESCE(' | ends: ' || to_char(e.ends_at AT TIME ZONE 'Australia/Brisbane', 'HH12:MIam'), '')
+                         || COALESCE(' | source: ' || e.calendar_source, '')
+                         || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                       AS text,
+                       e.starts_at::text AS meta,
+                       NULL::float AS dist,
+                       %s AS traversal_cost
+                FROM personal.event e
+                WHERE e.person_id = %s
+                  AND e.status NOT IN ('cancelled', 'done')
+                  AND e.starts_at > now() - interval '180 days'
+                ORDER BY e.starts_at ASC
+                LIMIT 40
+            """, (base_cost, pid))
+            rows += [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[search] traversal event error pid={pid}: {e}")
+        conn.rollback()
+
+    # Medications
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 'medication' AS source_type, m.id,
+                       m.name || COALESCE(' ' || m.dose, '') || COALESCE(' ' || m.frequency, '')
+                         || COALESCE(' | prescriber: ' || m.prescriber, '')
+                       AS text,
+                       %s AS meta,
+                       NULL::float AS dist,
+                       %s AS traversal_cost
+                FROM personal.medication m
+                WHERE m.person_id = %s AND m.active
+                ORDER BY m.name
+            """, (name, base_cost, pid))
+            rows += [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[search] traversal medication error pid={pid}: {e}")
+        conn.rollback()
+
+    # Notes mentioning them
+    note_cost = base_cost + FAMILY_HIERARCHY.down  # notes are one more hop from the person
+    if note_cost <= FAMILY_HIERARCHY.budget:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 'note' AS source_type, id,
+                           body AS text, tags::text AS meta,
+                           NULL::float AS dist,
+                           %s AS traversal_cost
+                    FROM personal.note
+                    WHERE body ILIKE %s
+                    ORDER BY created_at DESC
+                    LIMIT 15
+                """, (note_cost, name_like))
+                rows += [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[search] traversal note error pid={pid}: {e}")
+            conn.rollback()
+
+    return rows
+
+
+def _person_focused_search(conn, person: dict) -> list[dict]:
+    """
+    FAMILY_HIERARCHY traversal from a focal person using directional costs.
+
+    Budget = FAMILY_HIERARCHY.budget (default 30).
+    Costs:  own records=3, sibling records=11, parent records=13.
+    Records are tagged with traversal_cost; lower cost = higher priority in context.
+    """
+    h = FAMILY_HIERARCHY
+    focal_id  = person["id"]
+    focal_rel = (person.get("relationship") or "").lower()
+    rows: list[dict] = []
+
+    # ── Focal person's own records (cost = down) ────────────────────────────
+    rows += _fetch_person_records(conn, focal_id, person["name"], h.down)
+
+    # ── Shared/family events naming them (cost = sideways) ──────────────────
+    shared_cost = h.sideways
+    if shared_cost <= h.budget:
+        name_like = f"%{person['name']}%"
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 'event' AS source_type, e.id,
+                           e.title || COALESCE(' | type: ' || e.event_type, '')
+                             || COALESCE(' | ' || to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'Dy DD Mon YYYY HH12:MIam'), '')
+                           AS text,
+                           e.starts_at::text AS meta,
+                           NULL::float AS dist,
+                           %s AS traversal_cost
+                    FROM personal.event e
+                    WHERE e.person_id IS NULL
+                      AND (e.title ILIKE %s OR e.notes ILIKE %s)
+                      AND e.status NOT IN ('cancelled', 'done')
+                      AND e.starts_at > now() - interval '90 days'
+                    ORDER BY e.starts_at ASC
+                    LIMIT 10
+                """, (shared_cost, name_like, name_like))
+                rows += [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[search] traversal shared_event error: {e}")
+            conn.rollback()
+
+    # ── Related persons (siblings, parents, partners) ────────────────────────
+    all_persons = _get_persons(conn)
+    for other in all_persons:
+        if other["id"] == focal_id:
+            continue
+        other_rel  = (other.get("relationship") or "").lower()
+        person_cost = _hop_cost(other_rel, focal_rel)
+        record_cost = person_cost + h.down   # cost to reach their records
+        if record_cost > h.budget:
+            print(f"[search] traversal: skip {other['name']} (cost {record_cost} > budget)")
+            continue
+        print(f"[search] traversal: include {other['name']} records at cost {record_cost} ({other_rel}→{focal_rel})")
+        rows += _fetch_person_records(conn, other["id"], other["name"], record_cost)
+
+    # Convert traversal_cost → match_score (inverse — lower cost = higher score)
+    # Score 3 = cost ≤ down, 2 = cost ≤ 15, 1 = everything else
+    for r in rows:
+        c = r.get("traversal_cost", h.budget)
+        r["match_score"] = 3 if c <= h.down else 2 if c <= 15 else 1
+
+    return rows
+
+
+# ── Entity traversal ──────────────────────────────────────────────────────────
+# Hierarchy for a trust/company entity:
+#   UP   (10pts): trustee, directors, shareholders, beneficiaries
+#   DOWN  (3pts): owned properties, bills, invoices, assets
+#   DOWN+DOWN (6pts): property-level bills/invoices
+
+_entity_cache: list[dict] = []
+_entity_cache_ts: float = 0.0
+_ENTITY_CACHE_TTL = 300
+
+# Keywords in notes that indicate UP relationships (governance layer)
+_ENTITY_UP_KW = re.compile(
+    r'\b(trustee|director|shareholder|beneficiar|unit.?holder|secretary|'
+    r'appointor|settlor|corporate trustee)\b', re.I
+)
+# Keywords indicating DOWN relationships (owned assets, liabilities)
+_ENTITY_DOWN_KW = re.compile(
+    r'\b(propert|invoice|bill|statement|mortgage|insurance|council|rates|'
+    r'water|strata|body.?corp|rental|tenant|lease|repair|maintenance)\b', re.I
+)
+
+
+def _get_entities(conn) -> list[dict]:
+    global _entity_cache, _entity_cache_ts
+    now = time.time()
+    if _entity_cache and now - _entity_cache_ts < _ENTITY_CACHE_TTL:
+        return _entity_cache
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, folder_slug, full_name, keywords, notes FROM personal.ownership_entity")
+            _entity_cache = [dict(r) for r in cur.fetchall()]
+            _entity_cache_ts = now
+    except Exception:
+        pass
+    return _entity_cache
+
+
+def _detect_entity(query: str, conn) -> dict | None:
+    """Return the ownership_entity if the query names one."""
+    q_lower = query.lower()
+    best, best_len = None, 0
+    for ent in _get_entities(conn):
+        candidates = [ent["full_name"].lower(), ent["folder_slug"].lower()] + [k.lower() for k in (ent["keywords"] or [])]
+        for kw in candidates:
+            if len(kw) > 3 and kw in q_lower and len(kw) > best_len:
+                best, best_len = ent, len(kw)
+    return best
+
+
+def _entity_focused_search(conn, entity: dict) -> list[dict]:
+    """
+    ENTITY_HIERARCHY traversal from a focal ownership entity.
+
+    DOWN  (cost=down):       notes/docs directly about this entity, its assets
+    DOWN2 (cost=down*2):     property-level bills, invoices, events
+    UP    (cost=up):         trustee, directors, beneficiaries (in notes)
+    """
+    h = ENTITY_HIERARCHY
+    slug     = entity["folder_slug"]
+    name     = entity["full_name"]
+    keywords = entity.get("keywords") or []
+    rows: list[dict] = []
+
+    # Build ILIKE patterns from keywords + full name
+    all_kw = list({name} | {k for k in keywords if k})
+    kw_conditions = " OR ".join("n.body ILIKE %s" for _ in all_kw)
+    kw_params     = [f"%{k}%" for k in all_kw]
+
+    if not kw_conditions:
+        return rows
+
+    # ── DOWN: notes/docs directly about this entity ────────────────────────
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT 'note' AS source_type, n.id,
+                       n.body AS text, n.tags::text AS meta,
+                       NULL::float AS dist,
+                       %s AS traversal_cost
+                FROM personal.note n
+                WHERE ({kw_conditions})
+                ORDER BY n.created_at DESC
+                LIMIT 30
+            """, [h.down] + kw_params)
+            rows += [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[search] entity_note error: {e}")
+        conn.rollback()
+
+    # ── DOWN: properties/assets owned by this entity (via address_pattern) ─
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT address_pattern FROM personal.ownership_property
+                WHERE entity_slug = %s
+            """, (slug,))
+            patterns = [r["address_pattern"] for r in cur.fetchall()]
+
+        if patterns:
+            asset_conditions = " OR ".join("a.name ILIKE %s" for _ in patterns)
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT 'asset' AS source_type, a.id,
+                           a.name || ' [' || a.asset_type || ']'
+                             || COALESCE(' — ' || a.notes, '')
+                           AS text,
+                           a.facts::text AS meta,
+                           NULL::float AS dist,
+                           %s AS traversal_cost
+                    FROM personal.asset a
+                    WHERE ({asset_conditions}) AND a.status = 'active'
+                """, [h.down] + [f"%{p}%" for p in patterns])
+                asset_rows = [dict(r) for r in cur.fetchall()]
+                rows += asset_rows
+
+                # ── DOWN+DOWN: events/bills linked to those assets ────────
+                asset_ids = [r["id"] for r in asset_rows]
+                if asset_ids and h.down * 2 <= h.budget:
+                    placeholders = ",".join("%s" for _ in asset_ids)
+                    cur.execute(f"""
+                        SELECT 'event' AS source_type, e.id,
+                               e.title || COALESCE(' | type: ' || e.event_type, '')
+                                 || COALESCE(' | ' || to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'Dy DD Mon YYYY HH12:MIam'), '')
+                                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                               AS text,
+                               e.starts_at::text AS meta,
+                               NULL::float AS dist,
+                               %s AS traversal_cost
+                        FROM personal.event e
+                        WHERE e.asset_id IN ({placeholders})
+                          AND e.status NOT IN ('cancelled', 'done')
+                        ORDER BY e.starts_at DESC
+                        LIMIT 20
+                    """, [h.down * 2] + asset_ids)
+                    rows += [dict(r) for r in cur.fetchall()]
+
+    except Exception as e:
+        print(f"[search] entity_asset error: {e}")
+        conn.rollback()
+
+    # ── UP: governance notes (trustee, directors, beneficiaries) ──────────
+    up_cost = h.up
+    if up_cost <= h.budget:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT 'note' AS source_type, n.id,
+                           n.body AS text, n.tags::text AS meta,
+                           NULL::float AS dist,
+                           %s AS traversal_cost
+                    FROM personal.note n
+                    WHERE ({kw_conditions})
+                      AND (n.body ~* '(trustee|director|shareholder|beneficiar|appointor|settlor)')
+                    ORDER BY n.created_at DESC
+                    LIMIT 10
+                """, [up_cost] + kw_params)
+                rows += [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[search] entity_governance error: {e}")
+            conn.rollback()
+
+    # Convert traversal_cost → match_score
+    for r in rows:
+        c = r.get("traversal_cost", h.budget)
+        r["match_score"] = 3 if c <= h.down else 2 if c <= h.down * 2 else 1
+
+    print(f"[search] entity traversal: {entity['folder_slug']} → {len(rows)} rows")
+    return rows
+
+
 _APPOINTMENT_KW = re.compile(
-    r'\b(appointment|appointments|session|sessions|schedule|medical|speech|therapy|'
-    r'physio|ot\b|psycholog|dentist|gp|doctor|specialist|referral|clinic|hospital)\b',
+    r'\b(appointment|appointments|session|sessions|schedule|scheduled|booking|meeting|'
+    r'medical|speech|therapy|physio|ot\b|psycholog|dentist|gp|doctor|specialist|'
+    r'referral|clinic|hospital|class|lesson|training|event|carnival|excursion|assembly)\b',
     re.I,
 )
 
@@ -157,15 +595,26 @@ def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
 
     sql = f"""
         SELECT 'health_event' AS source_type, e.id,
-               e.title || COALESCE(' — ' || e.notes, '') || ' (' || e.starts_at::date::text || ')' AS text,
-               e.starts_at::text AS meta,
+               e.title
+                 || COALESCE(' | type: ' || e.event_type, '')
+                 || COALESCE(' | for: ' || p.name, '')
+                 || COALESCE(' | ends: ' || e.ends_at::text, '')
+                 || COALESCE(' | source: ' || e.calendar_source, '')
+                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                 || ' (' || e.starts_at::date::text || ')'
+               AS text,
+               e.starts_at::text
+                 || COALESCE(' → ' || e.ends_at::text, '')
+                 || COALESCE(' [' || e.gcal_calendar_id || ']', '')
+               AS meta,
                3 AS match_score,
                NULL::float AS dist
         FROM personal.event e
+        LEFT JOIN personal.person p ON p.id = e.person_id
         WHERE ({conditions})
           AND e.status NOT IN ('cancelled', 'done')
         ORDER BY e.starts_at DESC
-        LIMIT 20
+        LIMIT 30
     """
     try:
         with conn.cursor() as cur:
@@ -203,7 +652,7 @@ def _rerank(query: str, rows: list[dict]) -> list[dict]:
 def _conn():
     conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     with conn.cursor() as cur:
-        cur.execute("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public; SET statement_timeout = '10s';")
+        cur.execute("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public; SET statement_timeout = '30s';")
     conn.commit()
     return conn
 
@@ -212,15 +661,24 @@ def _vec_param(vec: list[float]) -> str:
     return "[" + ",".join(str(v) for v in vec) + "]"
 
 
+_cypher_dead: bool = False  # circuit breaker — set True on first timeout, reset per retrieve() call
+
 def _cypher(conn, graph: str, query: str, col_defs: str = "(r agtype)") -> list[dict]:
+    global _cypher_dead
+    if _cypher_dead:
+        return []
     sql = f"SELECT * FROM cypher('{graph}', $cypher$ {query} $cypher$) AS {col_defs}"
     try:
         with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
             cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
     except Exception as e:
-        print(f"[search] Cypher error on {graph}: {e}")
         conn.rollback()
+        if "timeout" in str(e).lower() or "canceling" in str(e).lower():
+            _cypher_dead = True  # skip remaining Cypher calls this request
+        else:
+            print(f"[search] Cypher error on {graph}: {e}")
         return []
 
 
@@ -452,9 +910,7 @@ def _rank_rows(rows: list[dict], query: str, graph: str, rules_cache: dict) -> l
     1. If any row has match_score >= 2, drop all score-1 rows (noise).
     2. Sort by: match_score DESC, intent-aware source weight DESC, vector dist ASC.
     """
-    best_score = max((r.get("match_score") or 0) for r in rows)
-    if best_score >= 2:
-        rows = [r for r in rows if (r.get("match_score") or 0) >= 2]
+    # Keep all rows — let the LLM decide relevance rather than filtering here
 
     weights, _ = _source_weights(query, graph, rules_cache)
 
@@ -469,6 +925,8 @@ def _rank_rows(rows: list[dict], query: str, graph: str, rules_cache: dict) -> l
 
 def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
     """Return per-graph context sections as {graph_name: text}."""
+    global _cypher_dead
+    _cypher_dead = False  # reset circuit breaker for each new query
     vec = embed(query)
     vec_param = _vec_param(vec)
     terms = _query_terms(query)
@@ -479,7 +937,16 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
     try:
         rules_cache = _get_rules(conn)
 
+        # Detect person or entity query once — used across all graphs
+        focused_person = _detect_person(query, conn)
+        focused_entity = _detect_entity(query, conn) if not focused_person else None
+        if focused_person:
+            print(f"[search] person-focused query: {focused_person['name']}")
+        if focused_entity:
+            print(f"[search] entity-focused query: {focused_entity['folder_slug']}")
+
         for graph in graphs:
+            print(f"[search] retrieve graph={graph} query={query[:60]!r}")
             matched_rule = None
             section_lines = [f"[{graph.replace('_graph', '').upper()}]"]
             has_content = False
@@ -524,22 +991,37 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
 
             if cypher_result["entities"]:
                 has_content = True
+                # Detect if query is about a specific other person (not self)
+                query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
+                person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
+
                 section_lines.append("Entities:")
-                for e in cypher_result["entities"][:5]:
+                seen_entity_names: set[str] = set()
+                for e in cypher_result["entities"][:15]:
                     name  = (e.get("name")  or "").strip('"\'')
                     desc  = (e.get("cdesc") or "").strip('"\'')
                     ctype = (e.get("ctype") or "").strip('"\'')
+                    # Deduplicate by normalised name
+                    norm = name.lower().strip()
+                    if norm in seen_entity_names:
+                        continue
+                    seen_entity_names.add(norm)
+                    # When query is about a specific person, suppress unrelated self-entities
+                    if person_query and _SELF_NAMES.search(name) and not any(
+                        n.lower() in name.lower() for n in query_names
+                    ):
+                        continue
                     line  = f"  ◆ {name}"
                     if ctype:
                         line += f" [{ctype}]"
                     if desc:
-                        line += f": {desc[:200]}"
+                        line += f": {desc[:400]}"
                     section_lines.append(line)
 
             if cypher_result["related"]:
                 has_content = True
                 section_lines.append("Related:")
-                for r in cypher_result["related"][:8]:
+                for r in cypher_result["related"][:15]:
                     rel  = (r.get("rel")  or r.get("conf") or "").strip('"\'')
                     name = (r.get("name") or r.get("text") or "").strip('"\'')
                     desc = (r.get("cdesc") or "").strip('"\'')
@@ -548,13 +1030,13 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         if rel:
                             line = f"  [{rel}] {name}"
                         if desc:
-                            line += f": {desc[:150]}"
+                            line += f": {desc[:300]}"
                         section_lines.append(line)
 
             if cypher_result["recent_claims"]:
                 has_content = True
                 section_lines.append("Recent insights:")
-                for c in cypher_result["recent_claims"][:5]:
+                for c in cypher_result["recent_claims"][:10]:
                     text = (c.get("text") or "").strip('"\'')
                     if text:
                         section_lines.append(f"  • {text[:200]}")
@@ -571,6 +1053,12 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         if rid not in seen_ids:
                             seen_ids.add(rid)
                             rows.append(r)
+
+                # Focused traversal: person or entity hierarchy
+                if focused_person and graph == "personal_graph":
+                    _add_rows(_person_focused_search(conn, focused_person))
+                elif focused_entity and graph == "personal_graph":
+                    _add_rows(_entity_focused_search(conn, focused_entity))
 
                 # Fetch more candidates when reranker is enabled
                 fetch_k = _RERANK_FETCH if RERANK_ENABLED else TOP_K
@@ -635,7 +1123,12 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                     _add_rows(_targeted_event_search(conn, query, terms))
 
                 # 3b. Supplementary SQL queries (schedule, medications, framework)
+                # Skip generic dumps when traversal already covered the relevant data
+                skip_if_focused = {"schedule_sql", "medication_sql"} if (focused_person or focused_entity) and graph == "personal_graph" else set()
+                skip_if_person = skip_if_focused  # alias used below
                 for extra_key in ("event_sql", "schedule_sql", "medication_sql", "framework_sql"):
+                    if extra_key in skip_if_person:
+                        continue
                     extra_sql = cfg.get(extra_key)
                     if not extra_sql:
                         continue
@@ -651,13 +1144,23 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         conn.rollback()
 
                 if rows:
+                    # When querying about a specific person, suppress rows with no mention of their name
+                    query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
+                    person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
+                    if person_query:
+                        name_pattern = re.compile("|".join(re.escape(n) for n in query_names), re.I)
+                        person_rows = [r for r in rows if name_pattern.search(r.get("text") or "") or name_pattern.search(r.get("meta") or "")]
+                        # Fall back to all rows if filtering leaves nothing
+                        if person_rows:
+                            rows = person_rows
+
                     rows = _rank_rows(rows, query, graph, rules_cache)
                     rows = _rerank(query, rows)
                     has_content = True
                     section_lines.append("Documents:")
                     for row in rows[:TOP_K]:
-                        text  = (row.get("text") or "").strip()[:300]
-                        meta  = (row.get("meta") or "").strip()[:100]
+                        text  = _strip_html((row.get("text") or "").strip())[:600]
+                        meta  = (row.get("meta") or "").strip()[:200]
                         score = row.get("match_score")
                         conf  = {3: "strong", 2: "good", 1: "partial"}.get(score, "")
                         if text:
@@ -668,6 +1171,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                                 suffix += f" ({meta})"
                             section_lines.append(f"  • {text}{suffix}")
 
+            print(f"[search] graph={graph} has_content={has_content} cypher_entities={len(cypher_result.get('entities', []))} cypher_related={len(cypher_result.get('related', []))} rows={len(rows) if 'rows' in dir() else '?'}")
             if has_content:
                 sections[graph] = "\n".join(section_lines)
 

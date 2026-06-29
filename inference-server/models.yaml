@@ -1,4 +1,4 @@
-﻿# FamilyBrain Inference Server — model registry
+# FamilyBrain Inference Server — model registry
 # Each entry maps an Ollama-style model name to a local OpenVINO model path and device.
 # Paths are relative to this file or absolute Windows paths.
 
@@ -29,7 +29,7 @@ models:
   qwen2.5:32b:
     path: C:\Users\Glenn\qwen2.5-32b-ov
     type: generate
-    device: GPU,CPU
+    device: GPU
 
   # Cross-encoder reranker — NPU
   ms-marco-reranker:

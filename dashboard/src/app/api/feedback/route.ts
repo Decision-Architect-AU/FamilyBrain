@@ -7,7 +7,7 @@ export async function GET() {
   const pool = getPool();
   try {
     const res = await pool.query(`
-      SELECT id, sender, query, response, graphs_used, feedback, sentiment, correction, created_at
+      SELECT id, sender, query, response, graphs_used, feedback, sentiment, correction, context, prompt_preview, created_at
       FROM config.query_feedback
       ORDER BY created_at DESC
       LIMIT 100
@@ -21,12 +21,13 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const pool = getPool();
   try {
-    const { sender, query, response, graphs_used, feedback, sentiment, correction } = await req.json();
+    const { sender, query, response, graphs_used, feedback, sentiment, correction, context, prompt_preview } = await req.json();
     if (!query || !sentiment) return NextResponse.json({ error: 'missing fields' }, { status: 400 });
     await pool.query(`
-      INSERT INTO config.query_feedback (sender, query, response, graphs_used, feedback, sentiment, correction)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `, [sender ?? 'dashboard-trainer', query, response ?? '', graphs_used ?? [], feedback ?? '', sentiment, correction ?? null]);
+      INSERT INTO config.query_feedback (sender, query, response, graphs_used, feedback, sentiment, correction, context, prompt_preview)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [sender ?? 'dashboard-trainer', query, response ?? '', graphs_used ?? [], feedback ?? '', sentiment, correction ?? null,
+        context ? JSON.stringify(context) : null, prompt_preview ?? null]);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });

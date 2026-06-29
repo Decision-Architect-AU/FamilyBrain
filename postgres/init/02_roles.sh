@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Creates roles and login users with passwords from env vars
 set -e
 

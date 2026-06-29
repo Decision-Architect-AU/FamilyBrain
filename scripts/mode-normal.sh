@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Switch to normal mode: stop podcast services, start normal services
 set -euo pipefail
 

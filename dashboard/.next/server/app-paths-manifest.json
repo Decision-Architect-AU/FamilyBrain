@@ -1,14 +1,4 @@
 {
-  "/api/audit/route": "app/api/audit/route.js",
-  "/api/review/route": "app/api/review/route.js",
-  "/page": "app/page.js",
-  "/api/status/route": "app/api/status/route.js",
-  "/api/agents/route": "app/api/agents/route.js",
-  "/api/setup-check/route": "app/api/setup-check/route.js",
-  "/notifications/page": "app/notifications/page.js",
-  "/api/graph-stats/route": "app/api/graph-stats/route.js",
   "/chat/page": "app/chat/page.js",
-  "/api/notifications/route": "app/api/notifications/route.js",
-  "/senders/page": "app/senders/page.js",
   "/api/chat/route": "app/api/chat/route.js"
 }

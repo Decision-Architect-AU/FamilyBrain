@@ -594,9 +594,8 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             # Mirror to Outlook for non-Outlook-sourced events (decomposed emails, calendar imports)
             elif outlook_acct and not ev.get("calendar_source", "").startswith("outlook:"):
                 try:
-                    import psycopg2, psycopg2.extras as _extras, os as _os
-                    with psycopg2.connect(_os.environ["DATABASE_URL"],
-                                          cursor_factory=_extras.RealDictCursor) as _c:
+                    with psycopg2.connect(DB_URL,
+                                          cursor_factory=psycopg2.extras.RealDictCursor) as _c:
                         with _c.cursor() as _cur:
                             _cur.execute(
                                 """SELECT mirror_provider_id FROM personal.calendar_sync_map

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Switch to podcast mode: stop normal agents/scraper, start podcast services
 set -euo pipefail
 

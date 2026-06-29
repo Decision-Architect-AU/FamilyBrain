@@ -1,4 +1,4 @@
-﻿"""
+"""
 FamilyBrain Inference Server — Ollama-compatible API backed by OpenVINO.
 
 Serves on port 11434 (same as Ollama) so all FamilyBrain services work unchanged.
@@ -122,17 +122,8 @@ def chat(req: ChatRequest):
     if pipe is None:
         raise HTTPException(status_code=404, detail=f"Model {req.model} not loaded")
 
-    # Build prompt from messages
-    prompt_parts = []
-    for msg in req.messages:
-        if msg.role == "system":
-            prompt_parts.append(f"System: {msg.content}")
-        elif msg.role == "user":
-            prompt_parts.append(f"User: {msg.content}")
-        elif msg.role == "assistant":
-            prompt_parts.append(f"Assistant: {msg.content}")
-    prompt_parts.append("Assistant:")
-    prompt = "\n".join(prompt_parts)
+    # Build chat history for apply_chat_template
+    history = [{"role": m.role, "content": m.content} for m in req.messages]
 
     opts = req.options or {}
     config = ov_genai.GenerationConfig()
@@ -141,7 +132,7 @@ def chat(req: ChatRequest):
 
     start = time.time()
     with _generate_lock:
-        response = pipe.generate(prompt, config)
+        response = pipe.generate(history, config)
     elapsed = time.time() - start
 
     return {

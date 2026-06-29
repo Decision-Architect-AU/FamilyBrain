@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Start only the core profile (postgres, ollama, dashboard, audit-logger)
 set -euo pipefail
 

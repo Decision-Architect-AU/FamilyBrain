@@ -1,4 +1,4 @@
-﻿"""
+"""
 auth_helper.py — run once per account to get OAuth2 refresh tokens.
 
 Usage (from familybrain root):
