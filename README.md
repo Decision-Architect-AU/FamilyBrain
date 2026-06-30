@@ -356,6 +356,39 @@ ingested → unpaid → [payment signal detected] → pending_confirmation → p
 
 Bills that remain `unpaid` past their due date surface as `overdue` in the dashboard.
 
+### Hierarchy-aware retrieval
+
+Flat retrieval — treating every linked row with equal weight — produces noise for person and entity queries. Asking about a child returns as much about the parents as the child. Asking about a trust returns governance notes at the same rank as the property bills it issued. The hierarchy traversal model eliminates this.
+
+When the query names a specific person or entity, `search.py` runs a **pseudo-Dijkstra walk** rooted at that focal node:
+
+```
+Focal node
+  │
+  ├─ DOWN  (cost=3)  ← own records: appointments, medications, school events, invoices, owned assets
+  │     └─ DOWN+DOWN (cost=6) ← assets' own events/bills
+  │
+  ├─ SIDEWAYS (cost=8) ← siblings, partners, co-owners, shared events
+  │     └─ SIDEWAYS+DOWN (cost=11) ← sibling's/co-owner's own records
+  │
+  └─ UP (cost=10) ← parents, trustees, directors, beneficiaries, governance notes
+        └─ UP+DOWN (cost=13) ← parent's/trustee's own records
+```
+
+Budget (default 30): anything whose accumulated cost exceeds the budget is excluded entirely; everything under budget is included but converted to a `match_score` (high score = low cost = close to focal node), so the LLM context bundle is already sorted by proximity before the reranker sees it.
+
+This is what makes responses feel natural — they lead with what you asked about and taper into broader context, mirroring how a person would actually explain the topic.
+
+**Hierarchy profiles** are independently-tunable per category. Each is a named `HierarchyProfile(budget, down, sideways, up)` object with its own env-var namespace:
+
+| Profile | Category | Default costs |
+|---|---|---|
+| `FAMILY_HIERARCHY` | People / family tree | budget=30, down=3, sideways=8, up=10 |
+| `ENTITY_HIERARCHY` | Trusts, companies, ownership structures | budget=30, down=3, sideways=8, up=10 |
+| `FINANCIAL_HIERARCHY` *(future)* | Investment/super fund structures | TBD — different "up" and "sideways" semantics |
+
+Override any profile via env: `FAMILY_HIERARCHY_COST_UP=15`, `ENTITY_HIERARCHY_BUDGET=40`, etc. Profiles never share constants, so tuning one cannot affect another.
+
 ### Three knowledge domains
 
 | Domain | Schema | AGE Graph | What it captures |
@@ -389,6 +422,12 @@ Bills that remain `unpaid` past their due date surface as `overdue` in the dashb
 **Single-pass classification** — the wa-agent runs one LLM call that returns both graph routing targets (`["personal_graph"]`) and persona selection as a single JSON response, replacing two previously separate calls.
 
 **Two-stage retrieval** — vector search and FTS retrieve 20 candidates; the cross-encoder reranker (NPU, `ms-marco-MiniLM-L-6-v2`) rescores them; the top 5 go to the LLM. This gives reranker-quality context at half the LLM token cost.
+
+**Weighted hierarchy traversal** — when a query names a specific person or entity, retrieval switches from flat FTS/vector to a pseudo-Dijkstra graph walk anchored on that node. Each direction of travel carries a per-hop cost; the walk expands outward until the accumulated cost exceeds the budget. This mirrors how information naturally flows in a family or ownership structure — downward (own records, appointments, owned assets) is cheap and returns a lot; sideways (siblings, co-owners) is moderately expensive; upward (parents, trustees, directors) is expensive and returns only the most governance-relevant items. Results closer to the focal node rank higher in the LLM context bundle.
+
+**Named hierarchy profiles** — each category of data that has its own natural "direction" gets an independently-tunable weighting profile (`FAMILY_HIERARCHY`, `ENTITY_HIERARCHY`, with room for a future `FINANCIAL_HIERARCHY`). Adding a new hierarchy type is a single `_profile_from_env()` call with its own `<NAME>_HIERARCHY_BUDGET / COST_DOWN / COST_SIDEWAYS / COST_UP` env vars — no shared constants to collide on.
+
+**Batched LLM querying** — where a task would require N serial LLM calls (e.g. appointment summaries across multiple time windows), the agent batches records and requests all outputs in a single structured response using delimited blocks (`=== WINDOW: <name> === ... === END ===`), parsed back out in Python. The appointment digest batches 15 events and requests TODAY / 3_DAYS / 1_WEEK / 1_MONTH / 3_MONTHS summaries in one call rather than one call per window per batch. Digest results are saved back into `personal.note` (tagged `digest`) so live queries retrieve the pre-summarised version instead of re-asking the LLM at request time — pushing work into the scheduled maintenance window and keeping per-request latency low.
 
 ---
 
