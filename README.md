@@ -379,6 +379,26 @@ Budget (default 30): anything whose accumulated cost exceeds the budget is exclu
 
 This is what makes responses feel natural — they lead with what you asked about and taper into broader context, mirroring how a person would actually explain the topic.
 
+**Example walk — "What's coming up for Child1?"**
+
+```
+Focal node: Child1 (Person, id=1, relationship="daughter")
+
+  cost  3 → Child1's own appointments, medications, school events    [score 3]
+  cost  3 → notes mentioning Child1                                  [score 3]
+  cost  8 → shared family events that name Child1                    [score 2]
+  cost 11 → sibling (Child2) own records      [8 sideways + 3 down]  [score 2]
+  cost 13 → parent family booking note       [10 up + 3 down]        [score 1]
+
+  cost 23 → would be next candidate (another sibling record)
+             — still under budget of 30, included at score 1
+
+  cost 33 → governance notes about the family trust (up + up)
+             — exceeds budget of 30, excluded entirely
+```
+
+The LLM context bundle arrives sorted by score: in aggregate, the retrieval knows far more about Child1 than it does about the parents — which is exactly the right shape for the question that was asked.
+
 **Hierarchy profiles** are independently-tunable per category. Each is a named `HierarchyProfile(budget, down, sideways, up)` object with its own env-var namespace:
 
 | Profile | Category | Default costs |
