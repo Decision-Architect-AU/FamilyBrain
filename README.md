@@ -428,7 +428,7 @@ Disposal cascade
 
 Not all assets are things you own. Some are **patterns of life** — recurring commitments that generate events, have contacts, can be cancelled or overridden by inbound emails, and need collision awareness. These are routines.
 
-A school schedule is a routine. A weekly therapy block is a routine. A fortnightly speech therapy session is a routine. Babysitter pickup every Monday at 14:40 is a routine. They are modelled exactly like other assets — a row in `personal.asset` with `asset_type='routine'`, a `rules` JSONB array, a linked `person_id`, and the same event generation pipeline. The distinction from, say, a property is conceptual: routines generate **time-blocking commitments** for a person, not financial obligations.
+A school schedule is a routine. A weekly therapy block is a routine. A fortnightly speech therapy session is a routine. Grandparent pickup every Thursday afternoon is a routine. They are modelled exactly like other assets — a row in `personal.asset` with `asset_type='routine'`, a `rules` JSONB array, a linked `person_id`, and the same event generation pipeline. The distinction from, say, a property is conceptual: routines generate **time-blocking commitments** for a person, not financial obligations.
 
 What routines gain over raw calendar entries:
 
@@ -441,19 +441,15 @@ What routines gain over raw calendar entries:
 
 | Routine | event_type | recurrence | blocks_person | collision_aware |
 |---|---|---|---|---|
-| School — Olivia, Class 1C | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
-| School — Elliana, Class 3C | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
-| Monday babysitter pickup | `PICKUP` | weekly Monday 14:40 | false | suppress on school_holiday |
-| Tuesday after school care | `AFTERCARE` | weekly Tuesday 14:40 | true | suppress on school_holiday |
-| Tuesday cello class — Elliana | `CELLO_CLASS` | weekly Tuesday 15:00 | true | suppress on school_holiday |
-| Wednesday dancing — Elliana | `ACTIVITY` | weekly Wednesday 15:30 | true | suppress on school_holiday |
-| Wednesday after school care — Olivia | `AFTERCARE` | weekly Wednesday 14:40 | true | suppress on school_holiday |
-| Wednesday Nanna pickup | `PICKUP` | weekly Wednesday 17:00 | false | suppress on school_holiday |
-| Thursday Nanna pickup | `PICKUP` | weekly Thursday 14:40 | false | suppress on school_holiday |
-| Friday Jen Jen pickup | `PICKUP` | weekly Friday 14:40 | false | suppress on school_holiday |
-| Fortnightly speech therapy | `THERAPY_SESSION` | interval/14d, 7:45 AEST | true | holiday_immune (medical priority) |
-| Weekly OT | `THERAPY_SESSION` | weekly Wednesday 8:00 | true | holiday_immune |
-| Weekly physio | `THERAPY_SESSION` | weekly Monday 8:00 | true | holiday_immune |
+| School — Alice, Class 3B | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
+| School — Ben, Class 6A | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
+| Monday afterschool care — Alice | `AFTERCARE` | weekly Monday 15:00 | true | suppress on school_holiday |
+| Tuesday music class — Ben | `ACTIVITY` | weekly Tuesday 15:30 | true | suppress on school_holiday |
+| Wednesday childcare pickup | `PICKUP` | weekly Wednesday 15:00 | false | suppress on school_holiday |
+| Thursday grandparent pickup | `PICKUP` | weekly Thursday 15:00 | false | suppress on school_holiday |
+| Friday afterschool care — Ben | `AFTERCARE` | weekly Friday 15:00 | true | suppress on school_holiday |
+| Fortnightly speech therapy — Alice | `THERAPY_SESSION` | interval/14d, 8:00 | true | holiday_immune (medical priority) |
+| Weekly OT — Alice | `THERAPY_SESSION` | weekly Wednesday 8:30 | true | holiday_immune |
 
 ### Routine rules JSONB
 
@@ -463,7 +459,7 @@ What routines gain over raw calendar entries:
   "event_type": "SCHOOL_DAY",
   "recurrence": "weekdays",
   "auto_create": true,
-  "event_label": "Olivia - Varsity College Class 1C (9:00-14:40)",
+  "event_label": "Alice - Maplewood Primary Class 3B (9:00-15:00)",
   "start_time": "09:00",
   "suppress_on": ["SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY"],
   "blocks_person": true,
