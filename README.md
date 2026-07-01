@@ -341,6 +341,51 @@ If a match is found: intent is classified and applied (cancel event, update fact
 
 If no match is found but the email looks like a service provider (therapy, medical, insurance, council rates): a new `personal.asset` row is created with `status='pending'` and `source_email_id` pointing to the originating email. Pending assets surface in the dashboard for human review — confirm, edit, or dismiss. Once activated, the maintenance job picks them up on the next run and starts generating events.
 
+### Assets as compliance responsibilities
+
+Every asset is not just a record — it is a source of ongoing obligations. When an asset is created or activated, the system infers what compliance it generates: documents to file, events to track, renewals to anticipate. This is modelled through the rules JSONB and the document pipeline working together.
+
+**The compliance loop:**
+
+```
+Asset created
+  │
+  ├── rules[] → event_gen_enabled=true → maintenance generates obligation events
+  │     (renewal notices, plan reviews, refill reminders, rates due dates)
+  │
+  └── inbound email matches asset
+        ├── attachments downloaded and filed to personal.asset_document
+        ├── facts updated from document (new premium, new due date, new plan period)
+        └── events updated or generated from extracted dates
+```
+
+An asset with no rules is still a filing target — every matched email gets attached to it. An asset with rules is also a forward obligation engine — it generates reminders before the obligation is due. Most real assets are both.
+
+### Document filing — auto-attach to assets
+
+When an inbound email matches an asset, any attachments are automatically downloaded and filed against that asset. The email decomposer extracts attachments, classifies the document type, and writes a row to `personal.asset_document`:
+
+| doc_type | Triggered by |
+|---|---|
+| `invoice` | Utility bill, therapy invoice, rates notice |
+| `statement` | Bank or super statement, loan summary |
+| `policy` | Insurance certificate of currency, PDS |
+| `renewal` | Rego renewal, insurance renewal notice |
+| `script` | Medical prescription |
+| `referral` | GP referral letter |
+| `report` | NDIS plan, progress report, school report |
+| `correspondence` | General provider letter |
+
+Documents are stored with `asset_id`, `email_id`, `doc_type`, `period_start` / `period_end` (extracted from the document where available), and a file path under the configured document store. The asset's `facts` are updated from the document where new structured data is found (e.g. updated premium from a renewal notice, new due date from an invoice, new plan period from an NDIS letter).
+
+**Compliance benefits** — because every invoice, renewal, and statement is filed at the point of receipt and linked to the asset that owns the obligation:
+
+- **Audit trail** — every financial obligation has a document history: what was charged, when, and under what policy
+- **Tax time** — all deductible invoices (medical, therapy, rental property expenses) are already categorised by asset; export is a query, not a search
+- **Renewal tracking** — insurance and rego renewals are filed and compared against the previous period; premium increases surface as a notification
+- **NDIS** — support invoices are matched to the NDIS plan asset and tracked against the plan budget; the annual plan review generates an `NDIS_PLAN_REVIEW` event (rank=85, holiday_immune) 30 days before the plan end date; inbound NDIS letters update `facts.plan_end` and trigger event regeneration
+- **Property** — rates notices, water usage statements, and strata levies are filed against the property asset and timestamped; body corporate correspondence has a complete thread history
+
 ### Event generation — rules to events
 
 The maintenance job (`task_generate_events`) runs nightly and processes every active asset:
@@ -373,14 +418,14 @@ Therapy and medical appointments are `collision_aware: true` — they are skippe
 After generating events, the maintenance job (`task_refresh_asset_notes`) writes a structured prose summary back to `asset.notes`:
 
 ```
-Asset: Sodium Valproate (Epilim) - Olivia (medication/antiepileptic)
-Prescribing Doctor: Dr Kate Riney
-Dose: 10ml
+Asset: Levetiracetam (Keppra) - Alice (medication/antiepileptic)
+Prescribing Doctor: Dr J. Hartley
+Dose: 5ml
 Frequency: morning and night
 Upcoming events:
-  • 14 Jul 2026: Sodium Valproate (Epilim) refill due [MEDICATION_REFILL]
-  • 13 Aug 2026: Sodium Valproate (Epilim) refill due [MEDICATION_REFILL]
-  • 15 Oct 2026: Sodium Valproate (Epilim) new script needed [MEDICATION_SCRIPT]
+  • 14 Jul 2026: Levetiracetam (Keppra) refill due [MEDICATION_REFILL]
+  • 13 Aug 2026: Levetiracetam (Keppra) refill due [MEDICATION_REFILL]
+  • 15 Oct 2026: Levetiracetam (Keppra) new script needed [MEDICATION_SCRIPT]
 ```
 
 This is what the wa-agent retrieval layer reads when answering questions about a person or asset — it always reflects the current state without requiring the agent to join across tables at query time.

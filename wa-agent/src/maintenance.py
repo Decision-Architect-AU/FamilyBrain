@@ -282,6 +282,7 @@ _EVENT_CLASS: dict[str, tuple[str, bool, int]] = {
     "MEDICAL_REVIEW":       ("appointment",   False,  30),
     "DIRECTOR_STATEMENT":   ("misc",          False,   5),
     "SMSF_AUDIT":           ("misc",          False,   5),
+    "NDIS_PLAN_REVIEW":     ("appointment",   True,   85),
 }
 
 # Live statuses — events that are active and should be considered for collisions/suppression

@@ -178,6 +178,7 @@ detected (resolved_at IS NULL)
 |---|---|---|---|
 | 100 | `MEDICAL` | `appointment` | yes |
 | 90 | `THERAPY`, `THERAPY_SESSION` | `appointment` | yes |
+| 85 | `NDIS_PLAN_REVIEW` | `appointment` | yes |
 | 80 | `HOLIDAY_CARE`, `VACATION_CARE` | `daytime_care` | yes |
 | 70 | `SCHOOL_ACTIVITY` | `school_day` | yes |
 | 60 | `SCHOOL_DAY`, `SCHOOL` | `school_day` | yes |
