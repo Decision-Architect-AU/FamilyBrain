@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime
 from collections import defaultdict, deque
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import httpx
 
@@ -67,6 +67,7 @@ class QueryRequest(BaseModel):
     body: str
     timestamp: int | None = None
     model: str | None = None
+    person_hint: str | None = None   # last focused person name, for pronoun follow-ups
 
     class Config:
         populate_by_name = True
@@ -77,8 +78,10 @@ class QueryResponse(BaseModel):
     response: str
     graphs_used: list[str]
     elapsed_ms: int
-    context: dict | None = None   # raw retrieval sections sent to LLM
-    prompt_preview: str | None = None  # first 2000 chars of the prompt
+    context: dict | None = None         # raw retrieval sections sent to LLM
+    prompt_preview: str | None = None   # first 3000 chars of the prompt
+    route_info: dict | None = None      # how the query was classified and traversed
+    queries: list[str] | None = None    # all retrieval steps (Cypher, FTS, vector, traversal)
 
 
 class IngestTextRequest(BaseModel):
@@ -160,17 +163,21 @@ async def query(req: QueryRequest):
     # ── 5. Knowledge query ────────────────────────────────────────────────────
     intent = classify(message)
     graphs = intent.graphs
-    context_sections = retrieve(message, graphs)
+    person_hint = req.person_hint or None
+    context_sections, retrieve_meta = retrieve(message, graphs, person_hint=person_hint)
 
     # Nothing found and user didn't name a specific graph — fan out silently
     if not context_sections and not intent.explicit_graph:
         all_graphs = ["personal_graph", "property_graph", "decision_graph"]
         remaining  = [g for g in all_graphs if g not in graphs]
         if remaining:
-            extra = retrieve(message, remaining)
+            extra, extra_meta = retrieve(message, remaining, person_hint=person_hint)
             if extra:
                 context_sections.update(extra)
                 graphs = list(context_sections.keys())
+                retrieve_meta["cypher_queries"] += extra_meta.get("cypher_queries", [])
+                retrieve_meta["rules_matched"].update(extra_meta.get("rules_matched", {}))
+                retrieve_meta["traversal_mode"].update(extra_meta.get("traversal_mode", {}))
 
     _GRAPH_LABELS = {
         "personal_graph":  "Personal records",
@@ -231,12 +238,27 @@ async def query(req: QueryRequest):
 
     elapsed = int((time.time() - t0) * 1000)
     print(f"[wa-agent] query {sender}: {message[:60]} → {graphs_used} persona={intent.persona_name} ({elapsed}ms)")
+
+    # Build route_info summary for the data pane
+    how = "fast_path (explicit graph)" if intent.explicit_graph else "llm_classified"
+    route_info = {
+        "graphs": graphs_used,
+        "how": how,
+        "persona": intent.persona_name,
+        "focused_person": retrieve_meta.get("focused_person"),
+        "focused_entity": retrieve_meta.get("focused_entity"),
+        "traversal_mode": retrieve_meta.get("traversal_mode", {}),
+        "rules_matched": retrieve_meta.get("rules_matched", {}),
+    }
+
     return QueryResponse(
         response=response,
         graphs_used=graphs_used,
         elapsed_ms=elapsed,
         context=context_sections or {},
         prompt_preview=prompt[:3000] if prompt else None,
+        route_info=route_info,
+        queries=retrieve_meta.get("cypher_queries") or [],
     )
 
 
@@ -262,11 +284,12 @@ async def clear_history(sender: str):
 
 
 @app.post("/maintenance")
-async def maintenance(tasks: list[str] | None = None):
+async def maintenance(tasks: list[str] | None = Query(default=None)):
     """Trigger nightly maintenance. Runs in background — returns immediately."""
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    return {"status": "running", "tasks": tasks or ["re_embed", "link", "dedup", "prune"]}
+    effective = tasks or ["re_embed", "link", "dedup", "prune", "generate_events", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest"]
+    return {"status": "running", "tasks": effective}
 
 
 @app.get("/health")

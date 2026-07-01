@@ -6,7 +6,10 @@ Tasks (run in order):
 2. link              — run concept linker (ALIAS_OF / SIMILAR_TO edges)
 3. dedup             — merge Concept nodes with identical names
 4. prune             — remove orphan Concept nodes (no edges, no documents)
-5. appointment_digest — pre-compute appointment summaries for common windows
+5. generate_events   — generate future events from asset rules up to per-rule horizon
+6. refresh_asset_notes — write structured prose summary back to asset.notes
+7. asset_graph_sync  — upsert Asset nodes in AGE, link to Person nodes, prune disposed
+8. appointment_digest — pre-compute appointment summaries for common windows
 
 Triggered via POST /maintenance or the nightly cron.
 """
@@ -17,7 +20,8 @@ import re
 import requests
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone, timedelta
+from dateutil.relativedelta import relativedelta
 
 from src.linker import run_linker, _conn, _embed, _cypher, GRAPHS
 
@@ -239,6 +243,567 @@ def task_monitor_queries() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Asset event generation
+# ---------------------------------------------------------------------------
+
+# Materialised classification — mirrors personal.event_class_precedence seed.
+# (slot_class, blocks_person, rank)
+_EVENT_CLASS: dict[str, tuple[str, bool, int]] = {
+    "MEDICAL":          ("appointment",   True,  100),
+    "THERAPY":          ("appointment",   True,   90),
+    "THERAPY_SESSION":  ("appointment",   True,   90),
+    "HOLIDAY_CARE":     ("daytime_care",  True,   80),
+    "VACATION_CARE":    ("daytime_care",  True,   80),
+    "SCHOOL_ACTIVITY":  ("school_day",    True,   70),
+    "SCHOOL":           ("school_day",    True,   60),
+    "AFTERCARE":        ("after_school",  True,   50),
+    "PICKUP":           ("after_school",  False,  40),
+    "REFERRAL_RENEWAL": ("appointment",   False,  30),
+    "MEDICAL_REVIEW":   ("appointment",   False,  30),
+    "SCHOOL_HOLIDAY":   ("context",       False,   0),
+    "PUBLIC_HOLIDAY":   ("context",       False,   0),
+    "HOLIDAY":          ("context",       False,   0),
+    "LEAVE":            ("context",       False,   0),
+    "BIN_NIGHT":            ("misc",          False,   5),
+    "RENT_PAYMENT":         ("misc",          False,   5),
+    "MEDICATION_REFILL":    ("misc",          False,   5),
+    "MEDICATION_SCRIPT":    ("misc",          False,   5),
+    "SCHOOL_DAY":           ("school_day",    True,   60),
+    "CELLO_CLASS":          ("after_school",  True,   55),
+    "ACTIVITY":             ("after_school",  True,   55),
+    "DANCING":              ("after_school",  True,   55),
+    "REMINDER":             ("misc",          False,   5),
+    "RENT_REVIEW":          ("misc",          False,   5),
+    "INSURANCE_RENEWAL":    ("misc",          False,   5),
+    "SUBSCRIPTION_RENEWAL": ("misc",          False,   5),
+    "SCRIPT_RENEWAL":       ("misc",          False,   5),
+    "REFERRAL_RENEWAL":     ("appointment",   False,  30),
+    "MEDICAL_REVIEW":       ("appointment",   False,  30),
+    "DIRECTOR_STATEMENT":   ("misc",          False,   5),
+    "SMSF_AUDIT":           ("misc",          False,   5),
+}
+
+# Live statuses — events that are active and should be considered for collisions/suppression
+_LIVE_STATUSES = ("generated", "scheduled", "ingested", "confirmed")
+
+
+def _classify(event_type: str) -> tuple[str, bool, int]:
+    """Return (slot_class, blocks_person, rank) for an event_type."""
+    return _EVENT_CLASS.get(event_type, ("misc", False, 10))
+
+
+def _get_suppress_on(rule: dict) -> list[str]:
+    """Derive suppress_on list — explicit field takes precedence, fallback from collision_aware."""
+    if "suppress_on" in rule:
+        return rule["suppress_on"]
+    if rule.get("collision_aware"):
+        return ["SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY", "HOLIDAY", "LEAVE"]
+    return []
+
+
+# Default horizon (months) per event_type — can be overridden per rule via
+# a "horizon_months" key in the rule object itself.
+_EVENT_HORIZONS: dict[str, int] = {
+    "BIN_COLLECTION":     2,
+    "THERAPY_SESSION":    3,
+    "SUBSCRIPTION_RENEWAL": 12,
+    "MEDICATION_REFILL":  12,
+    "MEDICATION_SCRIPT":  12,
+    "RATES":              12,
+    "WATER":              12,
+    "STRATA":             12,
+    "INSURANCE_RENEWAL":  12,
+    "REGO":               12,
+    "REFERRAL_RENEWAL":   12,
+    "MEDICAL_REVIEW":     12,
+    "RENT_REVIEW":        12,
+    "RENT_PAYMENT":       3,   # fallback; honours facts.lease_expiry if present
+    "ASIC_FEES":          12,
+    "DIRECTOR_STATEMENT": 12,
+    "SMSF_AUDIT":         12,
+}
+
+_WEEKDAYS = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+             "Friday": 4, "Saturday": 5, "Sunday": 6}
+
+
+def _next_weekday(from_date: date, weekday_name: str) -> date:
+    """Return the next occurrence of weekday_name on or after from_date."""
+    target = _WEEKDAYS.get(weekday_name, 0)
+    days_ahead = (target - from_date.weekday()) % 7
+    return from_date + timedelta(days=days_ahead or 7)
+
+
+def _horizon_date(rule: dict, asset_facts: dict, now: date) -> date:
+    """Calculate the generation horizon date for a rule."""
+    months = rule.get("horizon_months") or _EVENT_HORIZONS.get(rule.get("event_type", ""), 3)
+    horizon = now + relativedelta(months=months)
+
+    # RENT_PAYMENT respects lease_expiry
+    if rule.get("event_type") == "RENT_PAYMENT":
+        lease_str = asset_facts.get("lease_expiry")
+        if lease_str:
+            try:
+                lease = date.fromisoformat(str(lease_str))
+                horizon = min(horizon, lease)
+            except ValueError:
+                pass
+
+    return horizon
+
+
+def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool:
+    """Return True if a context event on target_date should gate generation of this rule."""
+    if not suppress_on:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM personal.event
+            WHERE status = ANY(%s)
+              AND event_type = ANY(%s)
+              AND effective_date = %s
+            LIMIT 1
+        """, (list(_LIVE_STATUSES), suppress_on, target_date))
+        return cur.fetchone() is not None
+
+
+def _delete_generated_event(conn, asset_id: int, rule_id: str, occurrence_date: date) -> None:
+    """Remove a generated placeholder — called when a suppress event is found for its date."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM personal.event
+            WHERE gen_asset_id = %s AND gen_rule_id = %s AND occurrence_date = %s
+              AND provenance = 'rule' AND status = 'generated'
+        """, (asset_id, rule_id, occurrence_date))
+
+
+_AEST = timezone(timedelta(hours=10))
+
+
+def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
+                  asset_facts: dict | None = None) -> None:
+    """
+    Upsert a generated event using the deterministic genkey (gen_asset_id, gen_rule_id, occurrence_date).
+    Only updates display fields on conflict — never touches status if already superseded.
+    """
+    start_time_str = rule.get("start_time")
+    if start_time_str:
+        h, m = map(int, start_time_str.split(":"))
+        from datetime import time as dtime
+        starts_at = datetime.combine(target_date, dtime(h, m)).replace(tzinfo=_AEST)
+    else:
+        starts_at = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+    event_type = rule.get("event_type", "TASK")
+    if event_type == "BIN_NIGHT" and asset_facts:
+        title = _bin_night_title(target_date, asset_facts)
+    else:
+        title = rule.get("event_label", event_type)
+
+    rule_id = rule.get("name", event_type)
+
+    # Classify: rule may override slot_class / blocks_person
+    default_slot_class, default_blocks, default_rank = _classify(event_type)
+    slot_class    = rule.get("slot_class", default_slot_class)
+    blocks_person = rule.get("blocks_person", default_blocks)
+    rank          = default_rank
+    slot_key      = f"{person_id}:{target_date}:{slot_class}" if person_id else None
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO personal.event (
+              title, event_type, starts_at, effective_date,
+              status, provenance, asset_id, person_id, calendar_source,
+              slot_key, slot_class, blocks_person, precedence_rank,
+              gen_asset_id, gen_rule_id, occurrence_date
+            ) VALUES (
+              %s, %s, %s, %s,
+              'generated', 'rule', %s, %s, 'asset_rules',
+              %s, %s, %s, %s,
+              %s, %s, %s
+            )
+            ON CONFLICT (gen_asset_id, gen_rule_id, occurrence_date) WHERE provenance = 'rule'
+            DO UPDATE SET
+              title           = EXCLUDED.title,
+              starts_at       = EXCLUDED.starts_at,
+              slot_key        = EXCLUDED.slot_key,
+              slot_class      = EXCLUDED.slot_class,
+              blocks_person   = EXCLUDED.blocks_person,
+              precedence_rank = EXCLUDED.precedence_rank
+            WHERE personal.event.status = 'generated'
+        """, (
+            title, event_type, starts_at, target_date,
+            asset_id, person_id,
+            slot_key, slot_class, blocks_person, rank,
+            asset_id, rule_id, target_date,
+        ))
+
+
+def _bin_night_title(target_date: date, facts: dict) -> str:
+    """Calculate which bins go out on a given Monday from the rotation anchors."""
+    bins = ["Garbage"]
+    for key, label in [("recycle_anchor", "Recycle"), ("greens_anchor", "Greens")]:
+        anchor_str = facts.get(key)
+        if anchor_str:
+            try:
+                anchor = date.fromisoformat(str(anchor_str))
+                if (target_date - anchor).days % 14 == 0:
+                    bins.append(label)
+            except ValueError:
+                pass
+    return "Put out bins: " + " + ".join(bins) + " — collection Tuesday"
+
+
+def _generate_dates(rule: dict, anchor: date, horizon: date, now: date) -> list[date]:
+    """Yield all dates this rule should fire between anchor and horizon."""
+    recurrence = rule.get("recurrence", "interval")
+    dates: list[date] = []
+    current = anchor
+
+    if recurrence == "interval":
+        days = int(rule.get("recurrence_days") or 30)
+        current = anchor + timedelta(days=days)
+        while current <= horizon:
+            if current >= now:
+                dates.append(current)
+            current += timedelta(days=days)
+
+    elif recurrence == "weekly":
+        day_name = rule.get("recurrence_day", "Monday")
+        current = _next_weekday(anchor + timedelta(days=1), day_name)
+        while current <= horizon:
+            if current >= now:
+                dates.append(current)
+            current += timedelta(weeks=1)
+
+    elif recurrence == "annual":
+        current = anchor + relativedelta(years=1)
+        while current <= horizon:
+            if current >= now:
+                dates.append(current)
+            current += relativedelta(years=1)
+
+    elif recurrence == "weekdays":
+        current = anchor + timedelta(days=1)
+        while current.weekday() > 4:  # skip to next weekday
+            current += timedelta(days=1)
+        while current <= horizon:
+            if current >= now:
+                dates.append(current)
+            current += timedelta(days=1)
+            while current.weekday() > 4:
+                current += timedelta(days=1)
+
+    return dates
+
+
+def task_generate_events() -> dict:
+    """
+    For each active asset with event_gen_enabled=true, process rules and
+    generate personal.event rows up to the per-rule horizon.
+    Collision-aware rules skip dates that overlap with a holiday/leave event.
+    Updates asset.events_generated_until after processing.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    total_created = 0
+    total_skipped = 0
+    assets_processed = 0
+    now = date.today()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, asset_type, person_id, facts, rules,
+                       last_event_date, events_generated_until
+                FROM personal.asset
+                WHERE status IN ('active') AND event_gen_enabled = true
+                  AND rules != '[]'::jsonb
+            """)
+            assets = [dict(r) for r in cur.fetchall()]
+
+        for asset in assets:
+            asset_id   = asset["id"]
+            person_id  = asset.get("person_id")
+            facts      = asset.get("facts") or {}
+            rules      = asset.get("rules") or []
+            anchor_raw = asset.get("last_event_date") or now
+
+            if isinstance(anchor_raw, str):
+                try:
+                    anchor = date.fromisoformat(anchor_raw)
+                except ValueError:
+                    anchor = now
+            elif isinstance(anchor_raw, datetime):
+                anchor = anchor_raw.date()
+            else:
+                anchor = anchor_raw or now
+
+            asset_created = 0
+
+            for rule in rules:
+                if not rule.get("auto_create"):
+                    continue
+
+                horizon      = _horizon_date(rule, facts, now)
+                suppress_on  = _get_suppress_on(rule)
+                holiday_immune = rule.get("holiday_immune", False)
+                rule_id      = rule.get("name", rule.get("event_type", "TASK"))
+
+                for target_date in _generate_dates(rule, anchor, horizon, now):
+                    # Stage 1 suppress gate
+                    if not holiday_immune and suppress_on and _has_suppress_event(conn, target_date, suppress_on):
+                        _delete_generated_event(conn, asset_id, rule_id, target_date)
+                        total_skipped += 1
+                        continue
+
+                    _insert_event(conn, asset_id, person_id, rule, target_date, facts)
+                    asset_created += 1
+                    total_created += 1
+
+            # Update events_generated_until to the furthest horizon we just computed
+            max_horizon = max(
+                (_horizon_date(r, facts, now) for r in rules if r.get("auto_create")),
+                default=now,
+            )
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE personal.asset
+                    SET events_generated_until = %s, updated_at = now()
+                    WHERE id = %s
+                """, (max_horizon, asset_id))
+
+            conn.commit()
+            assets_processed += 1
+            if asset_created:
+                print(f"[maintenance] generate_events: asset {asset_id} ({asset['name']}) → {asset_created} events")
+
+    finally:
+        conn.close()
+
+    return {"assets_processed": assets_processed, "events_created": total_created, "collisions_skipped": total_skipped}
+
+
+# ---------------------------------------------------------------------------
+# Asset notes refresh
+# ---------------------------------------------------------------------------
+
+def _format_asset_notes(asset: dict, upcoming: list[dict]) -> str:
+    """Build a structured prose summary for asset.notes."""
+    facts = asset.get("facts") or {}
+    lines = [f"Asset: {asset['name']} ({asset['asset_type']}" +
+             (f"/{asset['subtype']}" if asset.get("subtype") else "") + ")"]
+
+    # Key facts
+    for key in ("address", "lender", "loan_amount", "interest_rate", "loan_type",
+                "value", "rent_pw", "dose", "frequency", "prescribing_doctor",
+                "specialty", "provider", "contact_email", "billing_cycle", "cost",
+                "property_manager_name", "property_manager_agency", "doctor"):
+        if key in facts:
+            label = key.replace("_", " ").title()
+            lines.append(f"{label}: {facts[key]}")
+
+    if upcoming:
+        lines.append("Upcoming events:")
+        for e in upcoming[:5]:
+            dt = e["starts_at"]
+            date_str = dt.strftime("%-d %b %Y") if hasattr(dt, "strftime") else str(dt)
+            lines.append(f"  • {date_str}: {e['title']} [{e['event_type']}]")
+    else:
+        lines.append("No upcoming events scheduled.")
+
+    return "\n".join(lines)
+
+
+def task_refresh_asset_notes() -> dict:
+    """
+    Write a structured summary back to asset.notes for every active asset.
+    This is what the retrieval layer reads — keeps it current without joins.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    updated = 0
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, asset_type, subtype, facts
+                FROM personal.asset WHERE status = 'active'
+            """)
+            assets = [dict(r) for r in cur.fetchall()]
+
+        for asset in assets:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT title, event_type, starts_at
+                    FROM personal.event
+                    WHERE asset_id = %s
+                      AND status IN ('generated','scheduled','ingested','confirmed')
+                      AND starts_at >= now()
+                    ORDER BY starts_at ASC LIMIT 5
+                """, (asset["id"],))
+                upcoming = [dict(r) for r in cur.fetchall()]
+
+            summary = _format_asset_notes(asset, upcoming)
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE personal.asset SET notes = %s, updated_at = now() WHERE id = %s
+                """, (summary, asset["id"]))
+
+            conn.commit()
+            updated += 1
+
+    finally:
+        conn.close()
+
+    return {"assets_updated": updated}
+
+
+# ---------------------------------------------------------------------------
+# Asset graph sync
+# ---------------------------------------------------------------------------
+
+def task_asset_graph_sync() -> dict:
+    """
+    Upsert Asset nodes in AGE personal_graph, link to Person nodes via HAS_ASSET.
+    Prune HAS_ASSET edges for disposed/sold assets.
+    """
+    conn = _conn()
+    upserted = pruned = linked = 0
+
+    try:
+        # Load active assets with person links
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.id, a.name, a.asset_type, a.subtype, a.status, a.person_id,
+                       p.name AS person_name
+                FROM personal.asset a
+                LEFT JOIN personal.person p ON p.id = a.person_id
+                WHERE a.status IN ('active', 'pending')
+            """)
+            assets = [dict(r) for r in cur.fetchall()]
+
+        for asset in assets:
+            ref = f"personal.asset:{asset['id']}"
+            atype = (asset.get("subtype") or asset["asset_type"]).replace("'", "\\'")
+            aname = asset["name"].replace("'", "\\'")
+
+            _cypher(conn, "personal_graph",
+                f"MERGE (a:Asset {{ref: '{ref}'}}) "
+                f"SET a.name = '{aname}', a.asset_type = '{asset['asset_type']}', "
+                f"a.subtype = '{atype}', a.status = '{asset['status']}'",
+            )
+            upserted += 1
+
+            if asset.get("person_name"):
+                pname = asset["person_name"].replace("'", "\\'")
+                _cypher(conn, "personal_graph",
+                    f"MATCH (p:Person {{name: '{pname}'}}), (a:Asset {{ref: '{ref}'}}) "
+                    f"MERGE (p)-[:HAS_ASSET]->(a)",
+                )
+                linked += 1
+
+        # Prune edges for disposed/sold assets
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id FROM personal.asset WHERE status IN ('disposed', 'sold')
+            """)
+            dead = [r["id"] for r in cur.fetchall()]
+
+        for asset_id in dead:
+            ref = f"personal.asset:{asset_id}"
+            _cypher(conn, "personal_graph",
+                f"MATCH ()-[r:HAS_ASSET]->(a:Asset {{ref: '{ref}'}}) DELETE r",
+            )
+            pruned += 1
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {"upserted": upserted, "linked": linked, "edges_pruned": pruned}
+
+
+# ---------------------------------------------------------------------------
+# Conflict detection (Stage 3)
+# ---------------------------------------------------------------------------
+
+def task_detect_conflicts() -> dict:
+    """
+    Stage 3 sweep: find pairs of person-blocking events that overlap in time
+    for the same person but occupy different slot_classes (same slot_class means
+    it should have been an override in Stage 2, not a conflict).
+    Records new conflicts, auto-resolves stale ones.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    detected = resolved = 0
+
+    try:
+        with conn.cursor() as cur:
+            # Detect new pairs — canonical order a.id < b.id prevents duplicates
+            cur.execute("""
+                INSERT INTO personal.conflict
+                  (person_id, event_a_id, event_b_id, suggested_keep)
+                SELECT
+                    a.person_id,
+                    LEAST(a.id, b.id),
+                    GREATEST(a.id, b.id),
+                    CASE WHEN a.precedence_rank >= b.precedence_rank THEN a.id ELSE b.id END
+                FROM personal.event a
+                JOIN personal.event b
+                  ON a.person_id = b.person_id
+                 AND a.id < b.id
+                 AND a.blocks_person = true
+                 AND b.blocks_person = true
+                 AND a.status = ANY(%(live)s)
+                 AND b.status = ANY(%(live)s)
+                 AND a.slot_class IS NOT NULL
+                 AND b.slot_class IS NOT NULL
+                 AND a.slot_class <> b.slot_class
+                 AND tstzrange(a.starts_at,
+                       COALESCE(a.ends_at, a.starts_at + interval '1 hour'), '[)')
+                  && tstzrange(b.starts_at,
+                       COALESCE(b.ends_at, b.starts_at + interval '1 hour'), '[)')
+                WHERE a.person_id IS NOT NULL
+                ON CONFLICT (person_id, event_a_id, event_b_id) DO NOTHING
+            """, {"live": list(_LIVE_STATUSES)})
+            detected = cur.rowcount
+
+        with conn.cursor() as cur:
+            # Auto-resolve: either side gone, superseded, cancelled, or no longer overlapping
+            cur.execute("""
+                UPDATE personal.conflict c
+                SET resolved_at = now(), resolution = 'auto_passed'
+                FROM personal.event a, personal.event b
+                WHERE c.event_a_id = a.id
+                  AND c.event_b_id = b.id
+                  AND c.resolved_at IS NULL
+                  AND (
+                    a.status IN ('superseded','cancelled')
+                    OR b.status IN ('superseded','cancelled')
+                    OR a.ends_at < now()
+                    OR b.ends_at < now()
+                    OR NOT (
+                      tstzrange(a.starts_at, COALESCE(a.ends_at, a.starts_at + interval '1 hour'), '[)')
+                      && tstzrange(b.starts_at, COALESCE(b.ends_at, b.starts_at + interval '1 hour'), '[)')
+                    )
+                  )
+            """)
+            resolved = cur.rowcount
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {"conflicts_detected": detected, "conflicts_auto_resolved": resolved}
+
+
+# ---------------------------------------------------------------------------
+# Appointment digest
+# ---------------------------------------------------------------------------
+
 _DIGEST_WINDOWS = [
     # (label, days_ahead, detail_level)
     ("TODAY",    0,   "full"),   # today only — every appointment, full detail
@@ -406,10 +971,17 @@ def task_appointment_digest() -> dict:
 
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
-    Run maintenance tasks. Default order: re_embed → link → dedup → prune.
-    Pass task names to run a subset.
+    Run maintenance tasks in order. Pass task names to run a subset.
+    Default order: re_embed → link → dedup → prune → generate_events →
+                   refresh_asset_notes → asset_graph_sync → monitor →
+                   tune_weights → appointment_digest
     """
-    all_tasks = tasks or ["re_embed", "link", "dedup", "prune", "monitor", "tune_weights", "appointment_digest"]
+    all_tasks = tasks or [
+        "re_embed", "link", "dedup", "prune",
+        "generate_events", "detect_conflicts",
+        "refresh_asset_notes", "asset_graph_sync",
+        "monitor", "tune_weights", "appointment_digest",
+    ]
     results   = {}
     t0        = time.time()
 
@@ -440,6 +1012,22 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
                 print(f"[maintenance] prune done: {prune_total} removed")
         finally:
             conn.close()
+
+    if "generate_events" in all_tasks:
+        results["generate_events"] = task_generate_events()
+        print(f"[maintenance] generate_events done: {results['generate_events']}")
+
+    if "refresh_asset_notes" in all_tasks:
+        results["refresh_asset_notes"] = task_refresh_asset_notes()
+        print(f"[maintenance] refresh_asset_notes done: {results['refresh_asset_notes']}")
+
+    if "detect_conflicts" in all_tasks:
+        results["detect_conflicts"] = task_detect_conflicts()
+        print(f"[maintenance] detect_conflicts done: {results['detect_conflicts']}")
+
+    if "asset_graph_sync" in all_tasks:
+        results["asset_graph_sync"] = task_asset_graph_sync()
+        print(f"[maintenance] asset_graph_sync done: {results['asset_graph_sync']}")
 
     if "monitor" in all_tasks:
         results["monitor"] = task_monitor_queries()

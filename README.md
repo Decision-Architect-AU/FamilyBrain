@@ -290,6 +290,344 @@ Triggered events are linked to their source event via `TRIGGERED` edges, so the 
 
 ---
 
+## Assets as a Living Registry
+
+### The philosophy
+
+Not everything important is an event. Some things are **persistent real-world entities** with an ongoing lifecycle — a property, a vehicle, a medication, a therapy relationship, a company. These are assets. Events are *things that happen*. Assets are *things that exist and generate events*.
+
+The distinction matters because assets have obligations that span years. A property generates insurance renewals, council rates, water rates, and rent reviews for as long as you own it. A medication generates monthly refill reminders and quarterly script renewals for as long as the prescription is active. A therapy relationship generates weekly appointment slots and annual referral renewals for as long as the therapist is engaged.
+
+FamilyBrain models these as `personal.asset` rows with a `rules` JSONB field that defines the recurring obligations. The maintenance job reads the rules and generates `personal.event` rows — the asset is the source of truth, events are projections of it.
+
+### Asset hierarchy — obligations of ownership
+
+Rates, water, insurance, and strata are not independent subscriptions. They exist *because* the property exists. If the property is sold, they go. This is modelled as rules on the parent asset rather than separate rows:
+
+| What it looks like | How it's stored |
+|---|---|
+| Council rates | Rule on the property asset: `{"event_type":"RATES","recurrence":"interval","recurrence_days":90}` |
+| Property insurance | Rule: `{"event_type":"INSURANCE_RENEWAL","recurrence":"annual","auto_create":true}` |
+| Vehicle rego | Rule on the vehicle asset |
+| ASIC fees | Rule on the company asset |
+| SMSF audit deadline | Rule on the SMSF trust asset |
+
+When an asset is marked `sold` or `disposed`, the maintenance job sets `event_gen_enabled=false` and bulk-cancels all future `scheduled` events linked to that asset. History is preserved; only future projections are cancelled.
+
+### Provider model
+
+Many assets have an **ongoing human contact** who communicates via email — a property manager, a therapist, a specialist. These contacts are stored in `asset.facts`:
+
+```json
+{
+  "property_manager_name": "Jane Smith",
+  "property_manager_agency": "Ray White",
+  "property_manager_email": "jsmith@raywhite.com.au"
+}
+```
+
+When an email arrives from that address, it is matched to the asset and the intent is classified: cancellation, reschedule, provider change, or informational. A provider change (new PM, new therapist) updates `asset.facts`, sets `needs_regen=true`, and the maintenance job rebuilds future events with the updated provider details. The email is the trigger; the asset is the source of truth.
+
+### Email → Asset matching and pending assets
+
+Every inbound email is checked against known assets:
+
+1. `facts.contact_email` / `facts.property_manager_email` — exact sender match
+2. `facts.provider_domain` — sender domain match
+3. AGE graph — sender email → `Person`/`Organisation` node → `HAS_ASSET` edge → `Asset` node
+4. `facts.address_pattern` — address string match in email body (for rates notices, etc.)
+
+If a match is found: intent is classified and applied (cancel event, update facts, etc.).
+
+If no match is found but the email looks like a service provider (therapy, medical, insurance, council rates): a new `personal.asset` row is created with `status='pending'` and `source_email_id` pointing to the originating email. Pending assets surface in the dashboard for human review — confirm, edit, or dismiss. Once activated, the maintenance job picks them up on the next run and starts generating events.
+
+### Event generation — rules to events
+
+The maintenance job (`task_generate_events`) runs nightly and processes every active asset:
+
+```
+For each asset where event_gen_enabled=true:
+  For each rule where auto_create=true:
+    horizon = now + rule.horizon_months  (or facts.lease_expiry for RENT_PAYMENT)
+    Generate dates from last_event_date up to horizon
+    For collision_aware rules: skip dates that overlap a HOLIDAY/LEAVE event
+    Insert personal.event rows (skip if already exists for asset+type+date)
+  Update asset.events_generated_until
+```
+
+**Generation horizons by event type** (overridable per rule via `horizon_months`):
+
+| Event type | Default horizon |
+|---|---|
+| `BIN_COLLECTION` | 2 months |
+| `THERAPY_SESSION` | 3 months |
+| `MEDICATION_REFILL`, `MEDICATION_SCRIPT` | 12 months |
+| `INSURANCE_RENEWAL`, `REGO`, `RATES`, `WATER` | 12 months |
+| `REFERRAL_RENEWAL`, `MEDICAL_REVIEW` | 12 months |
+| `RENT_PAYMENT` | until `facts.lease_expiry` (3 months fallback) |
+
+Therapy and medical appointments are `collision_aware: true` — they are skipped on dates that overlap a holiday or leave event in `personal.event`. Other obligations (bins, rates, rego) are not collision-aware.
+
+### Asset notes — what retrieval reads
+
+After generating events, the maintenance job (`task_refresh_asset_notes`) writes a structured prose summary back to `asset.notes`:
+
+```
+Asset: Sodium Valproate (Epilim) - Olivia (medication/antiepileptic)
+Prescribing Doctor: Dr Kate Riney
+Dose: 10ml
+Frequency: morning and night
+Upcoming events:
+  • 14 Jul 2026: Sodium Valproate (Epilim) refill due [MEDICATION_REFILL]
+  • 13 Aug 2026: Sodium Valproate (Epilim) refill due [MEDICATION_REFILL]
+  • 15 Oct 2026: Sodium Valproate (Epilim) new script needed [MEDICATION_SCRIPT]
+```
+
+This is what the wa-agent retrieval layer reads when answering questions about a person or asset — it always reflects the current state without requiring the agent to join across tables at query time.
+
+### Asset lifecycle
+
+```
+Email / manual entry
+        │
+        ▼
+Asset created (status=active or pending)
+  facts — structured key/value (address, lender, doctor, provider, ...)
+  rules — recurring obligation definitions
+        │
+        ▼
+Maintenance job (nightly)
+  ├── generate_events    — rules → personal.event rows (up to horizon)
+  ├── refresh_asset_notes — write prose summary to asset.notes
+  └── asset_graph_sync  — upsert Asset node in AGE, link to Person via HAS_ASSET
+
+        │
+        ▼
+Appointment updater (polls next_update_at)
+  └── Pushes scheduled events to Google Calendar
+
+        │   (inbound email arrives)
+        ▼
+Email → Asset matcher
+  ├── Match found → intent classifier → cancel / update facts / confirm event
+  └── No match + service provider → create pending asset for review
+
+        │   (asset sold / disposed)
+        ▼
+Disposal cascade
+  ├── event_gen_enabled = false
+  ├── needs_regen = false
+  └── Future scheduled events → status = 'cancelled' (history preserved)
+```
+
+---
+
+## Routines — Repeating Life as an Asset
+
+### The philosophy
+
+Not all assets are things you own. Some are **patterns of life** — recurring commitments that generate events, have contacts, can be cancelled or overridden by inbound emails, and need collision awareness. These are routines.
+
+A school schedule is a routine. A weekly therapy block is a routine. A fortnightly speech therapy session is a routine. Babysitter pickup every Monday at 14:40 is a routine. They are modelled exactly like other assets — a row in `personal.asset` with `asset_type='routine'`, a `rules` JSONB array, a linked `person_id`, and the same event generation pipeline. The distinction from, say, a property is conceptual: routines generate **time-blocking commitments** for a person, not financial obligations.
+
+What routines gain over raw calendar entries:
+
+- They are **source-of-truth** — if a therapist changes, update the asset and future events regenerate
+- They are **collision-aware** — a school holiday suppresses the school day, babysitter pickup, and aftercare automatically
+- They can be **overridden by email** — a school activity notice supersedes the generated school-day placeholder for that date
+- They carry a **provider** — the therapist's name, the school's contact, the class number — so enrichment pipelines know who to match emails against
+
+### Routine examples
+
+| Routine | event_type | recurrence | blocks_person | collision_aware |
+|---|---|---|---|---|
+| School — Olivia, Class 1C | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
+| School — Elliana, Class 3C | `SCHOOL_DAY` | weekdays | true | suppress on school_holiday |
+| Monday babysitter pickup | `PICKUP` | weekly Monday 14:40 | false | suppress on school_holiday |
+| Tuesday after school care | `AFTERCARE` | weekly Tuesday 14:40 | true | suppress on school_holiday |
+| Tuesday cello class — Elliana | `CELLO_CLASS` | weekly Tuesday 15:00 | true | suppress on school_holiday |
+| Wednesday dancing — Elliana | `ACTIVITY` | weekly Wednesday 15:30 | true | suppress on school_holiday |
+| Wednesday after school care — Olivia | `AFTERCARE` | weekly Wednesday 14:40 | true | suppress on school_holiday |
+| Wednesday Nanna pickup | `PICKUP` | weekly Wednesday 17:00 | false | suppress on school_holiday |
+| Thursday Nanna pickup | `PICKUP` | weekly Thursday 14:40 | false | suppress on school_holiday |
+| Friday Jen Jen pickup | `PICKUP` | weekly Friday 14:40 | false | suppress on school_holiday |
+| Fortnightly speech therapy | `THERAPY_SESSION` | interval/14d, 7:45 AEST | true | holiday_immune (medical priority) |
+| Weekly OT | `THERAPY_SESSION` | weekly Wednesday 8:00 | true | holiday_immune |
+| Weekly physio | `THERAPY_SESSION` | weekly Monday 8:00 | true | holiday_immune |
+
+### Routine rules JSONB
+
+```jsonc
+{
+  "name": "School day",
+  "event_type": "SCHOOL_DAY",
+  "recurrence": "weekdays",
+  "auto_create": true,
+  "event_label": "Olivia - Varsity College Class 1C (9:00-14:40)",
+  "start_time": "09:00",
+  "suppress_on": ["SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY"],
+  "blocks_person": true,
+  "horizon_months": 3,
+  "collision_aware": true,
+  "severity_if_missing": "LOW"
+}
+```
+
+Therapy and medical routines add `"holiday_immune": true` — they generate regardless of holiday context and are never suppressed. The maintenance job still detects the overlap and surfaces a conflict notification; it just doesn't prevent the appointment from existing.
+
+---
+
+## Event Collision & Precedence
+
+### The three-stage pipeline
+
+Events from different sources compete for the same person's time. The collision model resolves this in three distinct pipeline stages — not as a single field, but as three separate mechanisms:
+
+| Stage | Name | Question | When it runs |
+|---|---|---|---|
+| **1** | Suppress | Should this event be born at all given what's already on this date? | Inside `task_generate_events`, before insert |
+| **2** | Override | Does this incoming email event replace a generated placeholder in the same slot? | `email-sync` decomposer, on slot-key match |
+| **3** | Notify | Do two committed events overlap for the same person? | `task_detect_conflicts`, after generate + ingest |
+
+### The precedence hierarchy
+
+Every event carries a `precedence_rank` derived from its `event_type`, and a `provenance` that describes how it arrived. Together these form the points model that determines which event wins when two compete for the same slot.
+
+**Provenance multiplier** — manually created events always outrank email-ingested, which always outrank system-generated:
+
+| Provenance | Source | Effective ranking |
+|---|---|---|
+| `human` | Manually entered via dashboard or WhatsApp | Highest — never overridden by the system |
+| `email` | Extracted from an inbound email | Mid-tier — overrides generated placeholders |
+| `rule` | Generated by maintenance job from asset rules | Baseline — can be suppressed or overridden |
+
+**Event type rank** — within the same provenance, higher rank wins when two events occupy the same slot:
+
+| Rank | Event type | Slot class | Blocks person |
+|---|---|---|---|
+| 100 | `MEDICAL` | appointment | yes |
+| 90 | `THERAPY`, `THERAPY_SESSION` | appointment | yes |
+| 80 | `HOLIDAY_CARE`, `VACATION_CARE` | daytime_care | yes |
+| 70 | `SCHOOL_ACTIVITY` | school_day | yes |
+| 60 | `SCHOOL_DAY`, `SCHOOL` | school_day | yes |
+| 55 | `CELLO_CLASS`, `ACTIVITY`, `DANCING` | after_school | yes |
+| 50 | `AFTERCARE` | after_school | yes |
+| 40 | `PICKUP` | after_school | no |
+| 30 | `REFERRAL_RENEWAL`, `MEDICAL_REVIEW` | appointment | no |
+| 5 | `BIN_NIGHT`, `RENT_PAYMENT`, misc | misc | no |
+| 0 | `SCHOOL_HOLIDAY`, `PUBLIC_HOLIDAY`, `HOLIDAY`, `LEAVE` | context | no |
+
+**Key rule:** context events (`rank=0`) are never committed time — they exist only to gate generation. They suppress lower-ranked events at Stage 1 but do not block person time themselves.
+
+### Worked examples
+
+**1 — School holiday knocks out school days and pickups (Stage 1: Suppress)**
+
+A school holiday event (`SCHOOL_HOLIDAY`, rank=0, `blocks_person=false`) lands on a date. The maintenance job checks each routine's `suppress_on` list before generating. School day, babysitter pickup, after school care, and cello class all have `suppress_on: ["SCHOOL_HOLIDAY"]` — none of them are generated for that date. If they already existed as generated placeholders, they are deleted.
+
+The holiday itself is **context**, not a commitment — Olivia has no committed time. A medical appointment for that date will generate cleanly: `holiday_immune: true` skips the suppress gate.
+
+```
+SCHOOL_HOLIDAY (context, rank=0)  →  suppresses:  SCHOOL_DAY, PICKUP, AFTERCARE, CELLO_CLASS, ACTIVITY
+                                  →  does NOT suppress:  THERAPY_SESSION (holiday_immune)
+                                  →  does NOT block person time (free day for appointments)
+```
+
+**2 — Swimming carnival overrides the generated school day (Stage 2: Override)**
+
+The school emails "Swimming carnival — Friday 24 July". The email decomposer extracts a `SCHOOL_ACTIVITY` event (rank=70). It computes `slot_key = "{olivia_id}:2026-07-24:school_day"` and finds the generated `SCHOOL_DAY` placeholder in the same slot (rank=60). Since the incoming rank (70) ≥ placeholder rank (60), the placeholder is marked `status='superseded'` and the carnival event is inserted as `status='ingested'`. History preserved; calendar shows the carnival, not the generic school day.
+
+```
+Email SCHOOL_ACTIVITY (rank=70, provenance=email)
+  slot_key matches:  SCHOOL_DAY placeholder (rank=60, provenance=rule, status=generated)
+  result:            placeholder → superseded
+                     carnival → inserted as ingested
+```
+
+**3 — Excursion email overrides school holiday placeholder (Stage 2: Override)**
+
+A generated `SCHOOL_HOLIDAY` placeholder exists for a date (created from term calendar import, `provenance=rule`). The school then emails "Day trip to museum — still attending on public holiday". The email decomposer extracts a `SCHOOL_ACTIVITY` (rank=70 > 0). Same slot_key match triggers override: the holiday placeholder is superseded, the excursion is inserted. The day is back on the calendar.
+
+This is the critical distinction: **a generated placeholder for a holiday can be overridden**. A manually entered holiday (`provenance=human`) cannot.
+
+**4 — Manual medical appointment outranks everything (Provenance: human)**
+
+A MEDICAL appointment entered manually carries `provenance='human'`. The system never suppresses it (holiday_immune=true by convention for human-entered events), never overrides it, and flags any overlapping committed event as a conflict for review. It is the highest-precedence event in the system.
+
+```
+Manual MEDICAL (rank=100, provenance=human)
+  → Never suppressed
+  → Never overridden
+  → If Olivia is booked in holiday care same day:
+       MEDICAL (appointment slot) + HOLIDAY_CARE (daytime_care slot)
+       → different slot_class → Stage 3 conflict detected
+       → both kept; notification surfaced: "heads up — Olivia has two time commitments"
+       → suggested_keep = MEDICAL (higher rank)
+       → human resolves: keeps both, reschedules care, or dismisses
+```
+
+**5 — Medical appointment on a free holiday day (no conflict)**
+
+Same `SCHOOL_HOLIDAY` context event, but no holiday care booked. Olivia has no `blocks_person=true` event for that day. The medical appointment generates cleanly — slot is free. No conflict record. The holiday context event is not a time commitment; it is only a generation gate.
+
+```
+SCHOOL_HOLIDAY (context, blocks_person=false)  +  MEDICAL (blocks_person=true)
+→ no conflict — SCHOOL_HOLIDAY doesn't block time
+→ MEDICAL generates normally (holiday_immune skips suppress gate)
+→ calendar shows: medical appointment on a day off school
+```
+
+### Collision lifecycle
+
+Detected conflicts live in `personal.conflict` with a full lifecycle:
+
+```
+detected → [human reviews dashboard card]
+                ├── kept_a / kept_b      — one event cancelled
+                ├── both_kept            — acknowledged, both stay
+                ├── dismissed            — acknowledged, no action
+                └── auto_passed          — auto-resolved because:
+                                             - either event ended
+                                             - either event superseded/cancelled
+                                             - events no longer time-overlap
+```
+
+The dashboard surfaces open conflicts as actionable cards with `suggested_keep` as a non-binding hint. The system never auto-picks a winner for active conflicts.
+
+### Slot classes — what competes with what
+
+Two events only compete (Stage 2 override / Stage 3 conflict) if they share a `slot_class`. Different slot classes coexist by design:
+
+| slot_class | Competes with | Does not compete with |
+|---|---|---|
+| `school_day` | Other school_day events | after_school, appointment, daytime_care |
+| `after_school` | Other after_school events | school_day, appointment |
+| `appointment` | Other appointment events | school_day, after_school, daytime_care |
+| `daytime_care` | Other daytime_care events | appointment, school_day |
+| `context` | Nothing (never competes) | — |
+| `misc` | Nothing (never competes) | — |
+
+A medical appointment and holiday care on the same day are **different slot classes** — Stage 2 does not supersede either. Instead, Stage 3 detects that both `blocks_person=true` events overlap for the same person across different slot classes and surfaces a conflict for human review.
+
+### Eventual classification
+
+The system does not need to be certain at ingestion time. It needs to be correct by T+2 or T+3 days.
+
+When an email arrives, the decomposer makes its best call — extracts event type, resolves person, assigns slot class, runs Stage 2 if a placeholder matches. If confidence is low, the event is flagged `needs_review=true` rather than rejected. It lands in the calendar in a reasonable provisional state.
+
+Over the following 48–72 hours, context accumulates:
+
+- A follow-up confirmation email arrives from the same sender
+- A calendar invite lands with the canonical event title
+- A second email from the same thread clarifies the date or person
+- Cross-corroboration: a school newsletter confirms the excursion date that was in the original email
+
+A `task_resolve_pending` maintenance pass revisits all `needs_review=true` events that are 24+ hours old. With the accumulated context it can often confirm the original classification, correct the person assignment, or promote the event to `confirmed`. As time passes, the confidence threshold to confirm lowers — by day 3, any corroborating signal is usually enough.
+
+The practical implication: the `needs_review` queue is **not urgent**. Most items self-resolve within a couple of days. The residual — events still flagged after 3 days — represents genuine ambiguity that warrants a human glance, not a failure of the pipeline.
+
+---
+
 ## Graph Facts — Storing Knowledge as Properties
 
 FamilyBrain uses Apache AGE (PostgreSQL graph extension) as its knowledge layer. The key design decision is that structured facts extracted from documents are stored as **typed properties on graph nodes** — not just as text chunks for vector search.
@@ -435,7 +773,7 @@ Override any profile via env: `FAMILY_HIERARCHY_COST_UP=15`, `ENTITY_HIERARCHY_B
 
 **Inter-party forwarding awareness** — when two accounts are connected (e.g. primary and partner), emails sent from one account that arrive in the other's inbox are ingested as received mail on the second account. This is intentional: because sent items are now also ingested from the originating account, both sides of every conversation exist in the knowledge base. Deduplication is keyed on `(account_id, provider_msg_id)` so the same message appears once per account — the received copy carries the recipient's perspective (any annotations, labels, or reply context) while the sent copy carries the full outbound text.
 
-**Collision awareness** — the notification detector only raises schedule conflicts for events in the next 30 days, automatically excludes holidays, birthdays, and anniversaries (which span days and would collide with everything), and auto-resolves any existing collision notification when the earlier of the two conflicting events has passed.
+**Three-stage collision pipeline** — generation suppression, email override, and conflict detection are three separate mechanisms, not branches of a single function. Suppress fires at generation time (before insert). Override fires at email ingestion (Stage 2 slot-key match). Conflict detection is a sweep that runs after both (Stage 3). Each stage is independently tunable via per-rule `suppress_on`, `holiday_immune`, and `blocks_person` flags. Context events (`SCHOOL_HOLIDAY`, `PUBLIC_HOLIDAY`) carry `rank=0` and `blocks_person=false` — they gate generation but never commit the person's time, so a medical appointment on a school holiday day is not a conflict.
 
 **Graph facts are never truncated** — `fact_*` properties on graph nodes carry the full extracted value. Display fields (`preview`, `description`) are capped at 500 chars for UI. The distinction is enforced in `build_props()` in `ingestor/src/graph.py`.
 
@@ -671,6 +1009,7 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `Sender` | `handle`, `name`, `source` |
 | `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `effective_date`, `event_type`, `gcal_event_id`, `next_update_at`, `fact_*`, `ref` |
 | `Bill` | `bill_id`, `payee`, `amount`, `due_date`, `status`, `reference`, `resolved_at` |
+| `Asset` | `ref`, `name`, `asset_type`, `subtype`, `status` |
 
 `fact_*` properties on `Event` and other nodes are open-ended — extracted fields such as `fact_provider`, `fact_location`, `fact_notes`, `fact_cost`, `fact_duration` are written by the enrichment pipeline and are never truncated. The `ref` field on each node is a hydration handle (`"schema.table:id"`) for resolving back to the full Postgres row.
 
@@ -688,6 +1027,7 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `ENRICHES` | Document/Message → Event | `confidence`, `enriched_at` |
 | `TRIGGERED` | Event → Event | `rule_id` — proactive follow-up events |
 | `RESOLVES` | Document/Message → Bill | `match_type`, `confidence` |
+| `HAS_ASSET` | Person → Asset | links person to their assets (medications, therapy, subscriptions) |
 
 ---
 
@@ -770,6 +1110,24 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] NPU reranker — cross-encoder ms-marco on NPU, 20-candidate → top-5 pipeline
 - [x] Single-pass classifier — one LLM call returns graph routing + persona selection as JSON
 - [x] Thumbs-down feedback — chat UI flags poor responses to `config.query_feedback` review queue
+- [x] Asset registry — `personal.asset` with `rules` JSONB, lifecycle fields (`needs_regen`, `events_generated_until`), `pending` status for email-discovered assets
+- [x] Asset hierarchy — rates, water, insurance, strata are rules on the parent asset; disposal cascades to cancel future generated events
+- [x] Asset event generation — `task_generate_events` with genkey idempotency `(gen_asset_id, gen_rule_id, occurrence_date)`, per-rule horizons, suppress gate
+- [x] Asset notes refresh — `task_refresh_asset_notes` writes structured prose summary to `asset.notes` for retrieval
+- [x] Asset graph sync — `task_asset_graph_sync` upserts `Asset` nodes, `HAS_ASSET` edges to `Person`, prunes disposed
+- [x] Routine asset type — `asset_type='routine'` for recurring life patterns (school schedule, pickups, therapy); same pipeline as financial assets
+- [x] Event provenance — `provenance` column: `rule` (generated) / `email` (ingested) / `human` (manual); generator jurisdiction enforced — only `status='generated' AND provenance='rule'` rows are touched by re-runs
+- [x] Event status model — `generated / superseded / ingested / confirmed / scheduled / cancelled / rescheduled / completed`
+- [x] Event classification — `event_class_precedence` table; every event carries `slot_class`, `blocks_person`, `precedence_rank` materialised at write time
+- [x] Slot keys — `{person_id}:{effective_date}:{slot_class}` — the load-bearing identity for Stage 2 override matching
+- [x] Stage 1: Suppress gate — `suppress_on` list per rule; `holiday_immune: true` for medical/therapy; generated placeholders deleted when suppressed
+- [x] Stage 2: Override — email decomposer computes slot_key, finds generated placeholder, supersedes on rank ≥ match; `superseded_by_event_id` FK preserves history
+- [x] Stage 3: Conflict detection — `task_detect_conflicts` sweeps for overlapping `blocks_person=true` events across different slot_classes for the same person; `personal.conflict` table with full lifecycle
+- [x] Conflict auto-resolution — auto-passes stale conflicts when either event ends, is superseded, or no longer overlaps
+- [ ] Email → Asset matcher — match inbound emails to assets via contact_email / provider_domain / AGE traversal
+- [ ] Email intent classifier — classify matched emails as cancellation / reschedule / provider change / informational
+- [ ] Dashboard conflict cards — surface open `personal.conflict` rows as actionable cards with `suggested_keep` hint
+- [ ] Pending asset review UI — dashboard card for human review/activation of email-discovered assets
 - [ ] Adaptive appointment enrichment — nightly enrich sweep updates `fact_*` from linked documents
 - [ ] Temporal reprioritisation — event priority escalation as effective_date approaches
 - [ ] Voice notes channel — direct `upsert_event` / `personal.note` write, channel rules handle routing

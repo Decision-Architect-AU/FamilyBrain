@@ -17,12 +17,34 @@ import psycopg2
 import psycopg2.extras
 from src.llm import embed, generate
 
-_HTML_TAG = re.compile(r'<[^>]+>')
-_HTML_ENTITY = re.compile(r'&[a-z]+;|&#\d+;')
+_HTML_COMMENT = re.compile(r'<!--.*?-->', re.DOTALL)
+_HTML_STYLE   = re.compile(r'<style[^>]*>.*?</style>', re.DOTALL | re.I)
+_CSS_AT_RULE  = re.compile(r'@\w[\w-]*\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}', re.DOTALL)
+_HTML_TAG     = re.compile(r'<[^>]+>')
+_HTML_ENTITY  = re.compile(r'&[a-z]+;|&#\d+;')
+_ANCHOR_HREF  = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.DOTALL | re.I)
+_MEETING_URL  = re.compile(
+    r'https?://\S*(?:zoom\.us/j/|teams\.microsoft\.com/l/meetup-join/|'
+    r'meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}|webex\.com/meet/|'
+    r'gotomeeting\.com/join/|whereby\.com/|bluejeans\.com/|around\.co/)\S*', re.I)
+
+def _preserve_anchor_urls(text: str) -> str:
+    """Replace <a href="URL">label</a> with 'label [URL]' for meeting links, else just label."""
+    def _repl(m):
+        url   = m.group(1)
+        label = _HTML_TAG.sub('', m.group(2)).strip()
+        if _MEETING_URL.match(url):
+            return f"{label} [Meeting link: {url}]" if label else url
+        return label or url
+    return _ANCHOR_HREF.sub(_repl, text)
 
 def _strip_html(text: str) -> str:
     if not text:
         return text
+    text = _HTML_COMMENT.sub(' ', text)
+    text = _HTML_STYLE.sub(' ', text)
+    text = _CSS_AT_RULE.sub(' ', text)
+    text = _preserve_anchor_urls(text)   # preserve meeting link hrefs before tag strip
     text = _HTML_TAG.sub(' ', text)
     text = _HTML_ENTITY.sub(' ', text)
     return re.sub(r'\s+', ' ', text).strip()
@@ -55,7 +77,8 @@ _VECTOR_SEARCH = {
     "personal_graph": {
         "sql": """
             SELECT 'note' AS source_type, id, body AS text, tags::text AS meta,
-                   embedding <=> %s::vector AS dist
+                   embedding <=> %s::vector AS dist,
+                   created_at AS doc_date
             FROM personal.note
             WHERE embedding IS NOT NULL
             ORDER BY dist LIMIT %s
@@ -64,7 +87,7 @@ _VECTOR_SEARCH = {
             "table":   "personal.note",
             "tsv_col": "body_tsv",
             "text_col": "body",
-            "extra_cols": "'note' AS source_type, id, tags::text AS meta",
+            "extra_cols": "'note' AS source_type, id, tags::text AS meta, created_at AS doc_date",
         },
         "schedule_sql": """
             SELECT 'event' AS source_type, e.id,
@@ -160,6 +183,8 @@ _person_cache_ts: float = 0.0
 _PERSON_CACHE_TTL = 300
 
 
+_ALIAS_RE = re.compile(r'[Aa]lso known as\s+([^\.(]+)', re.I)
+
 def _get_persons(conn) -> list[dict]:
     """Load all persons from personal.person, cached."""
     global _person_cache, _person_cache_ts
@@ -168,8 +193,19 @@ def _get_persons(conn) -> list[dict]:
         return list(_person_cache.values())
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name, relationship FROM personal.person")
-            rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT id, name, relationship, notes FROM personal.person")
+            rows = []
+            for r in cur.fetchall():
+                row = dict(r)
+                # Extract "Also known as X" aliases from notes
+                aliases: list[str] = []
+                if row.get("notes"):
+                    for m in _ALIAS_RE.finditer(row["notes"]):
+                        alias = m.group(1).strip().rstrip(".,;")
+                        if alias:
+                            aliases.append(alias)
+                row["aliases"] = aliases
+                rows.append(row)
         _person_cache = {r["name"].lower(): r for r in rows}
         _person_cache_ts = now
         return rows
@@ -181,13 +217,15 @@ def _detect_person(query: str, conn) -> dict | None:
     """Return the Person row if the query names a specific person."""
     persons = _get_persons(conn)
     q_lower = query.lower()
-    # Match on full name or first name — longer matches win
+    # Match on full name, first name, or any alias — longer matches win
     best = None
     best_len = 0
     for p in persons:
         name = p["name"]
         parts = name.lower().split()
-        for part in ([name.lower()] + parts):
+        aliases = [a.lower() for a in p.get("aliases", [])]
+        alias_parts = [w for a in aliases for w in a.split() if len(w) > 2]
+        for part in ([name.lower()] + parts + aliases + alias_parts):
             if len(part) > 2 and part in q_lower and len(part) > best_len:
                 best = p
                 best_len = len(part)
@@ -260,6 +298,8 @@ def _fetch_person_records(conn, pid: int, name: str, base_cost: int) -> list[dic
     """Fetch all records owned by person pid, tagged with traversal_cost."""
     rows = []
     name_like = f"%{name}%"
+    # Informal notes often use first name only ("Get song for Olivia", "Olivia's OT session")
+    first_name_like = f"%{name.split()[0]}%"
 
     # Events (own)
     try:
@@ -275,7 +315,8 @@ def _fetch_person_records(conn, pid: int, name: str, base_cost: int) -> list[dic
                        AS text,
                        e.starts_at::text AS meta,
                        NULL::float AS dist,
-                       %s AS traversal_cost
+                       %s AS traversal_cost,
+                       e.starts_at AS doc_date
                 FROM personal.event e
                 WHERE e.person_id = %s
                   AND e.status NOT IN ('cancelled', 'done')
@@ -317,12 +358,13 @@ def _fetch_person_records(conn, pid: int, name: str, base_cost: int) -> list[dic
                     SELECT 'note' AS source_type, id,
                            body AS text, tags::text AS meta,
                            NULL::float AS dist,
-                           %s AS traversal_cost
+                           %s AS traversal_cost,
+                           created_at AS doc_date
                     FROM personal.note
                     WHERE body ILIKE %s
                     ORDER BY created_at DESC
-                    LIMIT 15
-                """, (note_cost, name_like))
+                    LIMIT 20
+                """, (note_cost, first_name_like))
                 rows += [dict(r) for r in cur.fetchall()]
         except Exception as e:
             print(f"[search] traversal note error pid={pid}: {e}")
@@ -360,7 +402,8 @@ def _person_focused_search(conn, person: dict) -> list[dict]:
                            AS text,
                            e.starts_at::text AS meta,
                            NULL::float AS dist,
-                           %s AS traversal_cost
+                           %s AS traversal_cost,
+                           e.starts_at AS doc_date
                     FROM personal.event e
                     WHERE e.person_id IS NULL
                       AND (e.title ILIKE %s OR e.notes ILIKE %s)
@@ -475,7 +518,8 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
                 SELECT 'note' AS source_type, n.id,
                        n.body AS text, n.tags::text AS meta,
                        NULL::float AS dist,
-                       %s AS traversal_cost
+                       %s AS traversal_cost,
+                       n.created_at AS doc_date
                 FROM personal.note n
                 WHERE ({kw_conditions})
                 ORDER BY n.created_at DESC
@@ -524,7 +568,8 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
                                AS text,
                                e.starts_at::text AS meta,
                                NULL::float AS dist,
-                               %s AS traversal_cost
+                               %s AS traversal_cost,
+                               e.starts_at AS doc_date
                         FROM personal.event e
                         WHERE e.asset_id IN ({placeholders})
                           AND e.status NOT IN ('cancelled', 'done')
@@ -546,7 +591,8 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
                     SELECT 'note' AS source_type, n.id,
                            n.body AS text, n.tags::text AS meta,
                            NULL::float AS dist,
-                           %s AS traversal_cost
+                           %s AS traversal_cost,
+                           n.created_at AS doc_date
                     FROM personal.note n
                     WHERE ({kw_conditions})
                       AND (n.body ~* '(trustee|director|shareholder|beneficiar|appointor|settlor)')
@@ -616,6 +662,7 @@ def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
         ORDER BY e.starts_at DESC
         LIMIT 30
     """
+    _log("SQL personal.event (targeted)", f"title/notes ILIKE terms={terms[:6]}  all-time  LIMIT 30")
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
@@ -662,11 +709,19 @@ def _vec_param(vec: list[float]) -> str:
 
 
 _cypher_dead: bool = False  # circuit breaker — set True on first timeout, reset per retrieve() call
+_query_log: list[str] = []  # all retrieval steps captured during a retrieve() call
+
+
+def _log(label: str, detail: str) -> None:
+    """Append a labelled retrieval step to the query log."""
+    _query_log.append(f"[{label}]\n{detail.strip()}")
+
 
 def _cypher(conn, graph: str, query: str, col_defs: str = "(r agtype)") -> list[dict]:
     global _cypher_dead
     if _cypher_dead:
         return []
+    _log(f"CYPHER {graph}", query.strip())
     sql = f"SELECT * FROM cypher('{graph}', $cypher$ {query} $cypher$) AS {col_defs}"
     try:
         with conn.cursor() as cur:
@@ -720,6 +775,7 @@ def _fts_search(conn, table: str, tsv_col: str, text_col: str,
         LIMIT %s
     """
     rows = []
+    _log(f"FTS {table}", f"plainto_tsquery('english', {query!r}) ON {tsv_col}  LIMIT {limit}")
     try:
         with conn.cursor() as cur:
             cur.execute(fts_sql, (query, query, query, query, limit))
@@ -740,6 +796,7 @@ def _fts_search(conn, table: str, tsv_col: str, text_col: str,
             ORDER BY _sim DESC
             LIMIT %s
         """
+        _log(f"FTS TRGM FALLBACK {table}", f"similarity({text_col}, {query!r}) > 0.15  LIMIT {limit}")
         try:
             with conn.cursor() as cur:
                 cur.execute(trgm_sql, (query, query, limit))
@@ -915,23 +972,46 @@ def _rank_rows(rows: list[dict], query: str, graph: str, rules_cache: dict) -> l
     weights, _ = _source_weights(query, graph, rules_cache)
 
     def sort_key(r):
-        score  = r.get("match_score") or 0
-        weight = weights.get(r.get("source_type", ""), 1)
-        dist   = r.get("dist") or 1.0
-        return (-score, -weight, dist)
+        score     = r.get("match_score") or 0
+        weight    = weights.get(r.get("source_type", ""), 1)
+        dist      = r.get("dist") or 1.0
+        doc_date  = r.get("doc_date")
+        # Negate timestamp for DESC sort; rows without a date go last
+        ts = -(doc_date.timestamp() if doc_date and hasattr(doc_date, "timestamp") else 0)
+        return (-score, -weight, ts, dist)
 
     return sorted(rows, key=sort_key)
 
 
-def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
-    """Return per-graph context sections as {graph_name: text}."""
-    global _cypher_dead
+def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> tuple[dict[str, str], dict]:
+    """
+    Return (context_sections, meta).
+
+    context_sections — {graph_name: formatted_text}
+    meta — {
+        cypher_queries: list of Cypher strings run,
+        focused_person: name of detected focal person or None,
+        focused_entity: folder_slug of detected focal entity or None,
+        rules_matched:  {graph: rule_name} for any intent rules that fired,
+        traversal_mode: "person_hierarchy" | "entity_hierarchy" | "flat" per graph,
+    }
+    """
+    global _cypher_dead, _query_log
     _cypher_dead = False  # reset circuit breaker for each new query
+    _query_log   = []     # clear retrieval step log
+
     vec = embed(query)
     vec_param = _vec_param(vec)
     terms = _query_terms(query)
 
     sections: dict[str, str] = {}
+    meta: dict = {
+        "cypher_queries": [],
+        "focused_person": None,
+        "focused_entity": None,
+        "rules_matched": {},
+        "traversal_mode": {},
+    }
     conn = _conn()
 
     try:
@@ -939,7 +1019,17 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
 
         # Detect person or entity query once — used across all graphs
         focused_person = _detect_person(query, conn)
+        # Fall back to caller-supplied hint (e.g. pronoun follow-up: "what about her?")
+        if focused_person is None and person_hint:
+            hint_lower = person_hint.lower()
+            for p in _get_persons(conn):
+                if p["name"].lower() == hint_lower or p["name"].split()[0].lower() == hint_lower:
+                    focused_person = p
+                    print(f"[search] person-focused via hint: {focused_person['name']}")
+                    break
         focused_entity = _detect_entity(query, conn) if not focused_person else None
+        meta["focused_person"] = focused_person["name"] if focused_person else None
+        meta["focused_entity"] = focused_entity["folder_slug"] if focused_entity else None
         if focused_person:
             print(f"[search] person-focused query: {focused_person['name']}")
         if focused_entity:
@@ -950,6 +1040,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
             matched_rule = None
             section_lines = [f"[{graph.replace('_graph', '').upper()}]"]
             has_content = False
+            meta["traversal_mode"][graph] = "flat"  # default; overridden below
 
             # ── Cypher: always runs ───────────────────────────────────────────
             cypher_result = _cypher_search(conn, graph, query)
@@ -994,6 +1085,8 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                 # Detect if query is about a specific other person (not self)
                 query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
                 person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
+                # Use first name only for entity filtering — surnames match too many unrelated entities
+                focal_first = focused_person["name"].split()[0].lower() if focused_person else None
 
                 section_lines.append("Entities:")
                 seen_entity_names: set[str] = set()
@@ -1006,11 +1099,14 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                     if norm in seen_entity_names:
                         continue
                     seen_entity_names.add(norm)
-                    # When query is about a specific person, suppress unrelated self-entities
-                    if person_query and _SELF_NAMES.search(name) and not any(
-                        n.lower() in name.lower() for n in query_names
-                    ):
-                        continue
+                    if person_query:
+                        # Drop email addresses — never useful as person context
+                        if re.match(r'.+@.+\..+', name):
+                            continue
+                        # Suppress self/financial entities unless focal first name appears in them
+                        if _SELF_NAMES.search(name):
+                            if not focal_first or focal_first not in name.lower():
+                                continue
                     line  = f"  ◆ {name}"
                     if ctype:
                         line += f" [{ctype}]"
@@ -1056,9 +1152,13 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
 
                 # Focused traversal: person or entity hierarchy
                 if focused_person and graph == "personal_graph":
+                    _log("TRAVERSAL family_hierarchy", f"focal={focused_person['name']}  budget={FAMILY_HIERARCHY.budget}  down={FAMILY_HIERARCHY.down}  sideways={FAMILY_HIERARCHY.sideways}  up={FAMILY_HIERARCHY.up}")
                     _add_rows(_person_focused_search(conn, focused_person))
+                    meta["traversal_mode"][graph] = "person_hierarchy"
                 elif focused_entity and graph == "personal_graph":
+                    _log("TRAVERSAL entity_hierarchy", f"focal={focused_entity['folder_slug']}  budget={ENTITY_HIERARCHY.budget}  down={ENTITY_HIERARCHY.down}  sideways={ENTITY_HIERARCHY.sideways}  up={ENTITY_HIERARCHY.up}")
                     _add_rows(_entity_focused_search(conn, focused_entity))
+                    meta["traversal_mode"][graph] = "entity_hierarchy"
 
                 # Fetch more candidates when reranker is enabled
                 fetch_k = _RERANK_FETCH if RERANK_ENABLED else TOP_K
@@ -1075,6 +1175,19 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         query=query,
                         limit=fetch_k,
                     ))
+                    # When querying a specific person, supplement with first-name-only FTS
+                    # so informal notes ("Get song for Olivia") that omit the surname are found
+                    if focused_person:
+                        focal_first = focused_person["name"].split()[0]
+                        _add_rows(_fts_search(
+                            conn,
+                            table=fts_cfg["table"],
+                            tsv_col=fts_cfg["tsv_col"],
+                            text_col=fts_cfg["text_col"],
+                            extra_cols=fts_cfg["extra_cols"],
+                            query=focal_first,
+                            limit=fetch_k,
+                        ))
 
                 # Contact FTS (personal_graph only)
                 contact_fts = cfg.get("contact_fts_cfg")
@@ -1091,6 +1204,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
 
                 # 2. Vector search
                 if cfg.get("sql"):
+                    _log(f"VECTOR {graph}", f"embedding <=> query_vec  LIMIT {fetch_k}")
                     try:
                         with conn.cursor() as cur:
                             cur.execute(cfg["sql"], (vec_param, fetch_k))
@@ -1110,6 +1224,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                         re.I
                     )
                     if _entity_kw.search(query):
+                        _log("SQL personal.ownership_property + personal.ownership_entity", "entity/property keyword match")
                         try:
                             with conn.cursor() as cur:
                                 cur.execute(ownership_sql)
@@ -1132,6 +1247,7 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                     extra_sql = cfg.get(extra_key)
                     if not extra_sql:
                         continue
+                    _log(f"SQL {extra_key} ({graph})", "supplementary — date-window or type-filtered dump")
                     try:
                         with conn.cursor() as cur:
                             if "%s" in extra_sql:
@@ -1148,27 +1264,56 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
                     query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
                     person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
                     if person_query:
-                        name_pattern = re.compile("|".join(re.escape(n) for n in query_names), re.I)
-                        person_rows = [r for r in rows if name_pattern.search(r.get("text") or "") or name_pattern.search(r.get("meta") or "")]
-                        # Fall back to all rows if filtering leaves nothing
+                        if focused_person:
+                            # Use first name only — surnames match financial entities, sibling names, etc.
+                            focal_first = focused_person["name"].split()[0]
+                            name_pattern = re.compile(re.escape(focal_first), re.I)
+                            # Build sibling pattern to detect docs predominantly about someone else
+                            all_persons = _get_persons(conn)
+                            sibling_firsts = [
+                                p["name"].split()[0] for p in all_persons
+                                if p["id"] != focused_person["id"]
+                            ]
+                            sibling_re = re.compile("|".join(re.escape(s) for s in sibling_firsts), re.I) if sibling_firsts else None
+                        else:
+                            name_pattern = re.compile("|".join(re.escape(n) for n in query_names), re.I)
+                            sibling_re = None
+
+                        person_rows = []
+                        for r in rows:
+                            combined = (r.get("text") or "") + " " + (r.get("meta") or "")
+                            if not name_pattern.search(combined):
+                                continue
+                            # Exclude docs predominantly about another known person
+                            if sibling_re:
+                                focal_hits   = len(name_pattern.findall(combined))
+                                sibling_hits = len(sibling_re.findall(combined))
+                                if sibling_hits > focal_hits:
+                                    continue
+                            person_rows.append(r)
                         if person_rows:
                             rows = person_rows
 
                     rows = _rank_rows(rows, query, graph, rules_cache)
+                    _, matched_rule = _source_weights(query, graph, rules_cache)
+                    if matched_rule:
+                        meta["rules_matched"][graph] = matched_rule
+                    if RERANK_ENABLED and rows:
+                        _log(f"RERANK {graph}", f"cross-encoder {RERANK_MODEL}  {len(rows)} candidates → top {TOP_K}")
                     rows = _rerank(query, rows)
                     has_content = True
                     section_lines.append("Documents:")
                     for row in rows[:TOP_K]:
-                        text  = _strip_html((row.get("text") or "").strip())[:600]
-                        meta  = (row.get("meta") or "").strip()[:200]
-                        score = row.get("match_score")
-                        conf  = {3: "strong", 2: "good", 1: "partial"}.get(score, "")
+                        text     = _strip_html((row.get("text") or "").strip())[:1200]
+                        row_meta = (row.get("meta") or "").strip()[:200]
+                        score    = row.get("match_score")
+                        conf     = {3: "strong", 2: "good", 1: "partial"}.get(score, "")
                         if text:
                             suffix = ""
                             if conf:
                                 suffix += f" [{conf} match]"
-                            if meta:
-                                suffix += f" ({meta})"
+                            if row_meta:
+                                suffix += f" ({row_meta})"
                             section_lines.append(f"  • {text}{suffix}")
 
             print(f"[search] graph={graph} has_content={has_content} cypher_entities={len(cypher_result.get('entities', []))} cypher_related={len(cypher_result.get('related', []))} rows={len(rows) if 'rows' in dir() else '?'}")
@@ -1178,4 +1323,5 @@ def retrieve(query: str, graphs: list[str]) -> dict[str, str]:
     finally:
         conn.close()
 
-    return sections
+    meta["cypher_queries"] = list(_query_log)
+    return sections, meta

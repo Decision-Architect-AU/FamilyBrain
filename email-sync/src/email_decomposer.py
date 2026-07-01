@@ -19,12 +19,34 @@ import requests as req
 
 from datetime import datetime, timezone, date, timedelta
 
+# Pre-extract meeting links from raw email body before any truncation or stripping.
+# These are preserved separately and stored in personal.event.meeting_url.
+_MEETING_URL_RE = re.compile(
+    r'https?://\S*(?:'
+    r'zoom\.us/j/'
+    r'|teams\.microsoft\.com/l/meetup-join/'
+    r'|meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}'
+    r'|webex\.com/meet/'
+    r'|gotomeeting\.com/join/'
+    r'|whereby\.com/'
+    r'|bluejeans\.com/'
+    r'|around\.co/'
+    r')\S*',
+    re.I
+)
+
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
 INGESTOR_URL = os.environ.get("INGESTOR_URL", "")
 
 _BATCH = 20   # emails per run
+
+
+def _extract_meeting_url(body: str) -> str | None:
+    """Pull the first meeting join URL from the raw body before any truncation."""
+    m = _MEETING_URL_RE.search(body)
+    return m.group(0).rstrip(")>\"'.,") if m else None
 
 
 def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
@@ -54,7 +76,7 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         '  "relative_offset_days": integer number of days after the parent event, or null if not relative\n'
         '  "relative_anchor": human-readable description of the dependency (e.g. "4 weeks after initial session"), or null\n'
         "  -- extra fields for specific types:\n"
-        '  calendar_event: "end_date": YYYY-MM-DD if multi-day, "location": string or null\n'
+        '  calendar_event: "end_date": YYYY-MM-DD if multi-day, "location": string or null, "meeting_url": the full video/conference join URL (Zoom/Teams/Meet/Webex etc.) if present in the email, else null\n'
         '  payment: "amount": exact dollar amount as it appears in the email or null, "biller": who to pay, "reference": invoice/ref number as it appears or null\n'
         '  task: "priority": "high"|"normal"\n\n'
         "Type selection rules:\n"
@@ -142,9 +164,56 @@ def _create_note(cur, email_id: int, title: str, body: str,
     return cur.fetchone()[0]
 
 
+# Event types that are context-only (don't commit person time)
+_CONTEXT_TYPES = {"SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY", "HOLIDAY", "LEAVE"}
+
+
+def _resolve_person_id(text: str) -> int | None:
+    """Try to resolve a person_id by matching known person names against event text."""
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT id, name FROM personal.person")
+                persons = cur.fetchall()
+        text_lower = text.lower()
+        for person in persons:
+            name = (person.get("name") or "").lower()
+            if name and len(name) > 2 and name in text_lower:
+                return person["id"]
+    except Exception:
+        pass
+    return None
+
+
+def _supersede_placeholder(cur, slot_key: str, new_event_id: int,
+                            incoming_rank: int) -> bool:
+    """
+    If a generated placeholder exists for this slot_key with lower/equal rank,
+    supersede it. Returns True if a placeholder was superseded.
+    """
+    cur.execute("""
+        SELECT id, precedence_rank FROM personal.event
+        WHERE slot_key = %s
+          AND status = 'generated'
+          AND provenance = 'rule'
+        ORDER BY precedence_rank DESC
+        LIMIT 1
+    """, (slot_key,))
+    row = cur.fetchone()
+    if row and incoming_rank >= row["precedence_rank"]:
+        cur.execute("""
+            UPDATE personal.event
+            SET status = 'superseded', superseded_by_event_id = %s
+            WHERE id = %s
+        """, (new_event_id, row["id"]))
+        return True
+    return False
+
+
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
-                             title_to_event_id: dict | None = None) -> int | None:
+                             title_to_event_id: dict | None = None,
+                             pre_extracted_meeting_url: str | None = None) -> int | None:
     """Create a calendar event. Returns the new event id, or None on failure."""
     from .db import upsert_event
     title    = item.get("title", "")
@@ -152,6 +221,9 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
     date_str = item.get("date")
     time_str = item.get("time")
     end_str  = item.get("end_date")
+    location = item.get("location")
+    # LLM-extracted URL takes precedence; pre-extracted regex URL is the fallback
+    meeting_url = item.get("meeting_url") or pre_extracted_meeting_url
     relative_to     = item.get("relative_to")
     offset_days     = item.get("relative_offset_days")
     relative_anchor = item.get("relative_anchor")
@@ -184,19 +256,66 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             ingestor_url=ingestor_url or None,
         )
 
-        # Store relative dependency if present
-        if event_id and (relative_to or offset_days or relative_anchor):
+        if not event_id:
+            return None
+
+        # Stage 2: set provenance/status and attempt slot override
+        event_type   = item.get("event_type", "inferred").upper()
+        effective_dt = date.fromisoformat(date_str)
+
+        # Resolve person from title + detail
+        person_id = _resolve_person_id(f"{title} {detail}")
+
+        # Classify incoming event
+        from .slot_classify import classify as _classify_slot
+        slot_class, blocks_person, rank = _classify_slot(event_type)
+        slot_key = f"{person_id}:{effective_dt}:{slot_class}" if person_id else None
+        needs_review = False
+
+        # Update event with provenance/status and slot fields
+        cur.execute("""
+            UPDATE personal.event
+            SET provenance      = 'email',
+                status          = 'ingested',
+                slot_key        = %s,
+                slot_class      = %s,
+                blocks_person   = %s,
+                precedence_rank = %s,
+                person_id       = COALESCE(person_id, %s),
+                occurrence_date = %s
+            WHERE id = %s
+        """, (slot_key, slot_class, blocks_person, rank,
+              person_id, effective_dt, event_id))
+
+        # Attempt override: supersede a generated placeholder in the same slot
+        if slot_key and event_type not in _CONTEXT_TYPES:
+            superseded = _supersede_placeholder(cur, slot_key, event_id, rank)
+            if superseded:
+                print(f"[decompose] overrode generated placeholder for slot {slot_key}")
+        elif slot_key is None and person_id is None:
+            needs_review = True  # can't do collision detection without person
+
+        if needs_review:
+            cur.execute(
+                "UPDATE personal.event SET status = 'ingested' WHERE id = %s",
+                (event_id,)
+            )
+
+        # Store meeting_url, location, and relative dependency
+        if meeting_url or location or relative_to or offset_days or relative_anchor:
             parent_id = (title_to_event_id or {}).get(relative_to.lower().strip()) if relative_to else None
             cur.execute(
                 """UPDATE personal.event
                    SET parent_event_id = %s,
                        relative_offset_days = %s,
-                       relative_anchor = %s
+                       relative_anchor = %s,
+                       meeting_url = COALESCE(%s, meeting_url),
+                       location    = COALESCE(%s, location)
                    WHERE id = %s""",
-                (parent_id, offset_days, relative_anchor, event_id),
+                (parent_id, offset_days, relative_anchor, meeting_url, location, event_id),
             )
 
-        if title_to_event_id is not None and event_id:
+        if title_to_event_id is not None:
             title_to_event_id[title.lower().strip()] = event_id
 
         return event_id
@@ -371,13 +490,19 @@ def decompose_emails(accounts: list[dict]) -> int:
                     body = att_text
 
         try:
+            # Pre-extract meeting URL from raw body before truncation — used as fallback
+            # if the LLM misses it or the link is buried below the 3000-char prompt window.
+            pre_meeting_url = _extract_meeting_url(body)
+
             items = _extract_items(subject, body, received_at)
 
             if items:
                 print(f"[decompose] '{subject[:60]}': {len(items)} item(s)")
+                if pre_meeting_url:
+                    print(f"[decompose] pre-extracted meeting URL: {pre_meeting_url[:80]}")
 
             with psycopg2.connect(DB_URL) as wconn:
-                with wconn.cursor() as wcur:
+                with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
                     title_to_event_id: dict = {}  # maps title → event_id for relative linking
                     for item in items:
                         itype = item.get("type")
@@ -388,7 +513,8 @@ def decompose_emails(accounts: list[dict]) -> int:
                             _create_calendar_event(wcur, item, calendar_source,
                                                     email_id, INGESTOR_URL,
                                                     received_date=received_at,
-                                                    title_to_event_id=title_to_event_id)
+                                                    title_to_event_id=title_to_event_id,
+                                                    pre_extracted_meeting_url=pre_meeting_url)
 
                         elif itype == "payment":
                             _create_payment_note(wcur, item, email_id, received_at)

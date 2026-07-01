@@ -1,4 +1,4 @@
-﻿# wa-agent
+# wa-agent
 
 WhatsApp-facing agent. Receives messages from the WhatsApp bridge, retrieves knowledge graph context, generates responses, and handles structured commands.
 
@@ -80,6 +80,22 @@ The appointment digest task also doubles as a pre-computed cache: results are sa
 ## Response personas
 
 `config.response_persona` rows match trigger patterns and inject a context-specific system prompt. The `appointment` persona fires only on specific time-lookup queries (`when is my`, `what time is`) — general questions about appointments get a conversational prose response instead.
+
+## Maintenance job (`maintenance.py`)
+
+Full reference: [`src/maintenance.md`](src/maintenance.md)
+
+Runs nightly (or on demand via `POST /maintenance`). Handles event generation from asset rules, scheduling conflict detection, knowledge graph sync, and appointment digest pre-computation.
+
+**Tasks in default run order:**
+`re_embed → link → dedup → prune → generate_events → detect_conflicts → refresh_asset_notes → asset_graph_sync → monitor → tune_weights → appointment_digest`
+
+Run a subset: `POST /maintenance?tasks=generate_events&tasks=detect_conflicts`
+
+**Three-stage collision pipeline:**
+- **Stage 1 (Suppress)** — inside `task_generate_events`: skip or delete generated placeholders when a `suppress_on` context event exists for that date
+- **Stage 2 (Override)** — inside `email_decomposer`: email event supersedes a generated placeholder in the same slot when rank ≥ placeholder rank
+- **Stage 3 (Notify)** — `task_detect_conflicts`: sweep for overlapping `blocks_person=true` events across different slot_classes for the same person; write `personal.conflict` rows
 
 ## Key env vars
 

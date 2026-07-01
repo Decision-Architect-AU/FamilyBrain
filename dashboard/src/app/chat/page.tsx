@@ -3,6 +3,16 @@
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import Link from 'next/link';
 
+interface RouteInfo {
+  graphs: string[];
+  how: string;
+  persona: string | null;
+  focused_person: string | null;
+  focused_entity: string | null;
+  traversal_mode: Record<string, string>;
+  rules_matched: Record<string, string>;
+}
+
 interface Message {
   id: number;
   role: 'user' | 'assistant';
@@ -11,6 +21,8 @@ interface Message {
   graphs_used?: string[];
   context?: Record<string, string>;
   prompt_preview?: string;
+  route_info?: RouteInfo;
+  queries?: string[];
   ts: Date;
   query?: string;
 }
@@ -18,6 +30,8 @@ interface Message {
 interface DataPane {
   context: Record<string, string>;
   prompt_preview?: string;
+  route_info?: RouteInfo;
+  queries?: string[];
   query: string;
 }
 
@@ -72,13 +86,21 @@ function Bubble({ msg, onShowData }: { msg: Message; onShowData?: (pane: DataPan
               {msg.graphs_used.map(g => g.replace('_graph', '')).join(', ')}
             </span>
           )}
-          {!isUser && msg.context && onShowData && (
+          {!isUser && onShowData && (
             <button
-              onClick={() => onShowData({ context: msg.context!, prompt_preview: msg.prompt_preview, query: msg.query ?? '' })}
-              title="Show retrieval data"
-              className="text-[11px] text-gray-500 hover:text-gray-200 transition-colors leading-none font-mono"
+              onClick={() => onShowData({
+                context: msg.context ?? {},
+                prompt_preview: msg.prompt_preview,
+                route_info: msg.route_info,
+                queries: msg.queries,
+                query: msg.query ?? '',
+              })}
+              title="Inspect retrieval data"
+              className="text-gray-500 hover:text-gray-200 transition-colors leading-none"
             >
-              ⟨/⟩
+              <svg viewBox="0 0 16 16" className="w-3 h-3 fill-current">
+                <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.099zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/>
+              </svg>
             </button>
           )}
           {!isUser && (
@@ -115,9 +137,19 @@ function TypingIndicator() {
   );
 }
 
+type DataTab = 'context' | 'route' | 'cypher' | 'prompt';
+
 function DataPane({ pane, onClose }: { pane: DataPane; onClose: () => void }) {
   const sections = Object.entries(pane.context);
-  const [tab, setTab] = useState<'context' | 'prompt'>(sections.length > 0 ? 'context' : 'prompt');
+  const [tab, setTab] = useState<DataTab>(sections.length > 0 ? 'context' : 'route');
+  const r = pane.route_info;
+
+  const tabBtn = (id: DataTab, label: string) => (
+    <button onClick={() => setTab(id)}
+      className={`px-2 py-0.5 rounded ${tab === id ? 'bg-[#2a3942] text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+      {label}
+    </button>
+  );
 
   return (
     <div className="w-96 shrink-0 flex flex-col bg-[#0d1f2d] border-l border-[#2a3942] overflow-hidden">
@@ -126,14 +158,10 @@ function DataPane({ pane, onClose }: { pane: DataPane; onClose: () => void }) {
         <span className="text-xs font-semibold text-gray-300">Retrieval Data</span>
         <div className="flex items-center gap-3">
           <div className="flex gap-1 text-[11px]">
-            <button onClick={() => setTab('context')}
-              className={`px-2 py-0.5 rounded ${tab === 'context' ? 'bg-[#2a3942] text-white' : 'text-gray-500 hover:text-gray-300'}`}>
-              Context
-            </button>
-            <button onClick={() => setTab('prompt')}
-              className={`px-2 py-0.5 rounded ${tab === 'prompt' ? 'bg-[#2a3942] text-white' : 'text-gray-500 hover:text-gray-300'}`}>
-              Prompt
-            </button>
+            {tabBtn('context', 'Context')}
+            {tabBtn('route', 'Route')}
+            {tabBtn('cypher', 'Queries')}
+            {tabBtn('prompt', 'Prompt')}
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-white text-sm leading-none">✕</button>
         </div>
@@ -146,7 +174,7 @@ function DataPane({ pane, onClose }: { pane: DataPane; onClose: () => void }) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 py-3 text-[11px] font-mono text-gray-300 leading-relaxed">
-        {tab === 'context' ? (
+        {tab === 'context' && (
           sections.length === 0 ? (
             <p className="text-gray-500">No documents retrieved — LLM answered from system prompt / training knowledge only. Switch to the <button onClick={() => setTab('prompt')} className="text-[#00a884] underline">Prompt tab</button> to see what was sent.</p>
           ) : (
@@ -159,12 +187,58 @@ function DataPane({ pane, onClose }: { pane: DataPane; onClose: () => void }) {
               </div>
             ))
           )
-        ) : (
+        )}
+
+        {tab === 'route' && (
+          r ? (
+            <div className="space-y-3">
+              <Row label="Graphs" value={r.graphs.map(g => g.replace('_graph','')).join(', ')} />
+              <Row label="Classified" value={r.how} />
+              {r.persona && <Row label="Persona" value={r.persona} />}
+              {r.focused_person && <Row label="Focal person" value={r.focused_person} highlight />}
+              {r.focused_entity && <Row label="Focal entity" value={r.focused_entity} highlight />}
+              {Object.entries(r.traversal_mode).map(([g, mode]) => (
+                <Row key={g} label={`${g.replace('_graph','')} traversal`} value={mode} />
+              ))}
+              {Object.entries(r.rules_matched).map(([g, rule]) => (
+                <Row key={g} label={`${g.replace('_graph','')} intent rule`} value={rule} />
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500">No route info available (older message or command response).</p>
+          )
+        )}
+
+        {tab === 'cypher' && (
+          pane.queries && pane.queries.length > 0 ? (
+            <div className="space-y-3">
+              {pane.queries.map((q, i) => (
+                <div key={i}>
+                  <div className="text-[10px] text-gray-600 mb-0.5">query {i + 1}</div>
+                  <pre className="whitespace-pre-wrap break-words text-gray-400 bg-[#111c24] rounded p-2">{q}</pre>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500">No retrieval queries recorded for this message.</p>
+          )
+        )}
+
+        {tab === 'prompt' && (
           <pre className="whitespace-pre-wrap break-words text-gray-400">
             {pane.prompt_preview ?? 'No prompt available.'}
           </pre>
         )}
       </div>
+    </div>
+  );
+}
+
+function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] text-gray-600 uppercase tracking-wide">{label}</div>
+      <div className={highlight ? 'text-[#00a884]' : 'text-gray-300'}>{value}</div>
     </div>
   );
 }
@@ -186,6 +260,7 @@ export default function ChatPage() {
   const [model, setModel]     = useState<'qwen2.5:14b' | 'qwen2.5:32b'>('qwen2.5:14b');
   const [dataPane, setDataPane] = useState<DataPane | null>(null);
   const [showDataPane, setShowDataPane] = useState(false);
+  const [lastFocusedPerson, setLastFocusedPerson] = useState<string | null>(null);
   const bottomRef             = useRef<HTMLDivElement>(null);
   const inputRef              = useRef<HTMLTextAreaElement>(null);
 
@@ -204,7 +279,7 @@ export default function ChatPage() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text.trim(), model }),
+        body: JSON.stringify({ message: text.trim(), model, person_hint: lastFocusedPerson }),
       });
       const data = await res.json();
       const reply: Message = {
@@ -215,12 +290,26 @@ export default function ChatPage() {
         graphs_used: data.graphs_used,
         context: data.context,
         prompt_preview: data.prompt_preview,
+        route_info: data.route_info,
+        queries: data.queries,
         query: text.trim(),
         ts: new Date(),
       };
+      // Remember who we were talking about for pronoun follow-ups
+      if (data.route_info?.focused_person) {
+        setLastFocusedPerson(data.route_info.focused_person);
+      } else if (!data.route_info?.focused_person && data.route_info) {
+        setLastFocusedPerson(null);
+      }
       setMessages(m => [...m, reply]);
       if (showDataPane) {
-        setDataPane({ context: reply.context ?? {}, prompt_preview: reply.prompt_preview, query: text.trim() });
+        setDataPane({
+          context: reply.context ?? {},
+          prompt_preview: reply.prompt_preview,
+          route_info: reply.route_info,
+          queries: reply.queries,
+          query: text.trim(),
+        });
       }
     } catch (err) {
       setMessages(m => [...m, { id: nextId(), role: 'assistant', text: `Error: ${err}`, ts: new Date() }]);
@@ -279,7 +368,7 @@ export default function ChatPage() {
         <div className="flex-1 overflow-y-auto px-4 py-4"
           style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, #1a2632 1px, transparent 0)', backgroundSize: '24px 24px' }}>
           {messages.map(msg => (
-            <Bubble key={msg.id} msg={msg} onShowData={setDataPane} />
+            <Bubble key={msg.id} msg={msg} onShowData={(pane) => { setDataPane(pane); setShowDataPane(true); }} />
           ))}
           {loading && <TypingIndicator />}
           <div ref={bottomRef} />

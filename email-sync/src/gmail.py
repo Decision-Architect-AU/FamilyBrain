@@ -242,13 +242,6 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 continue
             try:
                 msg    = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
-
-                # Skip messages in Promotions / Spam / Trash labels (incremental path)
-                msg_labels = set(msg.get("labelIds", []))
-                if msg_labels & {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"}:
-                    skipped += 1
-                    continue
-
                 parsed = _parse_message(msg)
 
                 # Extract raw headers for bulk-mail heuristics
@@ -256,6 +249,17 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     h["name"]: h["value"]
                     for h in msg.get("payload", {}).get("headers", [])
                 }
+
+                # Skip Promotions/Spam/Trash — but allow-list overrides Gmail's auto-categorisation
+                msg_labels = set(msg.get("labelIds", []))
+                if msg_labels & {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"}:
+                    from src.filters import _filters, _domain_of
+                    f = _filters()
+                    sender_lower = parsed["from_address"].lower()
+                    sender_domain = _domain_of(parsed["from_address"])
+                    if sender_lower not in f["sender_allow"] and sender_domain not in f["sender_allow"]:
+                        skipped += 1
+                        continue
 
                 ok, reason = should_ingest(
                     from_address=parsed["from_address"],
@@ -290,14 +294,19 @@ def sync_email(account: dict, ingestor_url: str) -> int:
         for msg_id in retry_ids:
             try:
                 msg = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
-                # Drop promotions/social/updates — same guard as the main loop
-                msg_labels = set(msg.get("labelIds", []))
-                if msg_labels & {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"}:
-                    skipped += 1
-                    db.mark_skipped(account_id, msg_id, "", "", None, "non-primary category")
-                    continue
                 parsed = _parse_message(msg)
                 raw_headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                # Drop promotions/social/updates — but allow-list overrides Gmail's auto-categorisation
+                msg_labels = set(msg.get("labelIds", []))
+                if msg_labels & {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"}:
+                    from src.filters import _filters, _domain_of
+                    f = _filters()
+                    sender_lower = parsed["from_address"].lower()
+                    sender_domain = _domain_of(parsed["from_address"])
+                    if sender_lower not in f["sender_allow"] and sender_domain not in f["sender_allow"]:
+                        skipped += 1
+                        db.mark_skipped(account_id, msg_id, "", "", None, "non-primary category")
+                        continue
                 ok, reason = should_ingest(
                     from_address=parsed["from_address"],
                     subject=parsed["subject"],
