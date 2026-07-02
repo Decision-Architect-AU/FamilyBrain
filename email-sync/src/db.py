@@ -95,7 +95,11 @@ def mark_skipped(account_id: int, provider_msg_id: str, from_address: str,
                     (account_id, provider_msg_id, from_address, subject, received_at,
                      ingest_status, ingest_error, ingest_at)
                 VALUES (%s, %s, %s, %s, %s, 'skipped', %s, now())
-                ON CONFLICT (account_id, provider_msg_id) DO NOTHING
+                ON CONFLICT (account_id, provider_msg_id) DO UPDATE
+                    SET ingest_status = 'skipped',
+                        ingest_error  = EXCLUDED.ingest_error,
+                        ingest_at     = now()
+                    WHERE personal.email_message.ingest_status NOT IN ('ingested', 'confirmed')
                 """,
                 (account_id, provider_msg_id, from_address, subject, received_at, reason),
             )
@@ -235,20 +239,35 @@ def upsert_event(
         with c.cursor() as cur:
             # Dedup: same event from multiple sources (Gmail+Outlook mirror, recurring sync)
             # Compare in AEST to handle Outlook events stored as UTC (e.g. 22:00 UTC = 08:00 AEST next day)
+            # calendar_event_id != %s uses IS DISTINCT FROM to handle NULL generated events
             cur.execute(
                 """
-                SELECT id FROM personal.event
-                WHERE lower(title) = lower(%s)
+                SELECT id, provenance, status FROM personal.event
+                WHERE (
+                    lower(title) = lower(%s)
+                    OR lower(title) LIKE '%%' || lower(%s) || '%%'
+                    OR lower(%s) LIKE '%%' || lower(title) || '%%'
+                )
                   AND (starts_at AT TIME ZONE 'Australia/Brisbane')::date
                     = (%s::timestamptz AT TIME ZONE 'Australia/Brisbane')::date
-                  AND calendar_event_id != %s
+                  AND calendar_event_id IS DISTINCT FROM %s
+                  AND status NOT IN ('cancelled', 'superseded')
+                ORDER BY length(title) DESC
                 LIMIT 1
                 """,
-                (title, starts_at, calendar_event_id),
+                (title, title, title, starts_at, calendar_event_id),
             )
             existing_dup = cur.fetchone()
             if existing_dup:
-                return existing_dup["id"]
+                # If the existing copy is a generated placeholder, supersede it so
+                # the calendar-synced event becomes the canonical version
+                if existing_dup["provenance"] == "rule" and existing_dup["status"] == "generated":
+                    cur.execute(
+                        "UPDATE personal.event SET status = 'superseded' WHERE id = %s",
+                        (existing_dup["id"],),
+                    )
+                else:
+                    return existing_dup["id"]
 
             # Capture old starts_at before upsert so we can detect date changes in RETURNING
             cur.execute(
@@ -258,8 +277,8 @@ def upsert_event(
                 ),
                 upserted AS (
                     INSERT INTO personal.event
-                        (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date, status, provenance)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'email')
                     ON CONFLICT (calendar_event_id) DO UPDATE
                         SET title          = EXCLUDED.title,
                             starts_at      = EXCLUDED.starts_at,

@@ -296,7 +296,7 @@ def _write_outlook(outlook_acct: dict, ev: dict) -> str | None:
         import requests as req
 
         starts = ev["starts_at"]
-        ends   = ev["ends_at"] or ev["starts_at"]
+        ends   = _effective_end(starts, ev.get("ends_at"))
 
         def _fmt(dt):
             if isinstance(dt, date_type) and not isinstance(dt, datetime):
@@ -333,7 +333,7 @@ def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -
         import requests as req
 
         starts = ev["starts_at"]
-        ends   = ev["ends_at"] or ev["starts_at"]
+        ends   = _effective_end(starts, ev.get("ends_at"))
 
         def _fmt(dt):
             if isinstance(dt, date_type) and not isinstance(dt, datetime):
@@ -360,11 +360,21 @@ def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -
         print(f"[appt] outlook mirror patch error: {e}")
 
 
+def _effective_end(starts, ends) -> datetime:
+    """Return ends, defaulting to starts + 1 hour when ends is missing or zero-duration."""
+    effective = ends or starts
+    if effective == starts:
+        if isinstance(starts, datetime):
+            return starts + timedelta(hours=1)
+        # date-only: treat as end-of-day (next day for all-day events is handled by _fmt_cal_dt)
+        return starts
+    return effective
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
     """Insert event, return gcal event id."""
-    from datetime import date as date_type
     starts = ev["starts_at"]
-    ends   = ev["ends_at"] or ev["starts_at"]
+    ends   = _effective_end(starts, ev.get("ends_at"))
 
     body = {
         "summary":     ev["title"],
@@ -383,7 +393,7 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
                  color_id: str | None = None) -> None:
     """Patch an existing GCal event."""
     starts = ev["starts_at"]
-    ends   = ev["ends_at"] or ev["starts_at"]
+    ends   = _effective_end(starts, ev.get("ends_at"))
 
     body = {
         "summary":     ev["title"],
@@ -503,7 +513,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     OR updated_at > calendar_written_at
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
-                AND COALESCE(status, 'active') != 'cancelled'
+                AND status NOT IN ('cancelled', 'superseded')
                 AND calendar_source NOT LIKE 'gmail:%%'    -- skip events already in GCal source
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
@@ -511,6 +521,46 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 (now, _BATCH),
             )
             events = list(cur.fetchall())
+
+    # --- Cleanup sweep: delete from GCal any events that became superseded/generated/cancelled,
+    #     AND any calendar-synced events (outlook/gmail source) that were wrongly pushed back ---
+    with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as rconn:
+        with rconn.cursor() as cur:
+            cur.execute("""
+                SELECT id, gcal_event_id, gcal_calendar_id
+                FROM personal.event
+                WHERE gcal_event_id IS NOT NULL
+                  AND (
+                    status IN ('cancelled', 'superseded')
+                    OR calendar_source LIKE 'gmail:%'
+                  )
+            """)
+            to_delete = list(cur.fetchall())
+
+    deleted = 0
+    for ev in to_delete:
+        ok = False
+        try:
+            cal_svc.events().delete(
+                calendarId=ev["gcal_calendar_id"] or "primary",
+                eventId=ev["gcal_event_id"],
+            ).execute()
+            ok = True
+            deleted += 1
+        except Exception as _de:
+            # 404/410 = already gone from GCal, safe to clear DB reference
+            if hasattr(_de, "resp") and getattr(_de.resp, "status", None) in ("404", "410", 404, 410):
+                ok = True
+        if ok:
+            with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as rconn:
+                with rconn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.event SET gcal_event_id = NULL, gcal_calendar_id = NULL WHERE id = %s",
+                        (ev["id"],),
+                    )
+                rconn.commit()
+    if deleted:
+        print(f"[appt] deleted {deleted} stale GCal event(s)")
 
     if not events:
         return 0
@@ -611,9 +661,11 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                         ol_id = _write_outlook(outlook_acct, {**ev, "title": title, "notes": notes})
                         if ol_id:
                             from .db import upsert_sync_map
+                            # Key must match what outlook.py looks up: "outlook:{email}:{ol_id}"
+                            # so the Outlook sync recognises the echo and skips re-importing it
                             upsert_sync_map(ev_id,
                                 source_account_id=outlook_acct["id"],
-                                source_provider_id=f"mirror:{ev_id}",
+                                source_provider_id=f"outlook:{outlook_acct['email_address']}:{ol_id}",
                                 mirror_account_id=outlook_acct["id"],
                                 mirror_provider_id=ol_id)
                             print(f"[appt] mirrored '{title[:40]}' → Outlook")

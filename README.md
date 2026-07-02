@@ -111,9 +111,17 @@ The pipeline is split into three layers: **inbound channels**, a **centralised k
 │  gcal_family ──► Family calendar (Child1/Child2 tags)   │
 │  gcal_holidays ──► Holidays + daily expansion           │
 │  gcal_primary ──► Primary calendar                      │
+│  outlook ──► Hotmail calendar (mirror only)             │
 │  task_list ──► notes (tagged task)                      │
 │  observations ──► notes (daily batch)                   │
 └─────────────────────────────────────────────────────────┘
+
+> **Architecture invariant:** Every event must pass through `personal.event`
+> before reaching any output calendar. Calendar sync (Gmail, Outlook) is
+> **input only** — it writes to `personal.event`, never directly to another
+> calendar. The appointment updater is the **sole writer** to all output
+> calendars. Bypassing this pipeline skips deduplication, enrichment, asset
+> matching, holiday suppression, and collision scoring.
 ```
 
 ---

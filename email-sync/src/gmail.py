@@ -522,44 +522,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                 ingestor_url=ingestor_url,
             )
 
-            # Mirror to other accounts (only if not yet mirrored, or event changed)
-            if not (existing and existing.get("mirror_provider_id") and not etag_changed):
-                for (mirror_acct_id, mirror_slot) in ac.mirror_to:
-                    mirror_acct = mirror_by_id.get(mirror_acct_id)
-                    if not mirror_acct or not mirror_acct.get("sync_calendar"):
-                        continue
-                    mirror_ac = routing.get(mirror_acct_id)
-                    effective_slot = route if mirror_slot == "route" else mirror_slot
-                    mirror_cal = target_calendar_id(mirror_ac, effective_slot) if mirror_ac else None
-                    existing_mirror_id = (existing or {}).get("mirror_provider_id")
-                    try:
-                        if mirror_acct["provider"] == "outlook":
-                            mirror_id = create_outlook_event(mirror_acct, summary, starts_at, ends_at, description)
-                        elif existing_mirror_id and etag_changed:
-                            mirror_svc = _calendar_service(mirror_acct)
-                            _patch_event_in_calendar(mirror_svc, mirror_cal or "primary",
-                                                     existing_mirror_id, summary, starts_at, ends_at, description)
-                            mirror_id = existing_mirror_id
-                        elif not existing_mirror_id and (not existing or etag_changed):
-                            # new event OR event changed but mirror_id not yet tracked — write once
-                            mirror_svc = _calendar_service(mirror_acct)
-                            mirror_id = _write_event_to_calendar(
-                                mirror_svc, mirror_cal or "primary",
-                                summary, starts_at, ends_at, description)
-                        else:
-                            continue  # mirror exists or event unchanged — skip
-                        db.upsert_sync_map(
-                            event_id, account_id, provider_id,
-                            mirror_account_id=mirror_acct_id,
-                            mirror_provider_id=mirror_id,
-                            target_cal_provider_id=target_cal_id_stored,
-                            sync_status="synced", etag=etag,
-                        )
-                    except Exception as e:
-                        print(f"[gmail] mirror to {mirror_acct['email_address']} failed for '{summary}': {e}")
-                        db.upsert_sync_map(event_id, account_id, provider_id,
-                                           sync_status="error", etag=etag)
-            elif target_cal_id_stored:
+            if target_cal_id_stored:
                 # No mirror needed but store target_cal_provider_id if we just created/updated it
                 db.upsert_sync_map(
                     event_id, account_id, provider_id,

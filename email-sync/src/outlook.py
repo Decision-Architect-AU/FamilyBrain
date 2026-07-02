@@ -409,9 +409,11 @@ def _parse_dt(dt_str: Optional[str], tz_str: Optional[str] = None) -> Optional[d
 
 def _classify_event(subject: str) -> str:
     s = subject.lower()
-    if any(w in s for w in ["school", "term", "holiday", "excursion"]):
+    if any(w in s for w in ["pickup", "pick up", "pick-up", "after school care", "aftercare"]):
+        return "PICKUP" if "pickup" in s or "pick" in s else "AFTERCARE"
+    if any(w in s for w in ["school holiday", "term", "holiday", "excursion", "varsity", "class "]):
         return "school"
-    if any(w in s for w in ["gp", "doctor", "physio", "therapy", "ndis", "appointment", "specialist"]):
+    if any(w in s for w in ["gp", "doctor", "physio", "therapy", "ndis", "appointment", "specialist", "rehab", "ot session", "speech"]):
         return "medical"
     return "family"
 
@@ -513,40 +515,9 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     ingestor_url=ingestor_url,
                 )
 
-                if is_new_event:
-                    for (mirror_acct_id, mirror_slot) in ac.mirror_to:
-                        mirror_acct = mirror_by_id.get(mirror_acct_id)
-                        if not mirror_acct or not mirror_acct.get("sync_calendar"):
-                            continue
-                        mirror_ac  = routing.get(mirror_acct_id)
-                        effective_slot = route if mirror_slot == "route" else mirror_slot
-                        mirror_cal = target_calendar_id(mirror_ac, effective_slot) if mirror_ac else None
-                        try:
-                            if mirror_acct["provider"] == "gmail":
-                                from .gmail import _calendar_service, _write_event_to_calendar
-                                mirror_svc = _calendar_service(mirror_acct)
-                                mirror_id  = _write_event_to_calendar(
-                                    mirror_svc, mirror_cal or "primary",
-                                    summary, starts_at, ends_at, description
-                                )
-                            else:
-                                mirror_id = create_outlook_event(mirror_acct, summary, starts_at, ends_at, description)
-                            db.upsert_sync_map(
-                                event_id, account_id, provider_id,
-                                mirror_account_id=mirror_acct_id,
-                                mirror_provider_id=mirror_id,
-                                target_cal_provider_id=target_cal_id_stored,
-                                sync_status="synced",
-                            )
-                        except Exception as e:
-                            print(f"[outlook] mirror to {mirror_acct['email_address']} failed for '{summary}': {e}")
-                            db.upsert_sync_map(event_id, account_id, provider_id, sync_status="error")
-                elif target_cal_id_stored:
-                    db.upsert_sync_map(
-                        event_id, account_id, provider_id,
-                        target_cal_provider_id=target_cal_id_stored,
-                        sync_status="synced",
-                    )
+                # No direct calendar-to-calendar mirroring here.
+                # All events flow: ingest → personal.event → appointment_updater → GCal/Outlook.
+                # appointment_updater is the sole writer to output calendars.
 
                 synced += 1
 

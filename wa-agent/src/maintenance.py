@@ -355,7 +355,13 @@ def _horizon_date(rule: dict, asset_facts: dict, now: date) -> date:
 
 
 def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool:
-    """Return True if a context event on target_date should gate generation of this rule."""
+    """Return True if a context event covers target_date and should gate generation of this rule.
+
+    Handles three cases:
+    - Individual day events: effective_date = target_date (our manual holiday expansion)
+    - All-day / multi-day events: starts_at::date (AEST) <= target <= ends_at::date (AEST)
+    - All-day events with no ends_at: starts_at::date (AEST) = target_date
+    """
     if not suppress_on:
         return False
     with conn.cursor() as cur:
@@ -363,9 +369,22 @@ def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool
             SELECT 1 FROM personal.event
             WHERE status = ANY(%s)
               AND event_type = ANY(%s)
-              AND effective_date = %s
+              AND (
+                  -- Individual expanded day event (our standard)
+                  effective_date = %s
+                  OR
+                  -- Multi-day span: target falls within starts_at..ends_at (Brisbane date)
+                  (
+                      (starts_at AT TIME ZONE 'Australia/Brisbane')::date <= %s
+                      AND (
+                          ends_at IS NULL
+                          OR (ends_at AT TIME ZONE 'Australia/Brisbane')::date >= %s
+                      )
+                      AND (starts_at AT TIME ZONE 'Australia/Brisbane')::date != (ends_at AT TIME ZONE 'Australia/Brisbane')::date
+                  )
+              )
             LIMIT 1
-        """, (list(_LIVE_STATUSES), suppress_on, target_date))
+        """, (list(_LIVE_STATUSES), suppress_on, target_date, target_date, target_date))
         return cur.fetchone() is not None
 
 
@@ -388,13 +407,20 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
     Upsert a generated event using the deterministic genkey (gen_asset_id, gen_rule_id, occurrence_date).
     Only updates display fields on conflict — never touches status if already superseded.
     """
+    from datetime import time as dtime
     start_time_str = rule.get("start_time")
     if start_time_str:
         h, m = map(int, start_time_str.split(":"))
-        from datetime import time as dtime
         starts_at = datetime.combine(target_date, dtime(h, m)).replace(tzinfo=_AEST)
     else:
         starts_at = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+    end_time_str = rule.get("end_time")
+    if end_time_str:
+        h, m = map(int, end_time_str.split(":"))
+        ends_at = datetime.combine(target_date, dtime(h, m)).replace(tzinfo=_AEST)
+    else:
+        ends_at = None
 
     event_type = rule.get("event_type", "TASK")
     if event_type == "BIN_NIGHT" and asset_facts:
@@ -414,27 +440,33 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO personal.event (
-              title, event_type, starts_at, effective_date,
+              title, event_type, starts_at, ends_at, effective_date,
               status, provenance, asset_id, person_id, calendar_source,
               slot_key, slot_class, blocks_person, precedence_rank,
               gen_asset_id, gen_rule_id, occurrence_date
             ) VALUES (
-              %s, %s, %s, %s,
+              %s, %s, %s, %s, %s,
               'generated', 'rule', %s, %s, 'asset_rules',
               %s, %s, %s, %s,
               %s, %s, %s
             )
             ON CONFLICT (gen_asset_id, gen_rule_id, occurrence_date) WHERE provenance = 'rule'
             DO UPDATE SET
-              title           = EXCLUDED.title,
-              starts_at       = EXCLUDED.starts_at,
-              slot_key        = EXCLUDED.slot_key,
-              slot_class      = EXCLUDED.slot_class,
-              blocks_person   = EXCLUDED.blocks_person,
-              precedence_rank = EXCLUDED.precedence_rank
-            WHERE personal.event.status = 'generated'
+              title                   = EXCLUDED.title,
+              starts_at               = EXCLUDED.starts_at,
+              ends_at                 = EXCLUDED.ends_at,
+              slot_key                = EXCLUDED.slot_key,
+              slot_class              = EXCLUDED.slot_class,
+              blocks_person           = EXCLUDED.blocks_person,
+              precedence_rank         = EXCLUDED.precedence_rank,
+              status                  = 'generated',
+              superseded_by_event_id  = NULL,
+              gcal_event_id           = NULL,
+              gcal_calendar_id        = NULL,
+              updated_at              = now()
+            WHERE personal.event.status IN ('generated', 'superseded')
         """, (
-            title, event_type, starts_at, target_date,
+            title, event_type, starts_at, ends_at, target_date,
             asset_id, person_id,
             slot_key, slot_class, blocks_person, rank,
             asset_id, rule_id, target_date,
