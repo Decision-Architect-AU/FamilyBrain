@@ -78,16 +78,24 @@ def _strip_html(html: str) -> str:
 
 # ── Inbox labelling ────────────────────────────────────────────────────────────
 
+# Graph API masterCategories color must be a preset name, NOT a CSS color name.
+# Valid values: none, preset0–preset24
+# preset0=red, preset1=orange, preset2=yellow, preset3=green, preset4=teal,
+# preset5=olive, preset6=blue, preset7=purple, preset8=cranberry, preset9=steel,
+# preset10=darkSteel, preset11=gray, preset12=warmGray, preset13=darkGray,
+# preset14=black, preset15=darkRed, preset16=darkOrange, preset17=darkYellow,
+# preset18=darkGreen, preset19=darkTeal, preset20=darkOlive, preset21=darkBlue,
+# preset22=darkPurple, preset23=darkCranberry, preset24=darkSteel2
 _OUTLOOK_COLOURS = {
-    "ndis":      "purple",
-    "health":    "red",
-    "finance":   "green",
-    "property":  "orange",
-    "insurance": "blue",
-    "travel":    "teal",
-    "vehicle":   "yellow",
-    "school":    "lightGray",
-    "legal":     "darkRed",
+    "ndis":      "preset7",   # purple
+    "health":    "preset0",   # red
+    "finance":   "preset3",   # green
+    "property":  "preset1",   # orange
+    "insurance": "preset6",   # blue
+    "travel":    "preset4",   # teal
+    "vehicle":   "preset2",   # yellow
+    "school":    "preset11",  # gray
+    "legal":     "preset15",  # darkRed
     "personal":  "none",
 }
 _outlook_category_cache: set[str] = set()
@@ -107,13 +115,17 @@ def _ensure_outlook_category(token: str, category: str) -> None:
         )
         existing = {c["displayName"] for c in resp.json().get("value", [])}
         if label_name not in existing:
-            requests.post(
+            cr = requests.post(
                 f"{GRAPH_BASE}/me/outlook/masterCategories",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json={"displayName": label_name, "color": colour},
                 timeout=30,
             )
-            print(f"[outlook] Created category '{label_name}'")
+            if cr.ok:
+                print(f"[outlook] Created category '{label_name}'")
+            else:
+                print(f"[outlook] Failed to create category '{label_name}': {cr.status_code} {cr.text[:100]}")
+                return
         _outlook_category_cache.add(label_name)
     except Exception as e:
         print(f"[outlook] Failed to ensure category '{label_name}': {e}")
@@ -125,12 +137,14 @@ def apply_ingested_category(account: dict, msg_id: str, category: str) -> None:
         token      = _token(account)
         label_name = f"FamilyBrain/{category}"
         _ensure_outlook_category(token, category)
-        requests.patch(
+        resp = requests.patch(
             f"{GRAPH_BASE}/me/messages/{msg_id}",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"categories": [label_name]},
             timeout=15,
         )
+        if not resp.ok:
+            print(f"[outlook] Category patch failed for {msg_id}: {resp.status_code} {resp.text[:100]}")
     except Exception as e:
         print(f"[outlook] Failed to apply category for {msg_id}: {e}")
 
@@ -162,7 +176,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             initial_days = int(os.environ.get("OUTLOOK_INITIAL_DAYS", "90"))
             since = (datetime.now(timezone.utc) - timedelta(days=initial_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             # Use regular messages endpoint for initial fetch — delta ignores $filter
-            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select=id,subject,from,toRecipients,receivedDateTime,body,conversationId&$filter=receivedDateTime+ge+{since}"
+            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId&$filter=receivedDateTime+ge+{since}"
 
         while url:
             resp = requests.get(url, headers=_headers(account), timeout=30)
@@ -186,8 +200,19 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     if (body_obj.get("contentType") or "").lower() == "html"
                     else body_obj.get("content", "")
                 )
+                # Fall back to Graph API bodyPreview when HTML stripping yields nothing
+                # (happens with image-only or layout-only emails)
+                if not body_text.strip():
+                    body_text = msg.get("bodyPreview", "")
 
                 subject = msg.get("subject") or "(no subject)"
+
+                # Skip locally if still no body — avoids ingestor round-trip rejection
+                if not body_text.strip():
+                    skipped += 1
+                    db.mark_skipped(account_id, msg_id, from_addr, subject,
+                                    msg.get("receivedDateTime"), "outlook:empty_body")
+                    continue
 
                 # Self-sent emails (e.g. scanner to self) always pass through
                 acct_addr = account.get("email_address", "").lower()
@@ -259,21 +284,24 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 db.update_sync_cursor(account_id, delta_link)
                 url = None
             else:
-                # Initial fetch via regular endpoint — no deltaLink returned.
-                # Seed a delta cursor from now so future runs pick up new messages only.
-                if not cursor:
+                # No nextLink or deltaLink — end of a regular-messages page set.
+                # Seed a proper delta cursor so future runs use incremental sync.
+                # Also triggers when cursor was stuck as a non-delta URL.
+                cursor_is_delta = cursor and ("deltaToken" in cursor or "/delta" in cursor)
+                if not cursor_is_delta:
+                    print(f"[outlook] seeding delta cursor for {account.get('email_address', account_id)}")
                     seed_resp = requests.get(
                         f"{GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$top=1&$select=id",
                         headers=_headers(account), timeout=30,
                     )
                     seed_data = seed_resp.json()
-                    seed_delta = seed_data.get("@odata.deltaLink") or seed_data.get("@odata.nextLink")
                     # Walk to end of delta to get the terminal deltaLink
                     while seed_data.get("@odata.nextLink"):
                         seed_resp = requests.get(seed_data["@odata.nextLink"], headers=_headers(account), timeout=30)
                         seed_data = seed_resp.json()
                     if seed_data.get("@odata.deltaLink"):
                         db.update_sync_cursor(account_id, seed_data["@odata.deltaLink"])
+                        print(f"[outlook] delta cursor seeded")
                 url = None
 
     except Exception as e:
@@ -304,7 +332,7 @@ def _sync_sent_items(account: dict, ingestor_url: str) -> int:
             url = (
                 f"{GRAPH_BASE}/me/mailFolders/SentItems/messages"
                 f"?$top=50&$orderby=receivedDateTime+desc"
-                f"&$select=id,subject,from,toRecipients,receivedDateTime,body,conversationId"
+                f"&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId"
                 f"&$filter=receivedDateTime+ge+{since}"
             )
 
@@ -330,6 +358,8 @@ def _sync_sent_items(account: dict, ingestor_url: str) -> int:
                     if (body_obj.get("contentType") or "").lower() == "html"
                     else body_obj.get("content", "")
                 )
+                if not body_text.strip():
+                    body_text = msg.get("bodyPreview", "")
                 subject = msg.get("subject") or "(no subject)"
 
                 ok, reason = should_ingest(
@@ -485,6 +515,11 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                 existing     = db.get_sync_map(account_id, provider_id)
                 # Outlook delta sync doesn't provide etags; use presence of sync_map as change signal
                 is_new_event = not existing
+
+                # Skip events we mirrored out — appointment_updater created them, re-importing
+                # them would create duplicate personal.event rows and a feedback loop.
+                if db.is_mirror_event(account_id, provider_id):
+                    continue
 
                 # Write/update routed Outlook calendar (Bills/Holidays/Family/default)
                 target_cal = target_calendar_id(ac, route)

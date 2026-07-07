@@ -178,12 +178,15 @@ services:
     profiles: [normal]
     restart: unless-stopped
     environment:
-      MAINTENANCE_CRON: ${MAINTENANCE_CRON:-0 2 * * *}
+      MAINTENANCE_INTERVAL_SECS: ${MAINTENANCE_INTERVAL_SECS:-300}
       WA_AGENT_URL: http://wa-agent:4002
     command: >
-      sh -c 'apk add --no-cache curl dcron &&
-             echo "$${MAINTENANCE_CRON} curl -s -X POST $${WA_AGENT_URL}/maintenance" | crontab - &&
-             crond -f -l 6'
+      sh -c 'apk add --no-cache curl &&
+             echo "maintenance-cron: starting, interval=$${MAINTENANCE_INTERVAL_SECS}s" &&
+             while true; do
+               sleep $${MAINTENANCE_INTERVAL_SECS};
+               curl -s -X POST $${WA_AGENT_URL}/maintenance && echo;
+             done'
     depends_on:
       - wa-agent
     networks:
@@ -407,7 +410,7 @@ services:
       OUTLOOK_INITIAL_DAYS: ${OUTLOOK_INITIAL_DAYS:-730}
       PYTHONUNBUFFERED: "1"
     volumes:
-      - C:/Users/Glenn/Documents/FinancialsGW:/financials
+      - ${FINANCIALS_HOST_DIR:-//c/Users/Glenn/Documents/FinancialsGW}:/financials
     depends_on:
       postgres:
         condition: service_healthy

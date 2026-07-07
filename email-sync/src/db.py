@@ -285,7 +285,12 @@ def upsert_event(
                             ends_at        = EXCLUDED.ends_at,
                             notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
                             effective_date = EXCLUDED.effective_date,
-                            updated_at     = now()
+                            updated_at     = CASE
+                                WHEN personal.event.starts_at IS DISTINCT FROM EXCLUDED.starts_at
+                                  OR personal.event.ends_at   IS DISTINCT FROM EXCLUDED.ends_at
+                                THEN now()
+                                ELSE personal.event.updated_at
+                            END
                     RETURNING id, (xmax = 0) AS inserted, starts_at
                 )
                 SELECT u.id, u.inserted,
@@ -325,6 +330,32 @@ def upsert_event(
             )
         except Exception as e:
             print(f"[db] channel materialise failed for event {event_id}: {e}")
+
+    # Collision resolution: if this is a context/suppress event (holiday, leave), immediately
+    # remove any generated rule events on the same date that would have been suppressed at
+    # generation time. Precedence is structural — context beats generated, regardless of order.
+    _SUPPRESS_TYPES = {"SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY", "HOLIDAY", "LEAVE"}
+    if is_new and event_type in _SUPPRESS_TYPES and eff_date:
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM personal.event rule_ev
+                    USING personal.asset a
+                    WHERE rule_ev.provenance = 'rule'
+                      AND rule_ev.status = 'generated'
+                      AND rule_ev.effective_date = %s
+                      AND rule_ev.gen_asset_id = a.id
+                      AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(a.rules) AS r
+                        WHERE (r->>'collision_aware')::boolean = true
+                          AND COALESCE((r->>'holiday_immune')::boolean, false) = false
+                          AND r->>'name' = rule_ev.gen_rule_id
+                      )
+                """, (eff_date,))
+                removed = cur.rowcount
+                if removed:
+                    print(f"[db] holiday collision: removed {removed} generated rule event(s) on {eff_date} for '{title}'")
+            c.commit()
 
     # Fire-and-forget: write (:Event) node to personal_graph via ingestor
     if ingestor_url:
@@ -406,6 +437,18 @@ def get_sync_map(source_account_id: int, source_provider_id: str) -> Optional[di
                 (source_account_id, source_provider_id),
             )
             return cur.fetchone()
+
+
+def is_mirror_event(mirror_account_id: int, mirror_provider_id: str) -> bool:
+    """Return True if this Outlook event ID was created by appointment_updater as a mirror."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM personal.calendar_sync_map
+                   WHERE mirror_account_id = %s AND mirror_provider_id = %s LIMIT 1""",
+                (mirror_account_id, mirror_provider_id),
+            )
+            return cur.fetchone() is not None
 
 
 def upsert_sync_map(

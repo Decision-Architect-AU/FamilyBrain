@@ -8,17 +8,28 @@ Linkage strategy (in priority order):
 3. Co-document      — two concepts mentioned in the same document       (CO_OCCURS_WITH, low)
 
 Triggered via POST /link or run as a scheduled job.
+
+Embedding calls go to the local inference engine (INFERENCE_URL / OLLAMA_URL env var).
+The engine uses the OpenVINO-backed nomic-embed-text model and cannot handle rapid-fire
+concurrent requests — embed calls are deliberately serialised with a small inter-call delay.
 """
 import os
 import re
 import math
+import time
 import psycopg2
 import psycopg2.extras
 import requests
 
 DB_URL      = os.environ.get("DATABASE_URL")
+# OLLAMA_URL kept for env-var compatibility; this points to the local inference engine
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+
+# Delay between sequential embed calls — prevents 500 errors from inference engine overload
+EMBED_DELAY_SECS = float(os.environ.get("LINKER_EMBED_DELAY_SECS", "0.1"))
+# Retries on transient inference engine errors
+EMBED_RETRIES = int(os.environ.get("LINKER_EMBED_RETRIES", "3"))
 
 GRAPHS = ["personal_graph", "property_graph", "decision_graph"]
 
@@ -39,13 +50,21 @@ def _conn():
 
 
 def _embed(text: str) -> list[float]:
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text[:512]},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["embedding"]
+    """Call the inference engine embeddings endpoint with retry on 5xx errors."""
+    last_exc: Exception | None = None
+    for attempt in range(EMBED_RETRIES):
+        if attempt:
+            time.sleep(EMBED_DELAY_SECS * 2 ** attempt)  # back off on retry
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/embeddings",
+            json={"model": EMBED_MODEL, "prompt": text[:512]},
+            timeout=30,
+        )
+        if resp.status_code < 500:
+            resp.raise_for_status()
+            return resp.json()["embedding"]
+        last_exc = Exception(f"{resp.status_code} {resp.reason} for url: {resp.url}")
+    raise last_exc  # type: ignore[misc]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -115,10 +134,12 @@ def link_graph(graph: str, conn) -> dict:
                 print(f"[linker]   ALIAS_OF ({score:.2f}): {a!r} ↔ {b!r}")
 
     # ── Pass 2: embedding similarity (SIMILAR_TO) ────────────────────────────
+    # Serialised with delay — inference engine cannot handle rapid concurrent embed requests
     embeddings = {}
     for name in names:
         try:
             embeddings[name] = _embed(name)
+            time.sleep(EMBED_DELAY_SECS)
         except Exception as e:
             print(f"[linker]   embed failed for {name!r}: {e}")
 

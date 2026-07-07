@@ -7,6 +7,8 @@ import openvino_genai as ov_genai
 from pathlib import Path
 from transformers import AutoTokenizer
 
+import threading
+
 REGISTRY_PATH = Path(__file__).parent.parent / "models.yaml"
 _generate_pipelines: dict = {}
 _embed_models: dict = {}
@@ -15,6 +17,8 @@ _rerank_models: dict = {}
 _rerank_tokenizers: dict = {}
 _whisper_pipelines: dict = {}
 _config: dict = {}
+# Per-model locks — CompiledModel.__call__ is not thread-safe on NPU/GPU
+_model_locks: dict[str, threading.Lock] = {}
 
 
 def load_registry():
@@ -56,6 +60,7 @@ def load_registry():
                 tokenizer = AutoTokenizer.from_pretrained(path)
                 _embed_models[name] = compiled
                 _embed_tokenizers[name] = tokenizer
+                _model_locks[name] = threading.Lock()
                 print(f"[registry] ✓ {name} embedding ready")
 
             elif model_type == "rerank":
@@ -71,6 +76,7 @@ def load_registry():
                 tokenizer = AutoTokenizer.from_pretrained(path)
                 _rerank_models[name] = compiled
                 _rerank_tokenizers[name] = tokenizer
+                _model_locks[name] = threading.Lock()
                 print(f"[registry] ✓ {name} reranker ready")
 
             elif model_type == "whisper":
@@ -146,6 +152,7 @@ def rerank_pairs(model_name: str, query: str, passages: list[str]) -> list[float
     max_len = cfg.get("max_length", 512)
     padding = "max_length" if cfg.get("device") == "NPU" else True
 
+    lock = _model_locks.get(model_name)
     scores = []
     for passage in passages:
         inputs = tokenizer(
@@ -155,7 +162,10 @@ def rerank_pairs(model_name: str, query: str, passages: list[str]) -> list[float
             truncation=True,
             max_length=max_len,
         )
-        result = model(dict(inputs))
+        model_keys = {inp.any_name for inp in model.inputs}
+        filtered = {k: v for k, v in dict(inputs).items() if k in model_keys}
+        with lock or threading.Lock():
+            result = model(filtered)
         # ms-marco models output logits shape [1, 1] — raw relevance score
         logit = float(list(result.values())[0].flat[0])
         scores.append(logit)
@@ -171,7 +181,11 @@ def embed_text(model_name: str, text: str) -> list[float]:
     # NPU uses static shapes — must pad to exactly max_len
     padding = "max_length" if cfg.get("device") == "NPU" else True
     inputs = tokenizer(text, return_tensors="np", padding=padding, truncation=True, max_length=max_len)
-    result = model(dict(inputs))
+    model_keys = {inp.any_name for inp in model.inputs}
+    filtered = {k: v for k, v in dict(inputs).items() if k in model_keys}
+    lock = _model_locks.get(model_name)
+    with lock or threading.Lock():
+        result = model(filtered)
     vec = list(result.values())[0][0].mean(axis=0)
     # Normalize
     norm = np.linalg.norm(vec)

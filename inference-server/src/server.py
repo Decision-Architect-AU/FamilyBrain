@@ -156,6 +156,11 @@ def embeddings(req: EmbedRequest):
         return {"embedding": vec}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        import traceback
+        msg = traceback.format_exc()
+        print(f"[embeddings] FULL ERROR:\n{msg}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Rerank ────────────────────────────────────────────────────────────────────

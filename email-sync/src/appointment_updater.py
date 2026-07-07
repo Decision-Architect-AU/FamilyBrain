@@ -243,11 +243,11 @@ def _cal_service(gmail_account: dict):
     return build("calendar", "v3", credentials=creds)
 
 
-def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: list[dict]) -> None:
+def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: list[dict]) -> bool:
     """
     Patch the original Outlook calendar event with the enriched title + description.
     Looks up the Outlook provider_id from calendar_sync_map, then calls PATCH via Graph API.
-    Silently skips if no Outlook source event found.
+    Returns True if the patch succeeded, False if the event no longer exists or had no source.
     """
     try:
         from .outlook import _headers, GRAPH_BASE
@@ -264,10 +264,10 @@ def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: 
                 )
                 row = c.cursor().fetchone() if False else cur.fetchone()
         if not row:
-            return
+            return False
         acct = next((a for a in outlook_accounts if a["id"] == row["account_id"]), None)
         if not acct:
-            return
+            return False
         provider_id = row["source_provider_id"]
         body = {
             "subject": title,
@@ -279,20 +279,26 @@ def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: 
             json=body,
             timeout=15,
         )
+        if resp.status_code == 404:
+            return False  # original event deleted — caller should create a mirror instead
         if not resp.ok:
             print(f"[appt] outlook patch failed for event {ev_id}: {resp.status_code}")
+        return resp.ok
     except Exception as e:
         print(f"[appt] outlook source patch error for event {ev_id}: {e}")
+        return False
 
 
-def _write_outlook(outlook_acct: dict, ev: dict) -> str | None:
+def _write_outlook(outlook_acct: dict, ev: dict, outlook_ac=None, route: str = "default") -> str | None:
     """
     Create an event in the Outlook calendar via Microsoft Graph. Returns the Outlook event id.
-    Used to mirror GCal-written events to Outlook so the user sees them in both calendars.
+    Routes to the appropriate Outlook calendar (Family, Bills, or default) using the same
+    routing logic as GCal — both accounts are peers driven by the same channel rules.
     """
     from datetime import date as date_type
     try:
         from .outlook import _headers, GRAPH_BASE
+        from .calendar_router import target_calendar_id
         import requests as req
 
         starts = ev["starts_at"]
@@ -311,8 +317,13 @@ def _write_outlook(outlook_acct: dict, ev: dict) -> str | None:
             "start": _fmt(starts),
             "end":   _fmt(ends),
         }
+
+        cal_id = target_calendar_id(outlook_ac, route) if outlook_ac else None
+        url = (f"{GRAPH_BASE}/me/calendars/{cal_id}/events" if cal_id and cal_id != "primary"
+               else f"{GRAPH_BASE}/me/events")
+
         resp = req.post(
-            f"{GRAPH_BASE}/me/events",
+            url,
             headers={**_headers(outlook_acct), "Content-Type": "application/json"},
             json=body,
             timeout=20,
@@ -371,22 +382,179 @@ def _effective_end(starts, ends) -> datetime:
     return effective
 
 
+def _stable_gcal_id(event_id: int) -> str:
+    """Deterministic GCal event ID from DB row ID.
+    GCal requires base32hex chars [a-v0-9], 5–1024 chars long.
+    Hex is a valid subset of base32hex."""
+    return f"fb{event_id:012x}"
+
+
+_EVENT_TYPE_CATEGORY = {
+    "SCHOOL_DAY":           "SchoolRoutine",
+    "school":               "SchoolRoutine",
+    "school_activity":      "SchoolActivity",
+    "THERAPY_SESSION":      "Therapy",
+    "medical":              "MedicalAppointment",
+    "MEDICATION_REFILL":    "Medication",
+    "MEDICATION_SCRIPT":    "Medication",
+    "PICKUP":               "Routine",
+    "AFTERCARE":            "Routine",
+    "RENT_PAYMENT":         "Property",
+    "RENT_REVIEW":          "Property",
+    "RENEWAL":              "Renewal",
+    "INSURANCE_RENEWAL":    "Renewal",
+    "SUBSCRIPTION_RENEWAL": "Renewal",
+    "bill":                 "Bill",
+    "family":               "Family",
+    "manual":               "Manual",
+}
+
+_SOURCE_CATEGORY = {
+    "asset_rules":      "AssetRule",
+    "manual":           "Manual",
+    "email_decomposer": "ExtractedFromEmail",
+}
+
+_KNOWN_PEOPLE = ["Olivia", "Elliana", "Shannon", "Glenn"]
+
+
+def _gcal_tag(ev: dict, title: str) -> str:
+    """Build a #familybrain/{person}/{category} tag for GCal descriptions."""
+    # Person — from title keyword match
+    person = "Family"
+    title_lower = title.lower()
+    for name in _KNOWN_PEOPLE:
+        if name.lower() in title_lower:
+            person = name
+            break
+
+    # Category — event_type takes priority, then calendar_source
+    event_type = (ev.get("event_type") or "").strip()
+    source = (ev.get("calendar_source") or "").split(":")[0]
+    category = (
+        _EVENT_TYPE_CATEGORY.get(event_type)
+        or _SOURCE_CATEGORY.get(source)
+        or "Appointment"
+    )
+
+    return f"#familybrain/{person}/{category}"
+
+
+def _build_gcal_description(ev: dict, title: str, notes: str, writer: str = "appointment_updater") -> str:
+    """Combine notes with FamilyBrain management tags."""
+    from datetime import timezone
+    category_tag = _gcal_tag(ev, title)
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    updated_tag = f"#familybrain/updated/{updated_at}/{writer}"
+    tags = f"{category_tag}\n{updated_tag}"
+    if notes:
+        return f"{notes}\n\n{tags}"
+    return tags
+
+
+_FB_TAG_RE    = re.compile(r"#familybrain/([^/\s]+)/([^/\s]+)")
+_FB_UPDATE_RE = re.compile(r"#familybrain/updated/([^/\s]+)/([^/\s]+)")
+_STALE_AFTER  = timedelta(hours=1)   # replace orphan FB events older than this
+
+
+def _parse_fb_tags(description: str) -> tuple[str | None, str | None, datetime | None, str | None]:
+    """Return (person, category, updated_at, writer) from a GCal description, or Nones."""
+    person = category = updated_at = writer = None
+    m = _FB_TAG_RE.search(description or "")
+    if m:
+        person, category = m.group(1), m.group(2)
+    m2 = _FB_UPDATE_RE.search(description or "")
+    if m2:
+        try:
+            from datetime import timezone
+            updated_at = datetime.fromisoformat(m2.group(1).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        writer = m2.group(2)
+    return person, category, updated_at, writer
+
+
+def _find_orphan_fb_event(cal_svc, cal_id: str, ev: dict, title: str,
+                          starts: datetime, ends: datetime) -> str | None:
+    """Search GCal for an existing FamilyBrain event for the same person+category+slot.
+
+    Returns the GCal event ID if a stale orphan is found (no stable DB-backed ID
+    already assigned), so the caller can patch it instead of inserting a duplicate.
+    Returns None if no orphan found or the existing event is recent enough to skip.
+    """
+    from datetime import timezone
+    our_person   = _gcal_tag(ev, title).split("/")[1]
+    our_category = _gcal_tag(ev, title).split("/")[2]
+    stable_id    = _stable_gcal_id(ev["id"]) if ev.get("id") else None
+
+    try:
+        results = cal_svc.events().list(
+            calendarId=cal_id,
+            timeMin=starts.isoformat() if starts.tzinfo else starts.isoformat() + "Z",
+            timeMax=ends.isoformat()   if ends.tzinfo   else ends.isoformat()   + "Z",
+            singleEvents=True,
+        ).execute()
+    except Exception:
+        return None
+
+    now = datetime.now(timezone.utc)
+    for item in results.get("items", []):
+        gid = item.get("id", "")
+        # Skip our own stable ID — that's handled by the 409 path
+        if gid == stable_id:
+            continue
+        person, category, updated_at, _ = _parse_fb_tags(item.get("description") or "")
+        if person != our_person or category != our_category:
+            continue
+        # Same routine slot — is it stale enough to replace?
+        if updated_at is None or (now - updated_at) > _STALE_AFTER:
+            return gid
+
+    return None
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
-    """Insert event, return gcal event id."""
+    """Upsert event into GCal, return gcal event id.
+
+    Uses a stable ID derived from the DB event ID so repeated calls are
+    idempotent — no duplicate events even if the loop fires multiple times.
+    Before inserting, checks for an orphan FamilyBrain event for the same
+    person+category+slot and patches it instead of creating a duplicate.
+    Events without a DB ID (e.g. holiday day expansions) fall back to insert.
+    """
     starts = ev["starts_at"]
     ends   = _effective_end(starts, ev.get("ends_at"))
+    ev_id  = ev.get("id")
+    title  = ev["title"]
 
     body = {
-        "summary":     ev["title"],
-        "description": ev.get("notes") or "",
+        "summary":     title,
+        "description": _build_gcal_description(ev, title, ev.get("notes") or ""),
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
     if color_id:
         body["colorId"] = color_id
 
-    result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
-    return result["id"]
+    if ev_id:
+        stable_id = _stable_gcal_id(ev_id)
+        body["id"] = stable_id
+        try:
+            result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
+            return result["id"]
+        except Exception as e:
+            if "409" in str(e) or "conflict" in str(e).lower():
+                cal_svc.events().patch(calendarId=cal_id, eventId=stable_id, body=body).execute()
+                return stable_id
+            raise
+    else:
+        # No DB backing — check for orphan before inserting
+        orphan_id = _find_orphan_fb_event(cal_svc, cal_id, ev, title, starts, ends)
+        if orphan_id:
+            cal_svc.events().patch(calendarId=cal_id, eventId=orphan_id, body=body).execute()
+            return orphan_id
+        result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
+        return result["id"]
 
 
 def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
@@ -395,9 +563,10 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
     starts = ev["starts_at"]
     ends   = _effective_end(starts, ev.get("ends_at"))
 
+    title = ev["title"]
     body = {
-        "summary":     ev["title"],
-        "description": ev.get("notes") or "",
+        "summary":     title,
+        "description": _build_gcal_description(ev, title, ev.get("notes") or ""),
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
@@ -513,7 +682,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     OR updated_at > calendar_written_at
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
-                AND status NOT IN ('cancelled', 'superseded')
+                AND status NOT IN ('cancelled', 'superseded', 'ingested')
                 AND calendar_source NOT LIKE 'gmail:%%'    -- skip events already in GCal source
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
@@ -636,13 +805,15 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     )
                 wconn.commit()
 
-            # Write enriched title+notes back to the original Outlook event (if sourced from Outlook)
+            # Write enriched title+notes back to the original Outlook event (if sourced from Outlook).
+            # If the original is gone (404), fall through to create a mirror like any other event.
+            source_patched = False
             if ev.get("calendar_source", "").startswith("outlook:"):
                 outlook_accounts = [a for a in accounts if a["provider"] == "outlook"]
-                _patch_outlook_source(ev_id, title, notes, outlook_accounts)
+                source_patched = _patch_outlook_source(ev_id, title, notes, outlook_accounts)
 
-            # Mirror to Outlook for non-Outlook-sourced events (decomposed emails, calendar imports)
-            elif outlook_acct and not ev.get("calendar_source", "").startswith("outlook:"):
+            # Mirror to Outlook: non-Outlook-sourced events, or Outlook-sourced whose original is gone
+            if outlook_acct and not source_patched:
                 try:
                     with psycopg2.connect(DB_URL,
                                           cursor_factory=psycopg2.extras.RealDictCursor) as _c:
@@ -654,11 +825,13 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                             )
                             _row = _cur.fetchone()
                     existing_ol_id = _row["mirror_provider_id"] if _row else None
+                    outlook_ac = routing.get(outlook_acct["id"])
                     if existing_ol_id:
                         _patch_outlook_mirror(outlook_acct, existing_ol_id,
                                               {**ev, "title": title, "notes": notes})
                     else:
-                        ol_id = _write_outlook(outlook_acct, {**ev, "title": title, "notes": notes})
+                        ol_id = _write_outlook(outlook_acct, {**ev, "title": title, "notes": notes},
+                                               outlook_ac=outlook_ac, route=route)
                         if ol_id:
                             from .db import upsert_sync_map
                             # Key must match what outlook.py looks up: "outlook:{email}:{ol_id}"

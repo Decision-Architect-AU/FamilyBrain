@@ -465,6 +465,17 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               gcal_calendar_id        = NULL,
               updated_at              = now()
             WHERE personal.event.status IN ('generated', 'superseded')
+              AND NOT EXISTS (
+                SELECT 1 FROM personal.event conf
+                WHERE conf.provenance = 'email'
+                  AND conf.status = 'confirmed'
+                  AND conf.effective_date = EXCLUDED.effective_date
+                  AND (
+                    lower(conf.title) = lower(EXCLUDED.title)
+                    OR lower(conf.title) LIKE '%%' || lower(EXCLUDED.title) || '%%'
+                    OR lower(EXCLUDED.title) LIKE '%%' || lower(conf.title) || '%%'
+                  )
+              )
         """, (
             title, event_type, starts_at, ends_at, target_date,
             asset_id, person_id,
@@ -834,6 +845,93 @@ def task_detect_conflicts() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Reconcile ingested events
+# ---------------------------------------------------------------------------
+
+def task_reconcile_ingested() -> dict:
+    """
+    Post-conflict sweep: resolve ingested events to their final status in DB.
+
+    For each ingested event:
+    - If it is the suggested_keep winner of an unresolved conflict → promote to
+      'scheduled' and mark the loser 'superseded'. The event organiser then
+      picks it up and sends to channel.
+    - If it is the losing side of a conflict → mark 'superseded'.
+    - If it has no conflict (no slot clash detected) → promote to 'scheduled'
+      so appointment_updater can write it to the calendar.
+
+    appointment_updater excludes 'ingested' events so nothing hits GCal until
+    this step has run and made a decision.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    promoted = superseded = 0
+
+    try:
+        with conn.cursor() as cur:
+            # Fetch all ingested events
+            cur.execute("""
+                SELECT id FROM personal.event WHERE status = 'ingested'
+            """)
+            ingested_ids = [r["id"] for r in cur.fetchall()]
+
+        for ev_id in ingested_ids:
+            with conn.cursor() as cur:
+                # Find any unresolved conflict involving this event
+                cur.execute("""
+                    SELECT id, event_a_id, event_b_id, suggested_keep
+                    FROM personal.conflict
+                    WHERE (event_a_id = %s OR event_b_id = %s)
+                      AND resolved_at IS NULL
+                    ORDER BY id
+                    LIMIT 1
+                """, (ev_id, ev_id))
+                conflict = cur.fetchone()
+
+            if conflict is None:
+                # No conflict — promote cleanly
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.event SET status = 'scheduled' WHERE id = %s AND status = 'ingested'",
+                        (ev_id,)
+                    )
+                if cur.rowcount:
+                    promoted += 1
+            elif conflict["suggested_keep"] == ev_id:
+                # This event wins — promote it, supersede the loser
+                loser_id = conflict["event_b_id"] if conflict["event_a_id"] == ev_id else conflict["event_a_id"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.event SET status = 'scheduled' WHERE id = %s AND status = 'ingested'",
+                        (ev_id,)
+                    )
+                    cur.execute(
+                        "UPDATE personal.event SET status = 'superseded', superseded_by_event_id = %s WHERE id = %s AND status NOT IN ('cancelled','superseded')",
+                        (ev_id, loser_id)
+                    )
+                    cur.execute(
+                        "UPDATE personal.conflict SET resolved_at = now(), resolution = 'auto_winner' WHERE id = %s",
+                        (conflict["id"],)
+                    )
+                promoted += 1
+            else:
+                # This event loses — supersede it
+                winner_id = conflict["suggested_keep"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.event SET status = 'superseded', superseded_by_event_id = %s WHERE id = %s AND status = 'ingested'",
+                        (winner_id, ev_id)
+                    )
+                superseded += 1
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {"ingested_promoted": promoted, "ingested_superseded": superseded}
+
+
+# ---------------------------------------------------------------------------
 # Appointment digest
 # ---------------------------------------------------------------------------
 
@@ -1011,7 +1109,7 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     all_tasks = tasks or [
         "re_embed", "link", "dedup", "prune",
-        "generate_events", "detect_conflicts",
+        "generate_events", "detect_conflicts", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
     ]
@@ -1025,8 +1123,18 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         print(f"[maintenance] re_embed done: {results['re_embed']}")
 
     if "link" in all_tasks:
-        results["link"] = task_link()
-        print(f"[maintenance] link done: {results['link']}")
+        # Linker is O(n²) across all concepts — throttle to once per hour max.
+        _LINK_INTERVAL = int(os.environ.get("LINK_INTERVAL_SECS", "86400"))
+        _link_flag = "/tmp/last_link_run"
+        import pathlib, time as _time
+        _last = float(pathlib.Path(_link_flag).read_text()) if pathlib.Path(_link_flag).exists() else 0
+        if _time.time() - _last >= _LINK_INTERVAL:
+            results["link"] = task_link()
+            pathlib.Path(_link_flag).write_text(str(_time.time()))
+            print(f"[maintenance] link done: {results['link']}")
+        else:
+            results["link"] = {"skipped": "throttled"}
+            print(f"[maintenance] link skipped (throttled, next in {int(_LINK_INTERVAL - (_time.time() - _last))}s)")
 
     if "dedup" in all_tasks or "prune" in all_tasks:
         conn = _conn()
@@ -1057,6 +1165,10 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     if "detect_conflicts" in all_tasks:
         results["detect_conflicts"] = task_detect_conflicts()
         print(f"[maintenance] detect_conflicts done: {results['detect_conflicts']}")
+
+    if "reconcile_ingested" in all_tasks:
+        results["reconcile_ingested"] = task_reconcile_ingested()
+        print(f"[maintenance] reconcile_ingested done: {results['reconcile_ingested']}")
 
     if "asset_graph_sync" in all_tasks:
         results["asset_graph_sync"] = task_asset_graph_sync()
