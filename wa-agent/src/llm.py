@@ -3,7 +3,7 @@ import os
 import requests
 
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 

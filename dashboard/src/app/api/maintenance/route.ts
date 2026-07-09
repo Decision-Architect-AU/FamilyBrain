@@ -37,6 +37,11 @@ const TASK_META: Record<string, { label: string; description: string; frequency:
     description: 'Scan upcoming events for scheduling conflicts and overlapping appointments.',
     frequency: 'Every 5 min',
   },
+  detect_provider_gaps: {
+    label: 'Detect provider gaps',
+    description: 'Sweep provider availability against routine assignments. Writes an UNRESOLVED GAP row for every routine whose provider is unavailable with no confirmed substitute — e.g. Nanna on holiday for 4 weeks.',
+    frequency: 'Every 5 min',
+  },
   refresh_asset_notes: {
     label: 'Refresh asset notes',
     description: 'Rewrite structured prose summaries back to asset.notes so the knowledge graph stays current.',
@@ -60,6 +65,11 @@ const TASK_META: Record<string, { label: string; description: string; frequency:
   appointment_digest: {
     label: 'Appointment digest',
     description: 'Pre-compute appointment summaries for common time windows (today, this week, next week) to speed up WhatsApp responses.',
+    frequency: 'Every 5 min',
+  },
+  routine_context_pack: {
+    label: 'Routine context packs',
+    description: 'Assemble tier-1 context packs for all active routines — baseline + deviations (provider gaps, partial subjects, suppressions, collisions) over the next 21 days.',
     frequency: 'Every 5 min',
   },
 };

@@ -14,7 +14,7 @@ from src import db
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
-EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "qwen2.5:14b")
+EXTRACT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("EXTRACT_MODEL", "qwen2.5:14b"))
 
 GRAPH_SCHEMA_CONTEXT = """
 You are a knowledge graph extraction assistant for a family administration system.

@@ -38,11 +38,12 @@ from .gmail import _gmail_service, _fmt_cal_dt
 from .calendar_router import (
     classify_event, target_calendar_id, tag_family_event,
     expand_holiday_days, load_routing, _TAG_COLORS,
+    partner_event_involves_owner,
 )
 
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 _BATCH      = 50
 
 _PARTNER_NAMES = [n.strip().lower() for n in os.environ.get("PARTNER_NAMES", "").split(",") if n.strip()]
@@ -311,9 +312,12 @@ def _write_outlook(outlook_acct: dict, ev: dict, outlook_ac=None, route: str = "
                 return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
             return {"dateTime": str(dt), "timeZone": "Australia/Brisbane"}
 
+        fb_id        = _tracking_id(ev)
+        outlook_body = _outlook_body_with_tag(ev.get("notes") or "", fb_id) if fb_id else (ev.get("notes") or "")
+
         body = {
             "subject": ev["title"],
-            "body": {"contentType": "text", "content": ev.get("notes") or ""},
+            "body": {"contentType": "html", "content": outlook_body},
             "start": _fmt(starts),
             "end":   _fmt(ends),
         }
@@ -353,9 +357,12 @@ def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -
                 return {"dateTime": dt.isoformat(), "timeZone": "Australia/Brisbane"}
             return {"dateTime": str(dt), "timeZone": "Australia/Brisbane"}
 
+        fb_id        = _tracking_id(ev)
+        outlook_body = _outlook_body_with_tag(ev.get("notes") or "", fb_id) if fb_id else (ev.get("notes") or "")
+
         body = {
             "subject": ev["title"],
-            "body": {"contentType": "text", "content": ev.get("notes") or ""},
+            "body": {"contentType": "html", "content": outlook_body},
             "start": _fmt(starts),
             "end":   _fmt(ends),
         }
@@ -365,10 +372,13 @@ def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -
             json=body,
             timeout=20,
         )
+        if resp.status_code == 404:
+            return "NOT_FOUND"
         if not resp.ok:
             print(f"[appt] outlook mirror patch failed: {resp.status_code}")
     except Exception as e:
         print(f"[appt] outlook mirror patch error: {e}")
+    return None
 
 
 def _effective_end(starts, ends) -> datetime:
@@ -387,6 +397,73 @@ def _stable_gcal_id(event_id: int) -> str:
     GCal requires base32hex chars [a-v0-9], 5–1024 chars long.
     Hex is a valid subset of base32hex."""
     return f"fb{event_id:012x}"
+
+
+# ── FamilyBrain tracking ID ────────────────────────────────────────────────────
+# Format:
+#   Routine occurrence : r{gen_asset_id}/{YYYYMMDD}        e.g. r65/20260716
+#   Routine sub-event  : r{gen_asset_id}/{YYYYMMDD}-{suf}  e.g. r65/20260716-a
+#   Standalone event   : e{event_id}                       e.g. e550
+#   Linked sub-event   : e{parent_id}-{suf}                e.g. e550-a
+#
+# GCal  → stored in extendedProperties.private.fb_id (invisible to users)
+# Outlook → stored as an HTML comment in the body (invisible in rendered view)
+# Debug mode (FB_TAG_DEBUG=true) → also appended visibly to description on both
+
+_FB_TAG_DEBUG = os.environ.get("FB_TAG_DEBUG", "").lower() in ("1", "true", "yes")
+
+
+def _tracking_id(ev: dict, suffix: str = "") -> str:
+    """Build the structured tracking ID for this event."""
+    from datetime import date as date_type
+    suf = f"-{suffix}" if suffix else ""
+    gen_asset = ev.get("gen_asset_id")
+    starts    = ev.get("starts_at") or ev.get("effective_date")
+    if gen_asset and starts:
+        d = starts.date() if isinstance(starts, datetime) else starts
+        if isinstance(d, date_type):
+            return f"r{gen_asset}/{d.strftime('%Y%m%d')}{suf}"
+    ev_id = ev.get("id")
+    if ev_id:
+        return f"e{ev_id}{suf}"
+    return ""
+
+
+def _tracking_id_from_parent(parent_event_id: int, suffix: str = "a") -> str:
+    return f"e{parent_event_id}-{suffix}"
+
+
+_FB_ID_COMMENT_RE = re.compile(r"<!--fb:([^->\s]+)-->")
+
+
+def _outlook_body_with_tag(notes: str, fb_id: str) -> str:
+    """Embed tracking ID as an invisible HTML comment in Outlook body.
+    If debug mode is on, also append a visible line."""
+    comment = f"<!--fb:{fb_id}-->"
+    base    = notes or ""
+    # Replace existing tag if present, otherwise append
+    if _FB_ID_COMMENT_RE.search(base):
+        base = _FB_ID_COMMENT_RE.sub(comment, base)
+    else:
+        base = f"{base}\n{comment}".lstrip("\n")
+    if _FB_TAG_DEBUG:
+        # Remove any previous debug line then re-append
+        base = re.sub(r"\n?\[fb:[^\]]+\]\s*$", "", base)
+        base = f"{base}\n[fb:{fb_id}]"
+    return base
+
+
+def _gcal_extended_props(fb_id: str) -> dict:
+    """Return extendedProperties block for a GCal event body."""
+    return {"extendedProperties": {"private": {"fb_id": fb_id}}}
+
+
+def _gcal_description_with_debug(description: str, fb_id: str) -> str:
+    """In debug mode, append the visible [fb:...] tag to a GCal description."""
+    if not _FB_TAG_DEBUG:
+        return description
+    base = re.sub(r"\n?\[fb:[^\]]+\]\s*$", "", description or "")
+    return f"{base}\n[fb:{fb_id}]"
 
 
 _EVENT_TYPE_CATEGORY = {
@@ -526,13 +603,20 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
     ends   = _effective_end(starts, ev.get("ends_at"))
     ev_id  = ev.get("id")
     title  = ev["title"]
+    fb_id  = _tracking_id(ev)
+
+    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    if fb_id:
+        description = _gcal_description_with_debug(description, fb_id)
 
     body = {
         "summary":     title,
-        "description": _build_gcal_description(ev, title, ev.get("notes") or ""),
+        "description": description,
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
+    if fb_id:
+        body.update(_gcal_extended_props(fb_id))
     if color_id:
         body["colorId"] = color_id
 
@@ -544,9 +628,18 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
             return result["id"]
         except Exception as e:
             if "409" in str(e) or "conflict" in str(e).lower():
-                cal_svc.events().patch(calendarId=cal_id, eventId=stable_id, body=body).execute()
-                return stable_id
-            raise
+                try:
+                    cal_svc.events().patch(calendarId=cal_id, eventId=stable_id, body=body).execute()
+                    return stable_id
+                except Exception:
+                    pass  # fall through to fresh insert below
+            status = getattr(getattr(e, "resp", None), "status", None)
+            if status not in (403, 404, 409):
+                raise
+            # ID reserved in trash — insert fresh without custom ID
+            body.pop("id", None)
+            result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
+            return result["id"]
     else:
         # No DB backing — check for orphan before inserting
         orphan_id = _find_orphan_fb_event(cal_svc, cal_id, ev, title, starts, ends)
@@ -562,18 +655,36 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
     """Patch an existing GCal event."""
     starts = ev["starts_at"]
     ends   = _effective_end(starts, ev.get("ends_at"))
+    title  = ev["title"]
+    fb_id  = _tracking_id(ev)
 
-    title = ev["title"]
+    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    if fb_id:
+        description = _gcal_description_with_debug(description, fb_id)
+
     body = {
         "summary":     title,
-        "description": _build_gcal_description(ev, title, ev.get("notes") or ""),
+        "description": description,
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
+    if fb_id:
+        body.update(_gcal_extended_props(fb_id))
     if color_id:
         body["colorId"] = color_id
 
-    cal_svc.events().patch(calendarId=cal_id, eventId=gcal_id, body=body).execute()
+    try:
+        cal_svc.events().patch(calendarId=cal_id, eventId=gcal_id, body=body).execute()
+        return gcal_id
+    except Exception as e:
+        status = getattr(getattr(e, "resp", None), "status", None)
+        if status in (403, 404, 410):
+            # Event was deleted from GCal — re-create it with a new ID
+            body.pop("id", None)
+            result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
+            return result["id"]
+        else:
+            raise
 
 
 # ── next_update_at rules ──────────────────────────────────────────────────────
@@ -684,6 +795,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 )
                 AND status NOT IN ('cancelled', 'superseded', 'ingested')
                 AND calendar_source NOT LIKE 'gmail:%%'    -- skip events already in GCal source
+                AND starts_at >= now() - INTERVAL '1 hour'  -- skip past events
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
                 """,
@@ -747,7 +859,13 @@ def run_appointment_updater(accounts: list[dict]) -> int:
         title, notes = _try_enrich(title, notes, ev["starts_at"])
 
         try:
-            route    = classify_event(title, notes)
+            # Detect partner-sourced events — route to Family cal by default
+            ev_source      = ev.get("calendar_source") or ""
+            source_is_partner = (
+                partner_acct is not None
+                and ev_source.startswith(f"gmail:{partner_acct['email_address']}")
+            )
+            route    = classify_event(title, notes, source_is_partner=source_is_partner)
             cal_id   = target_calendar_id(ac, route)
             tag, color_id = tag_family_event(title, notes) if route == "family" else (None, None)
 
@@ -755,8 +873,8 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             stored_cal = ev.get("gcal_calendar_id")
 
             if gcal_id and stored_cal == cal_id:
-                # Already in the right calendar — patch
-                _patch_gcal(cal_svc, cal_id, gcal_id, ev, color_id=color_id)
+                # Already in the right calendar — patch (returns new id if re-created)
+                gcal_id = _patch_gcal(cal_svc, cal_id, gcal_id, ev, color_id=color_id)
             elif gcal_id and stored_cal and stored_cal != cal_id:
                 # Rerouted to a different calendar — delete old, insert new
                 try:
@@ -827,9 +945,11 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     existing_ol_id = _row["mirror_provider_id"] if _row else None
                     outlook_ac = routing.get(outlook_acct["id"])
                     if existing_ol_id:
-                        _patch_outlook_mirror(outlook_acct, existing_ol_id,
-                                              {**ev, "title": title, "notes": notes})
-                    else:
+                        result = _patch_outlook_mirror(outlook_acct, existing_ol_id,
+                                                       {**ev, "title": title, "notes": notes})
+                        if result == "NOT_FOUND":
+                            existing_ol_id = None  # fall through to create below
+                    if not existing_ol_id:
                         ol_id = _write_outlook(outlook_acct, {**ev, "title": title, "notes": notes},
                                                outlook_ac=outlook_ac, route=route)
                         if ol_id:
@@ -845,8 +965,21 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 except Exception as oe:
                     print(f"[appt] outlook mirror error for '{title[:40]}': {oe}")
 
-            # Mirror partner-tagged events to Shannon's calendar
-            if partner_cal_svc and partner_routing and _PARTNER_NAMES:
+            # Partner-sourced event that also involves Glenn → also write to his default cal
+            if source_is_partner and route == "family":
+                attendees = []  # attendee list not stored in personal.event currently
+                if partner_event_involves_owner(title, notes, attendees):
+                    owner_cal_id = ac.default_cal_id
+                    try:
+                        _write_gcal(cal_svc, owner_cal_id, {**ev, "title": title, "notes": notes},
+                                    color_id=color_id)
+                        print(f"[appt] partner event involves owner — also → default cal: '{title[:40]}'")
+                    except Exception as oe:
+                        print(f"[appt] owner-cal mirror failed for '{title[:40]}': {oe}")
+
+            # Mirror Glenn's events that mention Shannon → her calendar
+            # (only for Glenn-sourced events, not Shannon's own events going back to her)
+            if partner_cal_svc and partner_routing and _PARTNER_NAMES and not source_is_partner:
                 title_lower = title.lower()
                 if any(n in title_lower for n in _PARTNER_NAMES):
                     partner_cal_id = target_calendar_id(partner_routing, route)

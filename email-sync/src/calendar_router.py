@@ -95,10 +95,14 @@ def tag_family_event(summary: str, description: str = "") -> tuple[str | None, s
     return None, None
 
 
-def classify_event(summary: str, description: str = "") -> str:
+def classify_event(summary: str, description: str = "", source_is_partner: bool = False) -> str:
     """
     Returns one of: bills | holiday | family | default
-    Checks summary first, then description for secondary signals.
+
+    When source_is_partner=True (event sourced from the partner's calendar):
+    - Default route is 'family', not 'default' — partner events go to Family cal only
+      unless they are bills or explicitly involve the primary account owner
+    - Pass involves_owner=True (via the caller checking attendees) to override to 'default'
     """
     text = (summary + " " + description).lower()
 
@@ -106,7 +110,31 @@ def classify_event(summary: str, description: str = "") -> str:
         return "bills"
     if any(kw in text for kw in _HOLIDAY_KW) or any(kw in text for kw in _FAMILY_KW):
         return "family"
+    if source_is_partner:
+        return "family"   # partner-only events stay out of Glenn's default cal
     return "default"
+
+
+_OWNER_NAMES = _names_from_env("OWNER_NAMES")  # e.g. "Glenn,glenn" — primary account holder
+
+
+def partner_event_involves_owner(summary: str, description: str, attendees: list[str]) -> bool:
+    """
+    Returns True if a partner-sourced event also involves the primary account owner —
+    in which case it should also appear in the owner's default calendar.
+
+    Checks:
+      - owner's email appears in the attendee list
+      - owner's name appears in the title/description (env: OWNER_NAMES)
+    """
+    owner_email = os.environ.get("OWNER_EMAIL", "")
+    if owner_email and any(owner_email.lower() in a.lower() for a in attendees):
+        return True
+    if _OWNER_NAMES:
+        text = (summary + " " + description).lower()
+        if any(n.lower() in text for n in _OWNER_NAMES):
+            return True
+    return False
 
 
 # ── Routing config (loaded from DB) ──────────────────────────────────────────

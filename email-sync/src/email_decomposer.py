@@ -37,7 +37,7 @@ _MEETING_URL_RE = re.compile(
 
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 INGESTOR_URL = os.environ.get("INGESTOR_URL", "")
 
 _BATCH = 20   # emails per run

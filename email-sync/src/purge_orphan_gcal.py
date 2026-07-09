@@ -75,13 +75,15 @@ def purge_orphans():
             for ev in resp.get("items", []):
                 ev_id = ev["id"]
                 if ev_id not in known_ids:
-                    # Not in our DB — check if it looks like something we'd have pushed
-                    # (skip events created by others / externally sourced)
-                    creator_email = (ev.get("creator") or {}).get("email", "")
-                    self_email = gmail_acct.get("email_address", gmail_acct.get("email", ""))
+                    # Only delete events that FamilyBrain itself wrote — identified by
+                    # either the fb_id extended property OR the #familybrain description tag.
+                    # Never touch events the user created manually, even if we're the creator.
+                    ext_props = ev.get("extendedProperties", {}).get("private", {})
+                    fb_id     = ext_props.get("fb_id", "")
+                    desc      = ev.get("description", "") or ""
+                    is_fb     = bool(fb_id) or "#familybrain" in desc
 
-                    # Only delete events we created (creator = our Gmail account)
-                    if creator_email != self_email:
+                    if not is_fb:
                         continue
 
                     try:

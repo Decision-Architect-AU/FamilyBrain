@@ -18,8 +18,8 @@ import psycopg2.extras
 import ollama
 
 OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-FAST_MODEL      = os.environ.get("CATEGORISE_FAST_MODEL",  "qwen2.5:3b")
-CAREFUL_MODEL   = os.environ.get("CATEGORISE_CAREFUL_MODEL", "qwen2.5:3b")
+FAST_MODEL    = os.environ.get("MODEL_PARSER_1ST", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b"))
+CAREFUL_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("CATEGORISE_CAREFUL_MODEL", "qwen2.5:3b"))
 DB_URL          = os.environ.get("DATABASE_URL")
 
 CATEGORIES = [

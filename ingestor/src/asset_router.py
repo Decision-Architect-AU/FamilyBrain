@@ -20,7 +20,7 @@ from .asset_writer import upsert_asset
 from .rule_watcher import trigger_rules_for_asset
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-AGENT_MODEL  = os.environ.get("EXTRACT_MODEL_QUICK", os.environ.get("AGENT_MODEL", "qwen2.5:3b"))
+AGENT_MODEL  = os.environ.get("MODEL_PARSER_1ST", os.environ.get("EXTRACT_MODEL_QUICK", os.environ.get("AGENT_MODEL", "qwen2.5:3b")))
 
 _ASSET_DETECT_PROMPT = """You are analysing a personal document to extract structured asset information.
 

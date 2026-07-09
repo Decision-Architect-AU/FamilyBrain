@@ -88,11 +88,14 @@ services:
       DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
       AUDIT_SERVICE_URL: http://audit-logger:4000
       OLLAMA_URL: http://172.23.96.1:11434
-      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:3b}
+      MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
+      MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
-      EXTRACT_MODEL_QUICK:  ${EXTRACT_MODEL_QUICK:-qwen2.5:3b}
-      EXTRACT_MODEL_DEEP:   ${EXTRACT_MODEL_DEEP:-qwen2.5:14b}
-      EXTRACT_MODEL_DEEPER: ${EXTRACT_MODEL_DEEPER:-qwen2.5:32b}
+      EXTRACT_MODEL_QUICK:  ${MODEL_PARSER_1ST:-qwen2.5:3b}
+      EXTRACT_MODEL_DEEP:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      EXTRACT_MODEL_DEEPER: ${MODEL_PARSER_DEEP:-qwen2.5:32b}
       EXTRACT_DEEP_PASS:    ${EXTRACT_DEEP_PASS:-false}
       EXTRACT_DEEPER_PASS:  ${EXTRACT_DEEPER_PASS:-false}
       EXTRACT_CHUNK_DELAY:  ${EXTRACT_CHUNK_DELAY:-2}
@@ -142,7 +145,12 @@ services:
     environment:
       DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
       OLLAMA_URL: http://172.23.96.1:11434
-      AGENT_MODEL: ${WA_AGENT_MODEL:-qwen2.5:14b}
+      MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
+      MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_VOICE: ${MODEL_PARSER_VOICE:-qwen2.5:14b}
+      MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
+      AGENT_MODEL: ${MODEL_PARSER_2ND:-qwen2.5:14b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       INGESTOR_URL: http://ingestor:4001
       WHISPER_URL: http://172.23.96.1:11435
@@ -251,7 +259,11 @@ services:
       DATABASE_URL: postgresql://${AGENTS_DB_USER:-pr_agent}:${AGENTS_DB_PASSWORD:?required}@postgres:5432/openclaw
       AUDIT_SERVICE_URL: http://audit-logger:4000
       OLLAMA_URL: http://172.23.96.1:11434
-      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:32b}
+      MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
+      MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
+      AGENT_MODEL: ${MODEL_PARSER_DEEP:-qwen2.5:32b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       PR_CRON_TIME: ${PR_CRON_TIME:-07:00}
       PR_RUN_ON_START: ${PR_RUN_ON_START:-false}
@@ -325,7 +337,8 @@ services:
       DATABASE_URL: postgresql://${CURATOR_DB_USER:-curator}:${CURATOR_DB_PASSWORD:?required}@postgres:5432/openclaw
       AGE_GRAPH_NAME: ${AGE_GRAPH_NAME:-personal_graph}
       OLLAMA_URL: http://172.23.96.1:11434
-      EXTRACT_MODEL: ${EXTRACT_MODEL:-qwen2.5:14b}
+      MODEL_PARSER_2ND:  ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      EXTRACT_MODEL: ${MODEL_PARSER_2ND:-qwen2.5:14b}
     ports:
       - "4003:4003"
     depends_on:
@@ -395,8 +408,15 @@ services:
       CALENDAR_MIRROR_PARTNER_EMAIL:   ${CALENDAR_MIRROR_PARTNER_EMAIL:-}
 
       # Child keyword lists for calendar routing — comma-separated names/nicknames
-      CHILD1_NAMES: ${CHILD1_NAMES:-}
-      CHILD2_NAMES: ${CHILD2_NAMES:-}
+      CHILD1_NAMES:   ${CHILD1_NAMES:-}
+      CHILD2_NAMES:   ${CHILD2_NAMES:-}
+      PARTNER_NAMES:  ${PARTNER_NAMES:-}
+
+      # Primary account owner — used to detect partner events that also involve Glenn
+      # OWNER_EMAIL must match Glenn's primary Gmail. OWNER_NAMES are first-name variants.
+      OWNER_EMAIL:    ${OWNER_EMAIL:-}
+      OWNER_NAMES:    ${OWNER_NAMES:-}
+      FB_TAG_DEBUG:   ${FB_TAG_DEBUG:-false}
 
       # Poll intervals in seconds (override in .env if needed)
       EMAIL_POLL_INTERVAL_SECS:    ${EMAIL_POLL_INTERVAL_SECS:-300}
@@ -405,7 +425,11 @@ services:
       # Financial document filing
       FINANCIALS_DIR: /financials
       OLLAMA_URL:     http://172.23.96.1:11434
-      AGENT_MODEL:    ${AGENT_MODEL:-qwen2.5:14b}
+      MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
+      MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
+      AGENT_MODEL:    ${MODEL_PARSER_2ND:-qwen2.5:14b}
       GMAIL_INITIAL_DAYS:   ${GMAIL_INITIAL_DAYS:-730}
       OUTLOOK_INITIAL_DAYS: ${OUTLOOK_INITIAL_DAYS:-730}
       PYTHONUNBUFFERED: "1"

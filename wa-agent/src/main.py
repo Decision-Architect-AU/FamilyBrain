@@ -30,6 +30,7 @@ from src.ingest import ingest_text, ingest_voice
 from src.commands import parse as parse_command
 from src.email_sender import compose as compose_email, send as send_email, smtp_configured
 from src.maintenance import run_maintenance
+from src.routine_context_pack import assemble_all_packs, packs_to_text
 from src.feedback import detect_feedback, save_feedback
 from src.persona import build_system_prompt
 
@@ -47,7 +48,36 @@ The knowledge base contains personal notes, family information, property researc
 Default to searching personal information unless the query is clearly about property or business frameworks.
 Be concise — this is a WhatsApp conversation. Aim for 2-5 sentences unless detail is explicitly requested.
 If the knowledge base doesn't contain relevant information, say so honestly rather than guessing.
-Never reveal raw database IDs or internal schema names."""
+Never reveal raw database IDs or internal schema names.
+
+## Routine context packs
+
+When the response includes a ROUTINE CONTEXT PACKS section, use it to brief on family logistics.
+Each pack covers one recurring commitment (school pickups, activities, after-school care).
+The format is:
+
+  BASELINE — what normally happens on a normal week.
+  UPCOMING DIFFERENCES — deviations from the baseline in the next window, deviation-first.
+
+Deviation glyphs:
+  ⚠  PROVIDER UNAVAILABLE — the person who normally runs this has a gap; no substitute confirmed yet.
+      → This needs action. Prompt Glenn to arrange a substitute.
+  ✓  PROVIDER REASSIGNED  — gap exists but a substitute is already confirmed.
+  ◐  SUBJECT PARTIAL      — one or more kids are unavailable but the routine still runs for the rest.
+      → Informational only. Mention it but don't escalate.
+  ✗  SUPPRESSED           — routine does not run (school holiday, all subjects gone).
+      → Informational. No action needed.
+  ⚑  SUBJECT/PROVIDER COLLISION — someone is double-booked.
+      → Flag it. Ask Glenn which commitment takes priority.
+
+Key rules for reasoning about routines:
+- A routine is voided ONLY if ALL subjects are unavailable. If only SOME subjects are gone, it narrows — it still runs for whoever remains.
+- Provider gaps (⚠) are the highest-priority output. Lead with them. Name the routine, the dates, and ask who covers.
+- Do NOT suggest cancelling a routine because the usual provider is away — the provider role is reassignable. The question is always "who covers?" not "does it run?".
+- Standing suppressions (school holidays) are expected. Don't surface them as problems.
+- Confidence values below 70 mean the system is inferring from email or calendar — mention uncertainty if it affects the action ("Nanna mentioned a holiday in an email — worth confirming").
+
+When briefing on the week, lead with ⚠ items, then ⚑, then everything else. Suppress ✗ and ◐ unless Glenn asks for the full picture."""
 
 # Per-sender state
 _history: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_HISTORY * 2))
@@ -288,7 +318,7 @@ async def maintenance(tasks: list[str] | None = Query(default=None)):
     """Trigger nightly maintenance. Runs in background — returns immediately."""
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    effective = tasks or ["re_embed", "link", "dedup", "prune", "generate_events", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest"]
+    effective = tasks or ["re_embed", "link", "dedup", "prune", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack"]
     return {"status": "running", "tasks": effective}
 
 
@@ -395,11 +425,23 @@ async def _handle_upcoming_events(window: str, t0: float) -> QueryResponse:
 
     lines = []
     for r in rows:
-        dt   = r["starts_at"]
+        dt    = r["starts_at"]
         label = dt.strftime("%a %d %b") if hasattr(dt, "strftime") else str(dt)[:10]
         lines.append(f"• {label} — {r['title']}")
 
-    msg = f"📅 *Upcoming ({window.replace('_', ' ')})*\n" + "\n".join(lines)
+    # Attach routine context packs for windows that benefit from deviation awareness
+    tier2 = window in ("today", "tomorrow", "week")
+    routine_section = ""
+    try:
+        conn2 = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        packs = assemble_all_packs(conn=conn2, tier2=tier2)
+        conn2.close()
+        if packs:
+            routine_section = "\n\n---\nROUTINE CONTEXT PACKS\n" + packs_to_text(packs)
+    except Exception as e:
+        print(f"[wa-agent] routine_context_pack assembly failed (non-fatal): {e}")
+
+    msg = f"📅 *Upcoming ({window.replace('_', ' ')})*\n" + "\n".join(lines) + routine_section
     elapsed = int((time.time() - t0) * 1000)
     return QueryResponse(response=msg, graphs_used=["personal_graph"], elapsed_ms=elapsed)
 

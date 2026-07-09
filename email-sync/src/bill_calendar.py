@@ -19,7 +19,7 @@ from googleapiclient.discovery import build
 
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:3b")
+AGENT_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("AGENT_MODEL", "qwen2.5:3b"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

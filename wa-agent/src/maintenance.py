@@ -2,14 +2,17 @@
 Nightly maintenance agent.
 
 Tasks (run in order):
-1. re_embed          — find notes/themes missing embeddings and embed them
-2. link              — run concept linker (ALIAS_OF / SIMILAR_TO edges)
-3. dedup             — merge Concept nodes with identical names
-4. prune             — remove orphan Concept nodes (no edges, no documents)
-5. generate_events   — generate future events from asset rules up to per-rule horizon
-6. refresh_asset_notes — write structured prose summary back to asset.notes
-7. asset_graph_sync  — upsert Asset nodes in AGE, link to Person nodes, prune disposed
-8. appointment_digest — pre-compute appointment summaries for common windows
+1. re_embed               — find notes/themes missing embeddings and embed them
+2. link                   — run concept linker (ALIAS_OF / SIMILAR_TO edges)
+3. dedup                  — merge Concept nodes with identical names
+4. prune                  — remove orphan Concept nodes (no edges, no documents)
+5. generate_events        — generate future events from asset rules up to per-rule horizon
+6. detect_conflicts       — find person-blocking event overlaps
+7. detect_provider_gaps   — flag routines whose provider is unavailable with no substitute
+8. refresh_asset_notes    — write structured prose summary back to asset.notes
+9. asset_graph_sync       — upsert Asset nodes in AGE, link to Person nodes, prune disposed
+10. appointment_digest    — pre-compute appointment summaries for common windows
+11. routine_context_pack  — assemble tier-1 context packs for all active routines
 
 Triggered via POST /maintenance or the nightly cron.
 """
@@ -24,6 +27,7 @@ from datetime import datetime, date, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 
 from src.linker import run_linker, _conn, _embed, _cypher, GRAPHS
+from src.routine_context_pack import assemble_all_packs
 
 DB_URL     = os.environ.get("DATABASE_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
@@ -845,6 +849,196 @@ def task_detect_conflicts() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Provider gap detector
+# ---------------------------------------------------------------------------
+
+_AWAY_KEYWORDS = re.compile(
+    r'\b(holiday|holidays|away|trip|travel|travelling|vacation|leave|overseas|'
+    r'interstate|cruise|camp|camping|visiting|visit)\b',
+    re.I,
+)
+
+
+def _sync_calendar_hints_to_availability(conn) -> int:
+    """
+    Scan calendar events that name known providers and look like away/travel events.
+    For each match, upsert an asset_availability row (source='calendar', conf=70)
+    and mark the hint processed.
+
+    Returns count of new availability rows created.
+    """
+    with conn.cursor() as cur:
+        # Load provider persons who are in event_participant
+        cur.execute("""
+            SELECT DISTINCT p.id, lower(split_part(p.name, ' ', 1)) AS first_name, p.name
+            FROM personal.person p
+            JOIN personal.event_participant ep ON ep.person_id = p.id
+            WHERE ep.role = 'provider'
+        """)
+        providers = cur.fetchall()
+
+    if not providers:
+        return 0
+
+    # Build a pattern that matches any provider first name in the event title/notes
+    name_pattern = re.compile(
+        r'\b(' + '|'.join(re.escape(p["first_name"]) for p in providers) + r')\b',
+        re.I,
+    )
+    name_to_person = {p["first_name"]: p["id"] for p in providers}
+
+    # Also match by full name (e.g. "Meg and Ray holiday")
+    full_name_pattern = re.compile(
+        r'\b(' + '|'.join(re.escape(p["name"].lower()) for p in providers) + r')\b',
+        re.I,
+    )
+    full_name_to_person = {p["name"].lower(): p["id"] for p in providers}
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.id, e.title, e.notes, e.starts_at::date AS start_date,
+                   COALESCE(e.ends_at::date, e.starts_at::date) AS end_date
+            FROM personal.event e
+            WHERE e.status NOT IN ('superseded','deleted','cancelled')
+              AND e.ends_at IS NOT NULL
+              AND (e.ends_at::date - e.starts_at::date) >= 1
+              AND e.starts_at::date >= CURRENT_DATE - 1
+              AND (
+                  e.event_type ILIKE '%holiday%'
+               OR e.event_type ILIKE '%travel%'
+               OR e.event_type ILIKE '%away%'
+               OR e.event_type ILIKE '%leave%'
+               OR (e.title IS NOT NULL AND e.title ~* '(holiday|away|trip|travel|vacation|leave|overseas|interstate|cruise)')
+               OR (e.notes IS NOT NULL AND e.notes ~* '(holiday|away|trip|travel|vacation|leave|overseas|interstate|cruise)')
+              )
+        """)
+        events = cur.fetchall()
+
+    created = 0
+    for ev in events:
+        text = f"{ev['title'] or ''} {ev['notes'] or ''}".lower()
+        # Find which providers are mentioned
+        matched_ids: set[int] = set()
+        for m in name_pattern.finditer(text):
+            pid = name_to_person.get(m.group(1).lower())
+            if pid:
+                matched_ids.add(pid)
+        for m in full_name_pattern.finditer(text):
+            pid = full_name_to_person.get(m.group(1).lower())
+            if pid:
+                matched_ids.add(pid)
+
+        if not matched_ids and not _AWAY_KEYWORDS.search(text):
+            continue
+
+        # If no specific name matched but the event is an away-type, skip —
+        # we need an explicit name to avoid false positives.
+        if not matched_ids:
+            continue
+
+        for pid in matched_ids:
+            with conn.cursor() as cur:
+                # Upsert asset_availability
+                cur.execute("""
+                    INSERT INTO personal.asset_availability
+                        (person_id, availability_type, start_date, end_date,
+                         confidence, source, notes)
+                    VALUES (%s, 'unavailable', %s, %s, 70, 'calendar', %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                """, (pid, ev["start_date"], ev["end_date"],
+                      f"calendar event: {ev['title']}"))
+                row = cur.fetchone()
+                if row:
+                    created += 1
+
+    return created
+
+
+def task_detect_provider_gaps() -> dict:
+    """
+    Phase 1: Bridge calendar events → asset_availability for known providers.
+    Phase 2: Sweep asset_availability against event_participant provider rows,
+             write UNRESOLVED GAP records into personal.routine_gap.
+    Phase 3: Auto-resolve gaps whose interval has fully passed.
+
+    The LLM and dashboard surface open gap rows as ⚠ PROVIDER UNAVAILABLE items
+    requiring substitute assignment.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    detected = resolved = hints_created = 0
+
+    try:
+        # Phase 1 — calendar→availability bridge
+        hints_created = _sync_calendar_hints_to_availability(conn)
+        if hints_created:
+            conn.commit()
+            print(f"[maintenance] detect_provider_gaps: {hints_created} availability rows from calendar")
+
+        # Phase 2 — sweep availability → routine_gap
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    ep.routine_asset_id,
+                    ep.person_id       AS provider_person_id,
+                    ep.asset_id        AS provider_asset_id,
+                    ep.display_name    AS provider_display,
+                    aa.id              AS availability_id,
+                    aa.start_date      AS gap_start,
+                    aa.end_date        AS gap_end
+                FROM personal.event_participant ep
+                JOIN personal.asset a
+                    ON a.id = ep.routine_asset_id AND a.status = 'active'
+                JOIN personal.asset_availability aa
+                    ON (aa.person_id = ep.person_id OR aa.asset_id = ep.asset_id)
+                   AND aa.availability_type = 'unavailable'
+                   AND aa.end_date >= CURRENT_DATE
+                WHERE ep.role = 'provider'
+                  AND (ep.person_id IS NOT NULL OR ep.asset_id IS NOT NULL)
+            """)
+            gaps = cur.fetchall()
+
+        # 2. Upsert each gap — unique on (routine, provider_display, start, end) while open
+        for g in gaps:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO personal.routine_gap
+                        (routine_asset_id, provider_person_id, provider_asset_id,
+                         provider_display, gap_start, gap_end, availability_id)
+                    VALUES (%(routine_asset_id)s, %(provider_person_id)s, %(provider_asset_id)s,
+                            %(provider_display)s, %(gap_start)s, %(gap_end)s, %(availability_id)s)
+                    ON CONFLICT (routine_asset_id, provider_display, gap_start, gap_end)
+                    WHERE resolved_at IS NULL
+                    DO UPDATE SET
+                        availability_id = EXCLUDED.availability_id,
+                        gap_end         = EXCLUDED.gap_end
+                """, dict(g))
+                if cur.rowcount:
+                    detected += 1
+
+        # 3. Auto-resolve gaps whose interval has fully passed
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE personal.routine_gap
+                SET resolved_at = now(), resolution = 'auto_passed'
+                WHERE resolved_at IS NULL
+                  AND gap_end < CURRENT_DATE
+            """)
+            resolved = cur.rowcount
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {
+        "calendar_hints_to_availability": hints_created,
+        "provider_gaps_detected": detected,
+        "provider_gaps_auto_resolved": resolved,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reconcile ingested events
 # ---------------------------------------------------------------------------
 
@@ -1100,6 +1294,38 @@ def task_appointment_digest() -> dict:
         conn.close()
 
 
+def task_routine_context_pack() -> dict:
+    """
+    Assemble tier-1 routine context packs for all active routines and store a
+    summary audit row. The packs themselves are ephemeral (assembled on demand);
+    this task validates the assembly runs clean and logs counts.
+    """
+    import psycopg2
+    import psycopg2.extras
+
+    DB_URL = os.environ.get("DATABASE_URL")
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        packs = assemble_all_packs(conn=conn, tier2=False)
+    finally:
+        conn.close()
+
+    deviations_total = sum(
+        len([d for d in p.get("differences", []) if d.get("type") != "NORMAL"])
+        for p in packs
+    )
+    unresolved_gaps = sum(
+        1 for p in packs
+        for d in p.get("differences", [])
+        if d.get("type") == "PROVIDER UNAVAILABLE"
+    )
+    return {
+        "routines": len(packs),
+        "deviations": deviations_total,
+        "unresolved_gaps": unresolved_gaps,
+    }
+
+
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     Run maintenance tasks in order. Pass task names to run a subset.
@@ -1109,9 +1335,10 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     all_tasks = tasks or [
         "re_embed", "link", "dedup", "prune",
-        "generate_events", "detect_conflicts", "reconcile_ingested",
+        "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
+        "routine_context_pack", "notify_provider_conflicts",
     ]
     results   = {}
     t0        = time.time()
@@ -1166,6 +1393,10 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         results["detect_conflicts"] = task_detect_conflicts()
         print(f"[maintenance] detect_conflicts done: {results['detect_conflicts']}")
 
+    if "detect_provider_gaps" in all_tasks:
+        results["detect_provider_gaps"] = task_detect_provider_gaps()
+        print(f"[maintenance] detect_provider_gaps done: {results['detect_provider_gaps']}")
+
     if "reconcile_ingested" in all_tasks:
         results["reconcile_ingested"] = task_reconcile_ingested()
         print(f"[maintenance] reconcile_ingested done: {results['reconcile_ingested']}")
@@ -1185,6 +1416,23 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     if "appointment_digest" in all_tasks:
         results["appointment_digest"] = task_appointment_digest()
         print(f"[maintenance] appointment_digest done: {results['appointment_digest']}")
+
+    if "routine_context_pack" in all_tasks:
+        results["routine_context_pack"] = task_routine_context_pack()
+        print(f"[maintenance] routine_context_pack done: {results['routine_context_pack']}")
+
+    if "notify_provider_conflicts" in all_tasks:
+        try:
+            # provider_notify lives in email-sync (has Google API libs)
+            import requests as _req
+            email_sync_url = os.environ.get("EMAIL_SYNC_URL", "http://email-sync:4004")
+            resp = _req.post(f"{email_sync_url}/notify-providers", timeout=60)
+            n = resp.json().get("drafts_created", 0) if resp.ok else 0
+            results["notify_provider_conflicts"] = {"drafts_created": n}
+            print(f"[maintenance] notify_provider_conflicts done: {n} draft(s)")
+        except Exception as e:
+            results["notify_provider_conflicts"] = {"error": str(e)}
+            print(f"[maintenance] notify_provider_conflicts error: {e}")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")

@@ -3,7 +3,7 @@ import os
 import ollama
 
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
+AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 
 PROMPT = """You are classifying a document for a personal AI knowledge system.
 The system has three schemas:

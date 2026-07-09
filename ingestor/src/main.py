@@ -785,7 +785,7 @@ def reparse_document(payload: dict) -> dict:
     filename   = payload.get("filename", "")
     schema     = payload.get("schema", "personal")
     ollama_url = payload.get("ollama_url", "")
-    model_name = payload.get("model_name", "qwen2.5:32b")
+    model_name = payload.get("model_name", os.environ.get("MODEL_PARSER_DEEP", "qwen2.5:32b"))
 
     if not filename:
         return {"ok": False, "error": "filename required"}

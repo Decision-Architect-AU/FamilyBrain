@@ -175,9 +175,9 @@ def merge_extractions(results: list[dict]) -> dict:
     return merged
 
 
-QUICK_MODEL  = os.environ.get("EXTRACT_MODEL_QUICK",  "qwen2.5:3b")
-DEEP_MODEL   = os.environ.get("EXTRACT_MODEL_DEEP",   "qwen2.5:14b")
-DEEPER_MODEL = os.environ.get("EXTRACT_MODEL_DEEPER", "qwen2.5:32b")
+QUICK_MODEL  = os.environ.get("MODEL_PARSER_1ST", os.environ.get("EXTRACT_MODEL_QUICK", "qwen2.5:3b"))
+DEEP_MODEL   = os.environ.get("MODEL_PARSER_2ND", os.environ.get("EXTRACT_MODEL_DEEP", "qwen2.5:14b"))
+DEEPER_MODEL = os.environ.get("MODEL_PARSER_DEEP", os.environ.get("EXTRACT_MODEL_DEEPER", "qwen2.5:32b"))
 
 
 def _run_extraction(text: str, model: str, prompt_template: str, on_chunk=None, ollama_url: str | None = None) -> dict:

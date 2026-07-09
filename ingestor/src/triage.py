@@ -25,7 +25,7 @@ import os
 import ollama
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-TRIAGE_MODEL = os.environ.get("TRIAGE_MODEL", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b"))
+TRIAGE_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("TRIAGE_MODEL", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b")))
 
 # ── Always skip — known noise senders ────────────────────────────────────────
 # These never produce personal_brain content regardless of subject
