@@ -663,13 +663,38 @@ def _api_get_assets() -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, name, asset_type, subtype, status, facts,
-                           next_event_date, last_event_date,
-                           jsonb_array_length(COALESCE(rules, '[]'::jsonb)) AS rule_count,
-                           created_at, updated_at
-                    FROM personal.asset
-                    WHERE status = 'active'
-                    ORDER BY asset_type, name
+                    SELECT
+                        a.id, a.name, a.asset_type, a.subtype, a.status, a.facts,
+                        a.next_event_date, a.last_event_date,
+                        jsonb_array_length(COALESCE(a.rules, '[]'::jsonb)) AS rule_count,
+                        a.created_at, a.updated_at,
+                        -- dependent (subject)
+                        dep.id   AS dependent_id,
+                        dep.name AS dependent_name,
+                        dep.date_of_birth AS dependent_dob,
+                        dep.ndis_participant,
+                        -- provider
+                        prov.id           AS provider_id,
+                        prov.name         AS provider_name,
+                        prov.email        AS provider_email,
+                        prov.phone        AS provider_phone,
+                        prov.organisation AS provider_organisation,
+                        -- billing: latest NDIS support line for this asset
+                        ns.support_category AS billing_category,
+                        ns.unit_price       AS billing_unit_price,
+                        ns.funding_source   AS billing_funding_source
+                    FROM personal.asset a
+                    LEFT JOIN personal.person dep  ON dep.id  = a.person_id
+                    LEFT JOIN personal.person prov ON prov.id = a.provider_person_id
+                    LEFT JOIN LATERAL (
+                        SELECT support_category, unit_price, funding_source
+                        FROM personal.ndis_support
+                        WHERE provider_id = prov.id
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) ns ON true
+                    WHERE a.status = 'active'
+                    ORDER BY a.asset_type, a.name
                     """
                 )
                 rows = [dict(r) for r in cur.fetchall()]

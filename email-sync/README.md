@@ -48,6 +48,39 @@ When multiple accounts are connected (e.g. yours and your partner's), emails you
    ```
 3. Restart email-sync — initial backfill starts on next poll
 
+## GCal event tracking
+
+Every event written to Google Calendar by the appointment updater carries two tracking identifiers:
+
+**Stable event ID** — `fb{event_id:012x}` (e.g. `fb00000002028c` for DB event 131724). Used as the GCal event `id` on insert so that repeated runs are idempotent — re-inserting the same DB event will find the existing GCal event rather than creating a duplicate.
+
+**Description tag** — `[fb:eXXXXX]` appended to the event description (e.g. `[fb:e131724]`). Also written to `extendedProperties.private.fb_id`. This tag survives if the GCal event is manually edited and is used by the duplicate scanner to identify FamilyBrain-owned events regardless of their current GCal event ID.
+
+### Stable ID fallback — handling GCal trash
+
+GCal does not release custom event IDs when an event is deleted — the ID remains reserved in the trash for up to 30 days. If the stable `fb*` ID is in the trash:
+
+1. `INSERT` with stable ID → GCal returns **409** (identifier already exists)
+2. `PATCH` the stable ID → GCal returns **403** (forbidden on cancelled event)
+3. `INSERT` without custom ID → **succeeds**, returns a Google-generated ID
+4. New ID is written to `personal.event.gcal_event_id`
+
+This means after a bulk purge-and-restore cycle, events will temporarily carry Google-generated IDs instead of stable `fb*` IDs. The description tag (`[fb:eXXXXX]`) still identifies them.
+
+### Duplicate detection — `purge_gcal_duplicates.py`
+
+After a purge-and-restore cycle the fallback path can create a second GCal event while the original restored event still exists, both tagged `[fb:eXXXXX]`. Run the dedup scanner to clean these up:
+
+```bash
+# Dry run — shows what would be deleted
+docker exec familybrain-email-sync python -m src.purge_gcal_duplicates
+
+# Live delete
+docker exec familybrain-email-sync python -m src.purge_gcal_duplicates --delete
+```
+
+The scanner fetches all upcoming events from each calendar, extracts the `fb:eXXXXX` tag from each, and compares against `personal.event.gcal_event_id`. Any GCal event whose ID does not match the DB record for that tag is an orphan and is deleted.
+
 ## Key env vars
 
 ```env

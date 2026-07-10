@@ -1,16 +1,15 @@
 {
-  "/page": "app/page.js",
   "/api/audit/route": "app/api/audit/route.js",
-  "/api/review/route": "app/api/review/route.js",
   "/api/notifications/route": "app/api/notifications/route.js",
-  "/api/status/route": "app/api/status/route.js",
-  "/api/setup-check/route": "app/api/setup-check/route.js",
+  "/page": "app/page.js",
+  "/api/review/route": "app/api/review/route.js",
   "/api/agents/route": "app/api/agents/route.js",
   "/api/graph-stats/route": "app/api/graph-stats/route.js",
-  "/chat/page": "app/chat/page.js",
-  "/feedback/page": "app/feedback/page.js",
-  "/review/page": "app/review/page.js",
-  "/senders/page": "app/senders/page.js",
+  "/api/setup-check/route": "app/api/setup-check/route.js",
   "/assets/page": "app/assets/page.js",
-  "/api/assets/route": "app/api/assets/route.js"
+  "/api/status/route": "app/api/status/route.js",
+  "/chat/page": "app/chat/page.js",
+  "/senders/page": "app/senders/page.js",
+  "/review/page": "app/review/page.js",
+  "/api/chat/route": "app/api/chat/route.js"
 }
