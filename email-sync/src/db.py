@@ -9,7 +9,13 @@ DB_URL = os.environ["DATABASE_URL"]
 
 
 def conn():
-    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    # lock_timeout: fail fast if a row lock can't be acquired within 8s (prevents self-deadlock
+    # when _create_calendar_event holds wconn open while upsert_event opens a second connection)
+    return psycopg2.connect(
+        DB_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        options="-c lock_timeout=8000 -c statement_timeout=60000",
+    )
 
 
 # ── Account management ─────────────────────────────────────────────────────────

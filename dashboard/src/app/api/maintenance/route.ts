@@ -7,6 +7,16 @@ const WA_AGENT_URL = process.env.WA_AGENT_URL ?? 'http://wa-agent:4002';
 
 // Task metadata — descriptions and frequencies
 const TASK_META: Record<string, { label: string; description: string; frequency: string }> = {
+  rederive_facts: {
+    label: 'Re-derive facts',
+    description: 'Drain the fact re-derivation queue after edge suppressions — removes suppressed sources from factsrc_*, deleting a fact entirely if no sources remain.',
+    frequency: 'Every 5 min, runs first',
+  },
+  asset_summary: {
+    label: 'Asset summary',
+    description: 'Derive named fact_* properties (current practitioner, last invoice, next appointment) with provenance, plus a one-line fact_summary drawn only from those facts.',
+    frequency: 'Every 5 min',
+  },
   re_embed: {
     label: 'Re-embed',
     description: 'Find notes and themes missing vector embeddings and embed them via Ollama.',

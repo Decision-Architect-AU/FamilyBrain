@@ -42,6 +42,12 @@ _NOT_A_BILL_KW = [
     "travel bank", "credit applied", "booking confirmation", "e-ticket",
     "your booking", "itinerary", "receipt for", "payment received",
     "thank you for your payment", "refund", "credit note",
+    # Payslips / salary advice — not bills
+    "pay period", "pay advice", "payslip", "pay slip", "salary advice",
+    "payment advice", "adjustment payment advice", "take home amount",
+    "gross pay", "taxable income", "employer superannuation",
+    # Loan application documents — not bills
+    "loan application documents",
 ]
 
 
@@ -59,7 +65,7 @@ _PLACEHOLDER_RE = re.compile(
     r'\b(123\s*main|example\.com|123456789|'
     r'bsb\s*:\s*\d{3}-?\d{3}|account\s*:\s*123|'
     r'your\s+(name|address|bsb|account|ref)|placeholder|lorem\s+ipsum|'
-    r'INV\s*1234|REF\s*1234|INV\s*123(?!\d{4,})|'  # INV123456 but not real refs with 7+ digits
+    r'INV[-\s]*12345?\b|REF[-\s]*12345?\b|'  # INV 12345, INV1234, REF 12345, REF1234
     r'xx+|00000|11111|99999|'
     r'\d{1,3}\s+main\s+st|sample\s+st)\b',
     re.IGNORECASE,
@@ -133,41 +139,68 @@ def _entity_from_text(text: str) -> str:
     return "Personal"
 
 
-def _extract_payment_details(subject: str, body: str, received_date: str) -> list[dict]:
+class _SkipNote(Exception):
+    """Raised when the LLM determines a note is not a bill (spam, payslip, statement, etc.)."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _classify_and_extract(subject: str, body: str, received_date: str) -> list[dict]:
     """
-    Use LLM to extract ALL payment items from a financial document.
-    Returns a list of payment dicts (most emails have one, some have several).
-    Falls back to a single-item list on failure.
+    Single LLM call that classifies the document AND extracts payment items.
+
+    Returns {"payments": [...], "line_items": [...]}. line_items carries
+    per-service extraction (service_type/practitioner_name/subject_name/date/
+    amount) for provider invoices with multiple named services — e.g. a
+    Centre of Movement invoice with an OT line and a physio line. Service and
+    practitioner are resolved downstream per line item, never per org.
+
+    Raises _SkipNote if the document is spam or does not require a payment from us.
+    Falls back to a conservative skip on LLM failure to avoid hallucinated bills.
     """
-    # Parse received_date year for anchoring LLM date extraction
     try:
-        _recv_year = str(datetime.fromisoformat(received_date[:10]).year)
         _recv_date_hint = received_date[:10]
     except Exception:
-        _recv_year = str(datetime.now(timezone.utc).year)
-        _recv_date_hint = received_date[:10] if received_date else "unknown"
+        _recv_date_hint = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     prompt = (
-        "Extract ALL payment items from this financial document. "
-        "An email may contain multiple invoices or line items — return ALL of them.\n"
-        "Reply with ONLY a valid JSON object — no prose, no markdown, no explanation.\n\n"
-        f"Email received: {_recv_date_hint} (use this to anchor the year for any ambiguous dates)\n"
+        "You are a financial document classifier. Analyse this email and reply with ONLY a valid JSON object — "
+        "no prose, no markdown, no explanation.\n\n"
+        f"Email received: {_recv_date_hint}\n"
         f"Subject: {subject}\n"
         f"Document text (first 2500 chars):\n{body[:2500]}\n\n"
-        'Return JSON with exactly one key: "payments" — an array where each item has:\n'
-        '  "biller": string — the company or person sending the bill/invoice,\n'
-        '  "amount_due": string — the EXACT dollar amount, or null if not found. Do NOT invent or guess.\n'
-        '  "due_date": string — the INVOICE DUE DATE in YYYY-MM-DD format. '
-        f'Dates in this document use DD/MM/YYYY format (Australian). '
-        f'The year must match or be close to the email received date ({_recv_date_hint}). '
-        'Use the invoice due date field specifically — not the job date, service date, or invoice date. '
-        'If no due date is present, use the invoice date. Null only if completely absent.\n'
-        '  "for_what": string — property address, person name, or asset this relates to,\n'
-        '  "invoice_ref": string — invoice/reference number if present, else null,\n'
-        '  "how_to_pay": string — BSB, account, BPAY biller code, reference, or payment link. null if not found,\n'
-        '  "payment_status": string — EXACTLY "pending" or "paid_via_statement".\n\n'
-        "IMPORTANT: only use values that actually appear in the document. "
-        "Never fabricate amounts or dates. If only one payment exists, still return an array with one item."
+        "Return a JSON object with these keys:\n"
+        '  "document_type": string — one of: invoice, reminder, statement, receipt, payslip, '
+        'bank_statement, loan_doc, tax_doc, spam, other\n'
+        '  "requires_payment_from_us": boolean — true ONLY if this is an unpaid bill/invoice '
+        'directed at Glenn West or Shannon West or their entities, requesting money FROM us. '
+        'Payslips (money paid TO us), statements, receipts, loan application documents, bank '
+        'statements, and tax documents are false.\n'
+        '  "is_spam": boolean — true if unsolicited, phishing, or from an unknown sender asking '
+        'for payment with no prior relationship evident\n'
+        '  "spam_reason": string or null — brief reason if is_spam is true\n'
+        '  "payments": array — ONLY populate if requires_payment_from_us is true, else empty array []. '
+        'Each item has:\n'
+        '    "biller": string — company/person sending the bill\n'
+        '    "amount_due": string — EXACT dollar amount from the document, or null. Do NOT invent.\n'
+        '    "due_date": string — due date as YYYY-MM-DD (Australian DD/MM/YYYY format in source). '
+        f'Year must be close to {_recv_date_hint}. Use invoice due date, not service/job date. '
+        'Null only if completely absent.\n'
+        '    "for_what": string — property address, person name, or asset this relates to\n'
+        '    "invoice_ref": string — invoice/reference number if present, else null\n'
+        '    "how_to_pay": string — BSB, account, BPAY biller code, or payment link. null if absent\n'
+        '    "payment_status": string — EXACTLY "pending" or "paid_via_statement"\n'
+        '  "line_items": array — ONLY for provider/service invoices with distinct named services '
+        '(e.g. occupational therapy, physiotherapy, speech therapy) — empty array [] otherwise. '
+        'Each item has:\n'
+        '    "service_type": string — short code e.g. "OT", "physio", "speech"\n'
+        '    "practitioner_name": string or null — the specific clinician\'s name for this line, '
+        'not the organisation\n'
+        '    "subject_name": string or null — the person who received the service, if named\n'
+        '    "date": string — YYYY-MM-DD service date, or null\n'
+        '    "amount": string or null — dollar amount for this line\n\n'
+        "IMPORTANT: only use values that actually appear in the document. Never fabricate."
     )
     try:
         resp = req.post(
@@ -177,31 +210,36 @@ def _extract_payment_details(subject: str, body: str, received_date: str) -> lis
         )
         raw = resp.json().get("response", "")
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            outer = json.loads(m.group())
-            payments = outer.get("payments")
-            if isinstance(payments, list) and payments:
-                return [_scrub_payment(p, subject, received_date) for p in payments]
-            # LLM returned a bare payment object instead of {"payments": [...]}
-            if isinstance(outer, dict) and "biller" in outer:
-                return [_scrub_payment(outer, subject, received_date)]
-    except Exception as e:
-        print(f"[billcal] LLM extract failed: {e}")
+        if not m:
+            raise _SkipNote("LLM returned no JSON — skipping to avoid hallucination")
 
-    # Safe fallback — single item
-    try:
-        fallback_date = (datetime.fromisoformat(received_date[:10]) + timedelta(days=14)).strftime("%Y-%m-%d")
-    except Exception:
-        fallback_date = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
-    return [{
-        "biller": subject[:60],
-        "amount_due": "",
-        "due_date": fallback_date,
-        "for_what": "",
-        "invoice_ref": "",
-        "how_to_pay": "",
-        "payment_status": "paid_via_statement" if _is_statement_email(subject, body) else "pending",
-    }]
+        outer = json.loads(m.group())
+
+        if outer.get("is_spam"):
+            reason = outer.get("spam_reason") or "flagged as spam"
+            raise _SkipNote(f"spam: {reason}")
+
+        if not outer.get("requires_payment_from_us"):
+            doc_type = outer.get("document_type", "unknown")
+            raise _SkipNote(f"not a bill ({doc_type})")
+
+        payments    = outer.get("payments")
+        line_items  = outer.get("line_items") or []
+        if isinstance(payments, list) and payments:
+            return {
+                "payments": [_scrub_payment(p, subject, received_date) for p in payments],
+                "line_items": line_items if isinstance(line_items, list) else [],
+            }
+
+        # requires_payment_from_us=true but payments array empty/missing — LLM inconsistency
+        raise _SkipNote("requires_payment_from_us=true but no payments extracted")
+
+    except _SkipNote:
+        raise
+    except Exception as e:
+        print(f"[billcal] LLM classify+extract failed: {e}")
+        # On failure, skip rather than create a potentially hallucinated bill
+        raise _SkipNote(f"LLM error — skipping: {e}")
 
 
 def _find_existing_event(cal_svc, calendar_id: str, biller: str, due_date: str) -> str | None:
@@ -347,7 +385,8 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
         subject    = note["subject"] or body.split("\n")[0][:80]
 
         try:
-            payments = _extract_payment_details(subject, body, received_at)
+            result   = _classify_and_extract(subject, body, received_at)
+            payments = result["payments"]
             details  = payments[0]  # enrich uses the primary/first payment
             detected_entity = _entity_from_text(f"{subject} {body[:3000]}")
             if detected_entity != "Personal":
@@ -368,6 +407,16 @@ def enrich_bill_calendar(accounts: list[dict]) -> int:
 
             print(f"[billcal] enriched '{title}' [{entity_tag.strip('{}')}]")
             updated += 1
+        except _SkipNote as e:
+            print(f"[billcal] enrich skipping note {note_id}: {e.reason}")
+            # Mark enriched so we don't retry — but leave bill_event_id so dedup still works
+            with psycopg2.connect(DB_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.note SET bill_event_enriched = true WHERE id = %s",
+                        (note_id,),
+                    )
+                conn.commit()
         except Exception as e:
             print(f"[billcal] enrich failed for note {note_id}: {e}")
 
@@ -457,6 +506,30 @@ def deduplicate_bill_calendar(accounts: list[dict]) -> int:
     return deleted
 
 
+def _submit_line_item(note_id: int, line_item: dict, entity_tag: str) -> None:
+    """POST an extracted invoice line item to the ingestor for practitioner
+    resolution (email-sync has no direct AGE/graph access — ingestor does)."""
+    if not line_item.get("service_type"):
+        return
+    ingestor_url = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
+    try:
+        req.post(
+            f"{ingestor_url}/ingest/invoice_line_item",
+            json={
+                "note_id":            note_id,
+                "service_type":       line_item.get("service_type"),
+                "practitioner_name":  line_item.get("practitioner_name"),
+                "subject_name":       line_item.get("subject_name"),
+                "org_slug":           entity_tag.strip("{}"),
+                "line_date":          line_item.get("date"),
+                "amount":             line_item.get("amount"),
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        print(f"[billcal] line item submit failed: {e}")
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def sync_bill_calendar(accounts: list[dict]) -> int:
@@ -509,8 +582,19 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
         received_at  = str(note["received_at"] or note["created_at"] or "")
         subject      = note["subject"] or body.split("\n")[0][:80]
 
+        # Pre-filter: keyword exclusions (fast, no LLM call needed)
+        if _is_statement_email(subject, body):
+            print(f"[billcal] skipping note {note_id} (statement/payslip/non-bill keyword)")
+            with psycopg2.connect(DB_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE personal.note SET bill_event_id = 'SKIP' WHERE id = %s", (note_id,))
+                conn.commit()
+            continue
+
         try:
-            payments = _extract_payment_details(subject, body, received_at)
+            result     = _classify_and_extract(subject, body, received_at)
+            payments   = result["payments"]
+            line_items = result["line_items"]
             # Override entity_tag with keyword classification against invoice body
             detected_entity = _entity_from_text(f"{subject} {body[:3000]}")
             if detected_entity != "Personal":
@@ -523,6 +607,9 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
                 print(f"[billcal] created '{details.get('biller')} {details.get('amount_due')}' on {details['due_date']} [{entity_tag}]")
                 created += 1
 
+            for li in line_items:
+                _submit_line_item(note_id, li, entity_tag)
+
             # Store first event_id to mark note as scheduled
             if first_event_id:
                 with psycopg2.connect(DB_URL) as conn:
@@ -532,6 +619,13 @@ def sync_bill_calendar(accounts: list[dict]) -> int:
                             (first_event_id, note_id),
                         )
                     conn.commit()
+
+        except _SkipNote as e:
+            print(f"[billcal] skipping note {note_id}: {e.reason}")
+            with psycopg2.connect(DB_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE personal.note SET bill_event_id = 'SKIP' WHERE id = %s", (note_id,))
+                conn.commit()
         except Exception as e:
             print(f"[billcal] failed for note {note_id}: {e}")
 

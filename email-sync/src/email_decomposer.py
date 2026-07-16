@@ -13,6 +13,7 @@ Financial processor still handles structured attachments (PDFs, invoices).
 import json
 import os
 import re
+import traceback
 import psycopg2
 import psycopg2.extras
 import requests as req
@@ -161,7 +162,8 @@ def _create_note(cur, email_id: int, title: str, body: str,
         """,
         (f"{title}\n\n{body}", tags, item_type, email_id, _doc_date(received_at)),
     )
-    return cur.fetchone()[0]
+    row = cur.fetchone()
+    return row["id"] if row else None
 
 
 # Event types that are context-only (don't commit person time)
@@ -169,30 +171,53 @@ _CONTEXT_TYPES = {"SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY", "HOLIDAY", "LEAVE"}
 
 
 def _resolve_person_id(text: str) -> int | None:
-    """Try to resolve a person_id by matching known person names against event text."""
+    """Try to resolve a person_id by matching known person names against event text.
+
+    Tries full-name match first, then first-name-only for individuals (no organisation)
+    whose first name is unique in the person table — handles titles like "Olivia Physio…"
+    where the full name "Olivia West" doesn't appear.
+    """
     try:
         with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
             with c.cursor() as cur:
-                cur.execute("SELECT id, name FROM personal.person")
+                cur.execute("SELECT id, name, organisation FROM personal.person")
                 persons = cur.fetchall()
         text_lower = text.lower()
+
+        # Full name match
         for person in persons:
             name = (person.get("name") or "").lower()
             if name and len(name) > 2 and name in text_lower:
                 return person["id"]
+
+        # First-name match — individuals only, unique first name required
+        first_name_map: dict[str, list[int]] = {}
+        for person in persons:
+            if person.get("organisation"):
+                continue  # skip orgs/providers — first names like "Centre" would false-match
+            name = (person.get("name") or "").strip()
+            first = name.split()[0].lower() if name else ""
+            if first and len(first) > 2:
+                first_name_map.setdefault(first, []).append(person["id"])
+
+        for first, ids in first_name_map.items():
+            if len(ids) == 1 and first in text_lower:
+                return ids[0]
+
     except Exception:
         pass
     return None
 
 
 def _supersede_placeholder(cur, slot_key: str, new_event_id: int,
-                            incoming_rank: int) -> bool:
+                            incoming_rank: int) -> dict | None:
     """
     If a generated placeholder exists for this slot_key with lower/equal rank,
-    supersede it. Returns True if a placeholder was superseded.
+    supersede it and return the superseded event row (includes gen_asset_id for
+    asset enrichment). Returns None if no placeholder was found or rank too low.
     """
     cur.execute("""
-        SELECT id, precedence_rank FROM personal.event
+        SELECT id, precedence_rank, gen_asset_id FROM personal.event
         WHERE slot_key = %s
           AND status = 'generated'
           AND provenance = 'rule'
@@ -206,14 +231,93 @@ def _supersede_placeholder(cur, slot_key: str, new_event_id: int,
             SET status = 'superseded', superseded_by_event_id = %s
             WHERE id = %s
         """, (new_event_id, row["id"]))
-        return True
-    return False
+        return dict(row)
+    return None
+
+
+def _enrich_asset_from_confirmed(cur, asset_id: int, confirmed_item: dict,
+                                  confirmed_event_id: int) -> None:
+    """Write ground-truth fields from a confirmed event back into the source asset.
+
+    Called when a confirmed calendar event (rank >= generated) supersedes a routine
+    placeholder — the slot match is the confidence signal (equivalent to ~90%+).
+    Enriches asset.facts with confirmed time/location/provider and appends a note.
+    """
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+
+    title    = confirmed_item.get("title") or ""
+    notes    = confirmed_item.get("detail") or ""
+    location = confirmed_item.get("location") or ""
+    time_str = confirmed_item.get("time") or ""        # "08:00" or "8:00am"
+    date_str = confirmed_item.get("date") or ""
+
+    # Normalise time to HH:MM
+    confirmed_time = None
+    if time_str:
+        try:
+            for fmt in ("%I:%M%p", "%I:%M %p", "%H:%M", "%I%p"):
+                try:
+                    confirmed_time = _dt.strptime(time_str.strip().upper(), fmt.upper()).strftime("%H:%M")
+                    break
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+
+    # Try to resolve provider from event text against person table
+    provider_person_id = None
+    try:
+        cur.execute("SELECT id, name FROM personal.person WHERE organisation IS NOT NULL")
+        providers = cur.fetchall()
+        text_lower = f"{title} {notes} {location}".lower()
+        for p in providers:
+            name = (p["name"] or "").lower()
+            if name and len(name) > 3 and name in text_lower:
+                provider_person_id = p["id"]
+                break
+    except Exception:
+        pass
+
+    # Build fact patch — only fields we actually have
+    fact_patch: dict = {"last_confirmed_date": date_str} if date_str else {}
+    if confirmed_time:
+        fact_patch["confirmed_time"] = confirmed_time
+    if location:
+        fact_patch["confirmed_location"] = location
+
+    note_line = f"Confirmed {date_str}: {title}"
+    if location:
+        note_line += f" @ {location}"
+
+    try:
+        cur.execute("""
+            UPDATE personal.asset
+            SET facts    = facts || %s::jsonb,
+                notes    = CASE
+                             WHEN notes IS NULL OR notes = '' THEN %s
+                             WHEN notes NOT LIKE '%%' || %s || '%%' THEN notes || E'\n' || %s
+                             ELSE notes
+                           END,
+                provider_person_id = COALESCE(provider_person_id, %s)
+            WHERE id = %s
+        """, (
+            _json.dumps(fact_patch),
+            note_line, date_str, note_line,
+            provider_person_id,
+            asset_id,
+        ))
+        print(f"[decompose] enriched asset {asset_id} from confirmed event {confirmed_event_id}"
+              + (f" — provider person {provider_person_id}" if provider_person_id else ""))
+    except Exception as e:
+        print(f"[decompose] asset enrichment failed for asset {asset_id}: {e}")
 
 
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
                              title_to_event_id: dict | None = None,
-                             pre_extracted_meeting_url: str | None = None) -> int | None:
+                             pre_extracted_meeting_url: str | None = None,
+                             email_meta: dict | None = None) -> int | None:
     """Create a calendar event. Returns the new event id, or None on failure."""
     from .db import upsert_event
     title    = item.get("title", "")
@@ -245,6 +349,20 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
 
         cal_id = f"decompose:{email_id}:{re.sub(r'[^a-z0-9]', '', title.lower()[:30])}:{date_str}"
 
+        # Build notes with LLM detail + source provenance footer
+        notes_parts = [detail[:500]] if detail else []
+        if email_meta:
+            src_lines = []
+            if email_meta.get("account_email"):
+                src_lines.append(f"Source: {email_meta['account_email']}")
+            if email_meta.get("from_address"):
+                src_lines.append(f"From: {email_meta['from_address']}")
+            if email_meta.get("received_at"):
+                src_lines.append(f"Received: {str(email_meta['received_at'])[:10]}")
+            if src_lines:
+                notes_parts.append("\n".join(src_lines))
+        notes = "\n\n".join(notes_parts)
+
         event_id = upsert_event(
             title=title,
             starts_at=starts_at,
@@ -252,7 +370,7 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             event_type="inferred",
             calendar_source=calendar_source,
             calendar_event_id=cal_id,
-            notes=detail[:500],
+            notes=notes,
             ingestor_url=ingestor_url or None,
         )
 
@@ -272,11 +390,13 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         slot_key = f"{person_id}:{effective_dt}:{slot_class}" if person_id else None
         needs_review = False
 
-        # Update event with provenance/status and slot fields
+        # Update event with provenance/status and slot fields.
+        # Status stays 'confirmed' — events go to GCal regardless of whether we resolved
+        # a person (concerts, family events, etc. have no person but are still valid).
         cur.execute("""
             UPDATE personal.event
             SET provenance      = 'email',
-                status          = 'ingested',
+                status          = 'confirmed',
                 slot_key        = %s,
                 slot_class      = %s,
                 blocks_person   = %s,
@@ -289,17 +409,11 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
 
         # Attempt override: supersede a generated placeholder in the same slot
         if slot_key and event_type not in _CONTEXT_TYPES:
-            superseded = _supersede_placeholder(cur, slot_key, event_id, rank)
-            if superseded:
+            superseded_row = _supersede_placeholder(cur, slot_key, event_id, rank)
+            if superseded_row:
                 print(f"[decompose] overrode generated placeholder for slot {slot_key}")
-        elif slot_key is None and person_id is None:
-            needs_review = True  # can't do collision detection without person
-
-        if needs_review:
-            cur.execute(
-                "UPDATE personal.event SET status = 'ingested' WHERE id = %s",
-                (event_id,)
-            )
+                if superseded_row.get("gen_asset_id"):
+                    _enrich_asset_from_confirmed(cur, superseded_row["gen_asset_id"], item, event_id)
 
         # Store meeting_url, location, and relative dependency
         if meeting_url or location or relative_to or offset_days or relative_anchor:
@@ -320,7 +434,8 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
 
         return event_id
     except Exception as e:
-        print(f"[decompose] calendar event failed for '{title}': {e}")
+        print(f"[decompose] calendar event failed for '{title}': {e!r}")
+        traceback.print_exc()
         return None
 
 
@@ -407,7 +522,7 @@ def _fetch_attachment_text_for_email(account: dict, provider_msg_id: str) -> str
                     parts.append(text)
             except Exception as ex:
                 print(f"[decompose] ingestor extract failed for {fname}: {ex}")
-        return "\n\n".join(parts)
+        return "\n\n".join(parts).replace("\x00", "")
     except Exception as e:
         print(f"[decompose] attachment fetch failed for {provider_msg_id}: {e}")
         return ""
@@ -457,7 +572,12 @@ def decompose_emails(accounts: list[dict]) -> int:
                   AND  em.ingest_status = 'ingested'
                   AND  em.category NOT IN ('junk', 'marketing', 'newsletter', 'notification')
                 ORDER  BY
-                  CASE WHEN em.category IN ('finance', 'health', 'medical', 'ndis', 'insurance', 'legal') THEN 0 ELSE 1 END,
+                  -- Recent emails (< 48 h) always surface first — prevents new activity
+                  -- dates being starved by the historical backlog
+                  CASE WHEN em.received_at > now() - INTERVAL '48 hours' THEN 0 ELSE 1 END,
+                  -- Within each recency band, time-sensitive categories come first
+                  CASE WHEN em.category IN ('finance', 'health', 'medical', 'ndis',
+                                            'insurance', 'legal', 'school') THEN 0 ELSE 1 END,
                   em.received_at DESC
                 LIMIT  %s
                 """,
@@ -478,12 +598,19 @@ def decompose_emails(accounts: list[dict]) -> int:
         received_at  = str(email["received_at"] or "")
         account_id   = email["account_id"]
         provider_id  = email["provider_msg_id"] or ""
+        acct         = next((a for a in accounts if a["id"] == account_id), None)
+        email_meta   = {
+            "account_email": acct["email_address"] if acct else None,
+            "from_address":  email.get("from_address") or email.get("from_name"),
+            "received_at":   email["received_at"],
+        }
 
         # If no body text and email has no note, try extracting text from attachments (any provider)
         if not body.strip() and not email["note_id"] and provider_id:
             acct = next((a for a in accounts if a["id"] == account_id), None)
             if acct:
                 att_text = _fetch_attachment_text_for_email(acct, provider_id)
+                att_text = att_text.replace("\x00", "")  # Postgres rejects NUL bytes
                 if att_text.strip():
                     print(f"[decompose] extracted {len(att_text)} chars from attachments for email {email_id}")
                     _store_note_body(email_id, att_text)
@@ -501,20 +628,24 @@ def decompose_emails(accounts: list[dict]) -> int:
                 if pre_meeting_url:
                     print(f"[decompose] pre-extracted meeting URL: {pre_meeting_url[:80]}")
 
-            with psycopg2.connect(DB_URL) as wconn:
-                with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
-                    title_to_event_id: dict = {}  # maps title → event_id for relative linking
-                    for item in items:
-                        itype = item.get("type")
-                        title = item.get("title", "")
-                        detail = item.get("detail", "")
+            # Process each item in its own transaction so wconn locks release between
+            # items — prevents self-deadlock when upsert_event (second connection) dedup-
+            # checks a row that wconn already holds a lock on from a previous item.
+            title_to_event_id: dict = {}
+            for item in items:
+                itype = item.get("type")
+                title = item.get("title", "")
+                detail = item.get("detail", "")
 
+                with psycopg2.connect(DB_URL) as wconn:
+                    with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
                         if itype == "calendar_event":
                             _create_calendar_event(wcur, item, calendar_source,
                                                     email_id, INGESTOR_URL,
                                                     received_date=received_at,
                                                     title_to_event_id=title_to_event_id,
-                                                    pre_extracted_meeting_url=pre_meeting_url)
+                                                    pre_extracted_meeting_url=pre_meeting_url,
+                                                    email_meta=email_meta)
 
                         elif itype == "payment":
                             _create_payment_note(wcur, item, email_id, received_at)
@@ -525,7 +656,10 @@ def decompose_emails(accounts: list[dict]) -> int:
                             if itype == "task" and priority == "high":
                                 tags.append("urgent")
                             _create_note(wcur, email_id, title, detail, itype, tags, received_at)
+                    wconn.commit()
 
+            with psycopg2.connect(DB_URL) as wconn:
+                with wconn.cursor() as wcur:
                     wcur.execute(
                         "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
                         (email_id,),
@@ -535,16 +669,27 @@ def decompose_emails(accounts: list[dict]) -> int:
             processed += 1
 
         except Exception as e:
-            print(f"[decompose] failed for email {email_id} '{subject[:40]}': {e}")
-            try:
-                with psycopg2.connect(DB_URL) as ec:
-                    with ec.cursor() as ecur:
-                        ecur.execute(
-                            "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
-                            (email_id,),
-                        )
-                    ec.commit()
-            except Exception:
-                pass
+            err_str = str(e).lower()
+            # Network/API errors — leave email_decomposed = false so it retries next cycle
+            is_transient = any(x in err_str for x in (
+                "name or service not known", "unable to find the server",
+                "nameresolutionerror", "connectionerror", "connection reset",
+                "timeout", "timed out", "max retries",
+            ))
+            print(f"[decompose] {'transient failure, will retry' if is_transient else 'failed'} "
+                  f"for email {email_id} '{subject[:40]}': {e!r}")
+            traceback.print_exc()
+            if not is_transient:
+                # Only mark done for non-network failures (parse errors, malformed content)
+                try:
+                    with psycopg2.connect(DB_URL) as ec:
+                        with ec.cursor() as ecur:
+                            ecur.execute(
+                                "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
+                                (email_id,),
+                            )
+                        ec.commit()
+                except Exception:
+                    pass
 
     return processed

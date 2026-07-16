@@ -551,6 +551,45 @@ def _parse_fb_tags(description: str) -> tuple[str | None, str | None, datetime |
     return person, category, updated_at, writer
 
 
+_FB_ID_TAG_RE = re.compile(r"\[fb:(e\d+)\]")
+
+
+def _find_gcal_event_by_fb_id(cal_svc, cal_id: str, fb_id: str, starts) -> str | None:
+    """Search GCal for ANY event tagged [fb:{fb_id}] near the event start time.
+
+    Unlike _find_orphan_fb_event this has no staleness check — it is used in
+    fallback paths where we know an event with this exact tag already exists
+    (e.g. a prior fresh-insert in the same cycle) and must be patched rather
+    than duplicated.
+    """
+    try:
+        from datetime import timezone, timedelta as _td
+        if hasattr(starts, "tzinfo") and starts.tzinfo:
+            t_min = (starts - _td(hours=1)).isoformat()
+            t_max = (starts + _td(hours=1)).isoformat()
+        else:
+            t_min = (starts - _td(hours=1)).isoformat() + "Z"
+            t_max = (starts + _td(hours=1)).isoformat() + "Z"
+        resp = cal_svc.events().list(
+            calendarId=cal_id,
+            timeMin=t_min,
+            timeMax=t_max,
+            singleEvents=True,
+            maxResults=50,
+        ).execute()
+    except Exception:
+        return None
+
+    tag = f"[fb:{fb_id}]"
+    for item in resp.get("items", []):
+        desc = (item.get("description") or "") + str(
+            item.get("extendedProperties", {}).get("private", {}).get("fb_id", "")
+        )
+        if tag in desc or fb_id in desc:
+            return item["id"]
+    return None
+
+
 def _find_orphan_fb_event(cal_svc, cal_id: str, ev: dict, title: str,
                           starts: datetime, ends: datetime) -> str | None:
     """Search GCal for an existing FamilyBrain event for the same person+category+slot.
@@ -636,8 +675,13 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
             status = getattr(getattr(e, "resp", None), "status", None)
             if status not in (403, 404, 409):
                 raise
-            # ID reserved in trash — insert fresh without custom ID
+            # ID reserved in trash — check for an existing event with same fb-tag before inserting fresh
             body.pop("id", None)
+            if fb_id:
+                existing_id = _find_gcal_event_by_fb_id(cal_svc, cal_id, fb_id, starts)
+                if existing_id:
+                    cal_svc.events().patch(calendarId=cal_id, eventId=existing_id, body=body).execute()
+                    return existing_id
             result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
             return result["id"]
     else:
@@ -679,8 +723,13 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
     except Exception as e:
         status = getattr(getattr(e, "resp", None), "status", None)
         if status in (403, 404, 410):
-            # Event was deleted from GCal — re-create it with a new ID
+            # Event was deleted from GCal — check for existing fb-tagged event before inserting fresh
             body.pop("id", None)
+            if fb_id:
+                existing_id = _find_gcal_event_by_fb_id(cal_svc, cal_id, fb_id, starts)
+                if existing_id:
+                    cal_svc.events().patch(calendarId=cal_id, eventId=existing_id, body=body).execute()
+                    return existing_id
             result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
             return result["id"]
         else:

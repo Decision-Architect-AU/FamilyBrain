@@ -12,12 +12,14 @@ Also serves HTTP on port 4001:
   POST /ingest/message      — generic inbound content (WhatsApp, SMS, voice, etc.)
 """
 import os
+import re
 import shutil
 import time
 import pathlib
 import threading
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 from src.extract import extract_text, extract_bytes
 from src.classify import classify
@@ -668,31 +670,26 @@ def _api_get_assets() -> dict:
                         a.next_event_date, a.last_event_date,
                         jsonb_array_length(COALESCE(a.rules, '[]'::jsonb)) AS rule_count,
                         a.created_at, a.updated_at,
-                        -- dependent (subject)
+                        -- dependent (subject) — the only relational person link this table has
                         dep.id   AS dependent_id,
                         dep.name AS dependent_name,
                         dep.date_of_birth AS dependent_dob,
                         dep.ndis_participant,
-                        -- provider
-                        prov.id           AS provider_id,
-                        prov.name         AS provider_name,
-                        prov.email        AS provider_email,
-                        prov.phone        AS provider_phone,
-                        prov.organisation AS provider_organisation,
-                        -- billing: latest NDIS support line for this asset
-                        ns.support_category AS billing_category,
-                        ns.unit_price       AS billing_unit_price,
-                        ns.funding_source   AS billing_funding_source
+                        -- provider/billing have no relational FK on personal.asset today —
+                        -- that detail lives inside facts JSONB (e.g. facts->>'prescriber',
+                        -- facts->>'insurance_provider'), varies per asset_type. Null out the
+                        -- columns the frontend expects rather than referencing non-existent
+                        -- provider_person_id / person.email / ndis_support.support_category.
+                        NULL::bigint AS provider_id,
+                        NULL::text   AS provider_name,
+                        NULL::text   AS provider_email,
+                        NULL::text   AS provider_phone,
+                        NULL::text   AS provider_organisation,
+                        NULL::text   AS billing_category,
+                        NULL::numeric AS billing_unit_price,
+                        NULL::text   AS billing_funding_source
                     FROM personal.asset a
-                    LEFT JOIN personal.person dep  ON dep.id  = a.person_id
-                    LEFT JOIN personal.person prov ON prov.id = a.provider_person_id
-                    LEFT JOIN LATERAL (
-                        SELECT support_category, unit_price, funding_source
-                        FROM personal.ndis_support
-                        WHERE provider_id = prov.id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    ) ns ON true
+                    LEFT JOIN personal.person dep ON dep.id = a.person_id
                     WHERE a.status = 'active'
                     ORDER BY a.asset_type, a.name
                     """
@@ -708,6 +705,190 @@ def _api_get_assets() -> dict:
         return {"ok": False, "error": str(e), "assets": []}
 
 
+# ── Section presenters for the dossier's default/edge_type grouping ──────────
+# Edge types not listed here still render — the frontend's default presenter
+# handles anything unrecognised, matching the "unknown edge types render via
+# default presenter" requirement.
+_DOSSIER_SECTION_ORDER = [
+    "MENTIONS", "LINKED_TO", "NOTE", "EXTRACTED_FROM", "ASSERTS",
+    "AUTHORED_BY", "WORKS_AT", "PROVIDES", "HAS_ASSET",
+]
+
+
+def _api_get_asset_dossier(asset_id: int, include_suppressed: bool = False) -> dict:
+    """
+    Assemble the full dossier for one asset: core row, facts/factsrc from the
+    graph node, neighbourhood grouped by edge type, and relational
+    events/routines via event_participant. Single round trip for the dashboard.
+    """
+    import psycopg2
+    import psycopg2.extras
+    from src import graph as gw
+    DB_URL = os.environ.get("DATABASE_URL")
+
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, name, asset_type, subtype, status, person_id,
+                              facts, next_event_date, last_event_date, notes
+                       FROM personal.asset WHERE id = %s""",
+                    (asset_id,),
+                )
+                asset_row = cur.fetchone()
+                if not asset_row:
+                    return {"ok": False, "error": f"asset {asset_id} not found"}
+                asset = dict(asset_row)
+
+                # Events directly linked to this asset (rule-generated or referenced)
+                cur.execute(
+                    """SELECT id, title, event_type, starts_at, ends_at, status
+                       FROM personal.event
+                       WHERE asset_id = %s
+                       ORDER BY starts_at DESC LIMIT 25""",
+                    (asset_id,),
+                )
+                events = [dict(r) for r in cur.fetchall()]
+
+                # This asset as a participant in other routines
+                cur.execute(
+                    """SELECT ep.role, ep.display_name, ra.id AS routine_id, ra.name AS routine_name
+                       FROM personal.event_participant ep
+                       JOIN personal.asset ra ON ra.id = ep.routine_asset_id
+                       WHERE ep.asset_id = %s OR ep.person_id = %s""",
+                    (asset_id, asset.get("person_id")),
+                )
+                participant_of = [dict(r) for r in cur.fetchall()]
+
+                # If this asset IS a routine, list its own participants
+                cur.execute(
+                    """SELECT role, display_name, person_id, asset_id, is_reassignable
+                       FROM personal.event_participant
+                       WHERE routine_asset_id = %s
+                       ORDER BY role""",
+                    (asset_id,),
+                )
+                routine_participants = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    for r in events:
+        for k in ("starts_at", "ends_at"):
+            if r.get(k):
+                r[k] = r[k].isoformat() if hasattr(r[k], "isoformat") else str(r[k])
+    for k in ("next_event_date", "last_event_date"):
+        if asset.get(k):
+            asset[k] = asset[k].isoformat() if hasattr(asset[k], "isoformat") else str(asset[k])
+
+    # Graph neighbourhood: facts + grouped edge sections
+    neighbourhood = gw.get_asset_neighbourhood(asset_id, include_suppressed=include_suppressed)
+
+    facts: dict = {}
+    factsrc: dict = {}
+    for k, v in (asset.get("facts") or {}).items():
+        facts[k] = v
+    # Pull fact_*/factsrc_* off the Asset node itself (enrichment-derived facts
+    # live on the graph node, separate from the relational facts JSONB)
+    # Match by ref, not asset_id — routine assets synced only via
+    # task_asset_graph_sync() never get asset_id set on their graph node.
+    node_ref_str = f"personal.asset:{asset_id}"
+    node_rows = gw._cypher_fetch(
+        "personal_graph", f"MATCH (a:Asset {{ref: {gw._cypher_val('ref', node_ref_str)}}}) RETURN a", "a"
+    )
+    if node_rows:
+        vertex = gw._parse_vertex(node_rows[0].get("a"))
+        if vertex:
+            for k, v in vertex.get("properties", {}).items():
+                if k.startswith("fact_") and not k.startswith("factsrc_"):
+                    facts[k[len("fact_"):]] = v
+                elif k.startswith("factsrc_"):
+                    try:
+                        factsrc[k[len("factsrc_"):]] = v if isinstance(v, list) else json.loads(v)
+                    except Exception:
+                        factsrc[k[len("factsrc_"):]] = []
+    summary = facts.pop("summary", None)
+
+    sections_by_type: dict[str, list] = {}
+    for item in neighbourhood:
+        sections_by_type.setdefault(item["edge_type"], []).append(item)
+
+    ordered_types = [t for t in _DOSSIER_SECTION_ORDER if t in sections_by_type]
+    ordered_types += [t for t in sections_by_type if t not in _DOSSIER_SECTION_ORDER]
+    sections = [{"edge_type": t, "items": sections_by_type[t]} for t in ordered_types]
+
+    return {
+        "ok": True,
+        "asset": asset,
+        "facts": facts,
+        "factsrc": factsrc,
+        "summary": summary,
+        "sections": sections,
+        "events": events,
+        "participant_of": participant_of,
+        "routine_participants": routine_participants,
+    }
+
+
+def ingest_invoice_line_item(payload: dict) -> dict:
+    """
+    Resolve a single invoice line item's practitioner + subject and record it.
+    Service disambiguation keys on the line item, never the org — one provider
+    org can correctly feed two different routines (e.g. OT vs physio).
+    """
+    import psycopg2
+    import psycopg2.extras
+    from src.practitioner_matcher import (
+        resolve_practitioner, record_line_item, maybe_update_current_service_fact,
+    )
+    DB_URL = os.environ.get("DATABASE_URL")
+
+    note_id           = payload.get("note_id")
+    service_type      = payload.get("service_type")
+    practitioner_name = payload.get("practitioner_name") or ""
+    subject_name      = payload.get("subject_name")
+    org_slug          = payload.get("org_slug")
+    line_date         = payload.get("line_date")
+    amount            = payload.get("amount")
+
+    if not service_type:
+        return {"ok": False, "error": "service_type required"}
+
+    subject_person_id = None
+    if subject_name:
+        try:
+            with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM personal.person WHERE lower(name) = lower(%s) LIMIT 1",
+                        (subject_name,),
+                    )
+                    row = cur.fetchone()
+                    subject_person_id = row["id"] if row else None
+        except Exception:
+            pass
+
+    resolution = resolve_practitioner(practitioner_name, org_slug, service_type)
+    line_item_id = record_line_item(
+        note_id, service_type, practitioner_name, org_slug, line_date, amount,
+        subject_person_id, resolution,
+    )
+
+    flip_result = None
+    if resolution.get("person_id") and subject_person_id:
+        flip_result = maybe_update_current_service_fact(
+            subject_person_id, service_type, resolution["person_id"], practitioner_name,
+        )
+
+    return {
+        "ok": True,
+        "line_item_id": line_item_id,
+        "resolution": resolution,
+        "flip": flip_result,
+    }
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -719,6 +900,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(200, _api_get_notifications())
         elif self.path.startswith("/api/events/pending-sync"):
             self._respond(200, _api_get_pending_sync())
+        elif re.match(r"^/api/assets/(\d+)/dossier", self.path):
+            parsed = urlparse(self.path)
+            asset_id = int(re.match(r"^/api/assets/(\d+)/dossier", parsed.path).group(1))
+            include_suppressed = parse_qs(parsed.query).get("include_suppressed", ["0"])[0] == "1"
+            result = _api_get_asset_dossier(asset_id, include_suppressed=include_suppressed)
+            self._respond(200 if result.get("ok") else 404, result)
         elif self.path.startswith("/api/assets"):
             self._respond(200, _api_get_assets())
         else:
@@ -757,6 +944,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             event_id    = body.get("event_id")
             gcal_id     = body.get("gcal_event_id", "")
             result      = _api_mark_event_synced(event_id, gcal_id)
+        elif self.path == "/api/edges/suppress":
+            edge_id = body.get("edge_id")
+            reason  = body.get("reason", "")
+            result  = graph_writer.zero_edge(edge_id, zeroed_by="user", reason=reason) \
+                      if edge_id is not None else {"ok": False, "error": "edge_id required"}
+        elif self.path == "/api/edges/restore":
+            edge_id = body.get("edge_id")
+            result  = graph_writer.restore_edge(edge_id) \
+                      if edge_id is not None else {"ok": False, "error": "edge_id required"}
+        elif self.path == "/ingest/invoice_line_item":
+            result = ingest_invoice_line_item(body)
         elif self.path == "/notifications/run-detectors":
             def _run():
                 from src.notification_detectors import run_all_detectors

@@ -47,6 +47,7 @@ def run(dry_run=True):
     # Search by extendedProperties won't find all, so search by description text
     calendars_to_check = list({ev["gcal_calendar_id"] for ev in db_events})
 
+    total_found = 0
     total_deleted = 0
     for cal_id in calendars_to_check:
         page_token = None
@@ -77,6 +78,7 @@ def run(dry_run=True):
                     summary = item.get("summary", "?")[:50]
                     start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date", "?")
                     print(f"[dedup] {'DRY' if dry_run else 'DELETE'} orphan [{fb_tag}] '{summary}' {start[:10]} gcal_id={gcal_id}")
+                    total_found += 1
                     if not dry_run:
                         try:
                             svc.events().delete(calendarId=cal_id, eventId=gcal_id).execute()
@@ -89,7 +91,10 @@ def run(dry_run=True):
             if not page_token:
                 break
 
-    print(f"\n[dedup] {'would delete' if dry_run else 'deleted'} {total_deleted} orphan event(s)")
+    if dry_run:
+        print(f"\n[dedup] would delete {total_found} orphan event(s) — pass --delete to remove")
+    else:
+        print(f"\n[dedup] deleted {total_deleted} orphan event(s)")
 
 if __name__ == "__main__":
     dry = "--delete" not in sys.argv

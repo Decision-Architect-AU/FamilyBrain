@@ -126,6 +126,8 @@ def calendar_loop() -> None:
 
 
 def financial_loop() -> None:
+    # Stagger by half the email interval so LLM calls don't overlap with decompose_emails
+    time.sleep(EMAIL_POLL_INTERVAL // 2)
     while True:
         try:
             run_financial_sync()

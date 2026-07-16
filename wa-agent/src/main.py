@@ -318,7 +318,7 @@ async def maintenance(tasks: list[str] | None = Query(default=None)):
     """Trigger nightly maintenance. Runs in background — returns immediately."""
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    effective = tasks or ["re_embed", "link", "dedup", "prune", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack"]
+    effective = tasks or ["rederive_facts", "re_embed", "link", "dedup", "prune", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary"]
     return {"status": "running", "tasks": effective}
 
 

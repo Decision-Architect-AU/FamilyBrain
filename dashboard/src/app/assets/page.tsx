@@ -88,7 +88,7 @@ function AssetCard({ a }: { a: Asset }) {
     <div className={`rounded-xl border p-4 space-y-3 ${border}`}>
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
+        <Link href={`/assets/${a.id}`} className="flex items-center gap-2 min-w-0 hover:opacity-80">
           <span className="text-2xl flex-shrink-0">{icon}</span>
           <div className="min-w-0">
             <p className="text-sm font-semibold text-white truncate">{a.name}</p>
@@ -96,7 +96,7 @@ function AssetCard({ a }: { a: Asset }) {
               {a.asset_type}{a.subtype ? ` · ${a.subtype}` : ''}
             </p>
           </div>
-        </div>
+        </Link>
         <div className="flex flex-col items-end gap-1 flex-shrink-0">
           {nextEventBadge(a.next_event_date)}
           <span className="text-xs text-gray-600">{a.rule_count} rule{a.rule_count !== 1 ? 's' : ''}</span>

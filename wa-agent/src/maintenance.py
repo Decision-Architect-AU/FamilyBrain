@@ -2,6 +2,7 @@
 Nightly maintenance agent.
 
 Tasks (run in order):
+0. rederive_facts         — drain fact_rederive_queue after edge suppressions
 1. re_embed               — find notes/themes missing embeddings and embed them
 2. link                   — run concept linker (ALIAS_OF / SIMILAR_TO edges)
 3. dedup                  — merge Concept nodes with identical names
@@ -13,6 +14,7 @@ Tasks (run in order):
 9. asset_graph_sync       — upsert Asset nodes in AGE, link to Person nodes, prune disposed
 10. appointment_digest    — pre-compute appointment summaries for common windows
 11. routine_context_pack  — assemble tier-1 context packs for all active routines
+12. asset_summary         — derive fact_* + fact_summary for active assets (with provenance)
 
 Triggered via POST /maintenance or the nightly cron.
 """
@@ -663,6 +665,245 @@ def _format_asset_notes(asset: dict, upcoming: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Fact re-derivation queue drain
+# ---------------------------------------------------------------------------
+
+def task_rederive_facts() -> dict:
+    """
+    Drain personal.fact_rederive_queue: for each (node_ref, fact_name, source_ref)
+    enqueued by zero_edge() when a user suppressed an edge, remove source_ref from
+    the node's factsrc_<fact_name> list. If no sources remain, delete the fact_*/
+    factsrc_* pair entirely — a fact must never outlive its evidence.
+    Precise removal of the specific suppressed source, rather than a full
+    re-run of the fact's original derivation logic (which is asset/fact-type
+    specific and lives in task_asset_summary) — the next asset_summary cycle
+    will naturally refresh any fact whose remaining sourcing looks thin.
+    Run first in the maintenance sequence, before asset_summary.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    processed = deleted = trimmed = 0
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM personal.fact_rederive_queue ORDER BY enqueued_at")
+            queue_rows = [dict(r) for r in cur.fetchall()]
+
+        if not queue_rows:
+            return {"processed": 0, "trimmed": 0, "deleted": 0}
+
+        graph_conn = _conn()
+        try:
+            for row in queue_rows:
+                node_ref   = row["node_ref"]
+                fact_name  = row["fact_name"]
+                source_ref = row["source_ref"]
+
+                # node_ref looks like 'personal.asset:2' — match by ref property,
+                # label-agnostic since facts can live on any node type.
+                rows = _cypher(
+                    graph_conn, "personal_graph",
+                    f"MATCH (n {{ref: '{node_ref}'}}) RETURN n.factsrc_{fact_name}",
+                )
+                current_raw = rows[0].get("r") if rows else None
+                current: list = []
+                if current_raw:
+                    try:
+                        s = str(current_raw).strip('"\'')
+                        current = json.loads(s) if s not in ("null", "") else []
+                    except Exception:
+                        current = []
+
+                remaining = [s for s in current if s != source_ref]
+
+                if remaining:
+                    remaining_json = json.dumps(remaining).replace("'", "\\'")
+                    _cypher(
+                        graph_conn, "personal_graph",
+                        f"MATCH (n {{ref: '{node_ref}'}}) "
+                        f"SET n.factsrc_{fact_name} = '{remaining_json}' RETURN n",
+                    )
+                    trimmed += 1
+                else:
+                    _cypher(
+                        graph_conn, "personal_graph",
+                        f"MATCH (n {{ref: '{node_ref}'}}) "
+                        f"REMOVE n.fact_{fact_name}, n.factsrc_{fact_name} RETURN n",
+                    )
+                    deleted += 1
+
+                processed += 1
+
+            graph_conn.commit()
+        finally:
+            graph_conn.close()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM personal.fact_rederive_queue WHERE id = ANY(%s)",
+                ([r["id"] for r in queue_rows],),
+            )
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {"processed": processed, "trimmed": trimmed, "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Asset summary enrichment
+# ---------------------------------------------------------------------------
+
+def _set_node_facts_wa(graph_conn, graph: str, ref: str, facts: dict, factsrc: dict) -> None:
+    """
+    wa-agent's own copy of ingestor's set_node_facts() — separate containers
+    can't share a Python module, so the idempotent fact_*/factsrc_* SET pattern
+    (and the provenance requirement) is duplicated here rather than imported.
+    Raises if any fact has no corresponding factsrc entry.
+    """
+    missing = [k for k in facts if k not in factsrc]
+    if missing:
+        raise ValueError(f"_set_node_facts_wa called without factsrc for: {missing} (ref={ref})")
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sets = [f"n.facts_updated_at = '{now}'"]
+    for k, v in facts.items():
+        val = str(v).replace("'", "\\'")
+        sets.append(f"n.fact_{k} = '{val}'")
+        src_json = json.dumps(factsrc.get(k, [])).replace("'", "\\'")
+        sets.append(f"n.factsrc_{k} = '{src_json}'")
+
+    _cypher(
+        graph_conn, graph,
+        f"MATCH (n {{ref: '{ref}'}}) SET {', '.join(sets)} RETURN n",
+    )
+
+
+def task_asset_summary() -> dict:
+    """
+    Derive fact_* properties (with provenance) and a fact_summary one-liner for
+    every active asset. Facts are sourced only from non-suppressed graph edges
+    (confidence > 0) and the asset's existing relational facts JSONB — never
+    from raw email/note bodies, so a re-derivation can always trace back to
+    what still supports it. The summary sentence is built from the facts dict
+    only, so it can never assert something no fact backs.
+    Skips assets whose facts_updated_at is fresher than ASSET_SUMMARY_TTL_HOURS.
+    """
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    ttl_hours = int(os.environ.get("ASSET_SUMMARY_TTL_HOURS", "24"))
+    updated = skipped = 0
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, asset_type, facts
+                FROM personal.asset WHERE status = 'active'
+            """)
+            assets = [dict(r) for r in cur.fetchall()]
+
+        graph_conn = _conn()
+        try:
+            for asset in assets:
+                ref = f"personal.asset:{asset['id']}"
+
+                fresh_rows = _cypher(
+                    graph_conn, "personal_graph",
+                    f"MATCH (n:Asset {{ref: '{ref}'}}) RETURN n.facts_updated_at",
+                )
+                last_updated = fresh_rows[0].get("r") if fresh_rows else None
+                if last_updated:
+                    try:
+                        ts = datetime.strptime(str(last_updated).strip('"'), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        if (datetime.now(timezone.utc) - ts).total_seconds() < ttl_hours * 3600:
+                            skipped += 1
+                            continue
+                    except Exception:
+                        pass
+
+                # Non-suppressed neighbourhood — count + most recent linked node date.
+                # Two directed, label-constrained queries (never an unlabeled undirected
+                # MATCH) — AGE has no index support for that and it scans the whole graph.
+                nb_rows = _cypher(
+                    graph_conn, "personal_graph",
+                    f"MATCH (a:Asset {{ref: '{ref}'}})-[r]->(n) WHERE r.confidence > 0 "
+                    f"RETURN n.received_at, n.starts_at, n.created_at",
+                    col_defs="(recv agtype, starts agtype, created agtype)",
+                )
+                nb_rows += _cypher(
+                    graph_conn, "personal_graph",
+                    f"MATCH (a:Asset {{ref: '{ref}'}})<-[r]-(n) WHERE r.confidence > 0 "
+                    f"RETURN n.received_at, n.starts_at, n.created_at",
+                    col_defs="(recv agtype, starts agtype, created agtype)",
+                )
+
+                dates: list[str] = []
+                for row in nb_rows:
+                    for key in ("recv", "starts", "created"):
+                        v = row.get(key)
+                        if v and str(v) not in ("null", '"null"'):
+                            dates.append(str(v).strip('"'))
+                dates.sort(reverse=True)
+
+                facts: dict = {}
+                factsrc: dict = {}
+                if dates:
+                    facts["last_activity_date"] = dates[0][:10]
+                    factsrc["last_activity_date"] = [ref]
+                facts["mention_count"] = len(nb_rows)
+                factsrc["mention_count"] = [ref]
+
+                # Fold in relational facts JSONB (already sourced from the asset row itself)
+                for k, v in (asset.get("facts") or {}).items():
+                    if k not in facts:
+                        facts[k] = v
+                        factsrc[k] = [ref]
+
+                if not facts:
+                    skipped += 1
+                    continue
+
+                summary = _derive_asset_summary(asset["name"], asset["asset_type"], facts)
+                if summary:
+                    facts["summary"] = summary
+                    factsrc["summary"] = [f"{k2}:{ref}" for k2 in facts if k2 != "summary"] or [ref]
+
+                _set_node_facts_wa(graph_conn, "personal_graph", ref, facts, factsrc)
+                updated += 1
+
+            graph_conn.commit()
+        finally:
+            graph_conn.close()
+
+    finally:
+        conn.close()
+
+    return {"updated": updated, "skipped": skipped}
+
+
+def _derive_asset_summary(name: str, asset_type: str, facts: dict) -> str | None:
+    """One-line (<=200 char) summary from the facts dict only — never raw documents."""
+    facts_text = "; ".join(f"{k}: {v}" for k, v in facts.items() if k != "summary")
+    if not facts_text:
+        return None
+    prompt = (
+        f"Write ONE plain sentence (max 200 characters, no markdown) summarising "
+        f"this {asset_type} asset named '{name}' using ONLY these known facts — "
+        f"do not add anything not listed:\n{facts_text}"
+    )
+    try:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": os.environ.get("AGENT_MODEL", "qwen2.5:3b"), "prompt": prompt, "stream": False},
+            timeout=60,
+        )
+        text = resp.json().get("response", "").strip().strip('"')
+        return text[:200] if text else None
+    except Exception as e:
+        print(f"[maintenance] asset_summary LLM error for {name}: {e}")
+        return None
+
+
 def task_refresh_asset_notes() -> dict:
     """
     Write a structured summary back to asset.notes for every active asset.
@@ -739,7 +980,7 @@ def task_asset_graph_sync() -> dict:
             _cypher(conn, "personal_graph",
                 f"MERGE (a:Asset {{ref: '{ref}'}}) "
                 f"SET a.name = '{aname}', a.asset_type = '{asset['asset_type']}', "
-                f"a.subtype = '{atype}', a.status = '{asset['status']}'",
+                f"a.subtype = '{atype}', a.status = '{asset['status']}', a.asset_id = {asset['id']}",
             )
             upserted += 1
 
@@ -747,7 +988,7 @@ def task_asset_graph_sync() -> dict:
                 pname = asset["person_name"].replace("'", "\\'")
                 _cypher(conn, "personal_graph",
                     f"MATCH (p:Person {{name: '{pname}'}}), (a:Asset {{ref: '{ref}'}}) "
-                    f"MERGE (p)-[:HAS_ASSET]->(a)",
+                    f"MERGE (p)-[r:HAS_ASSET]->(a) ON CREATE SET r.confidence = 90",
                 )
                 linked += 1
 
@@ -1334,16 +1575,22 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
                    tune_weights → appointment_digest
     """
     all_tasks = tasks or [
+        "rederive_facts",
         "re_embed", "link", "dedup", "prune",
         "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
         "routine_context_pack", "notify_provider_conflicts",
+        "asset_summary",
     ]
     results   = {}
     t0        = time.time()
 
     print(f"[maintenance] Starting: {all_tasks}")
+
+    if "rederive_facts" in all_tasks:
+        results["rederive_facts"] = task_rederive_facts()
+        print(f"[maintenance] rederive_facts done: {results['rederive_facts']}")
 
     if "re_embed" in all_tasks:
         results["re_embed"] = task_re_embed()
@@ -1433,6 +1680,10 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         except Exception as e:
             results["notify_provider_conflicts"] = {"error": str(e)}
             print(f"[maintenance] notify_provider_conflicts error: {e}")
+
+    if "asset_summary" in all_tasks:
+        results["asset_summary"] = task_asset_summary()
+        print(f"[maintenance] asset_summary done: {results['asset_summary']}")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")

@@ -435,11 +435,18 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ${FINANCIALS_HOST_DIR:-//c/Users/Glenn/Documents/FinancialsGW}:/financials
+      - ./email-sync/resolv.conf:/etc/resolv.conf:ro
     depends_on:
       postgres:
         condition: service_healthy
       ingestor:
         condition: service_started
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    extra_hosts:
+      - "postgres:172.19.0.6"
+      - "ingestor:172.19.0.11"
     networks:
       - familybrain-net
 

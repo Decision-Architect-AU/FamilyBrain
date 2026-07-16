@@ -1,6 +1,7 @@
 """Write AGE graph nodes for ingested documents and extracted concepts."""
 import json
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 import psycopg2
@@ -35,6 +36,32 @@ COLLISION_AWARE_LABELS = {
 }
 
 ATTENDANCE_MODES = ("IN_PERSON", "ONLINE", "HYBRID")
+
+# ── Edge confidence defaults (0-100 int scale, matches personal.asset_availability) ──
+# email-derived edges start low, manual/curated higher, structural (participant
+# bindings, asset ownership) highest since they come from validated relational rows.
+DEFAULT_EDGE_CONFIDENCE = {
+    "MENTIONS":     40,
+    "LINKED_TO":    40,
+    "ASSERTS":      40,
+    "FROM_FRAMEWORK": 40,
+    "APPLIES_TO":   40,
+    "RELATES_TO":   40,
+    "FROM":         40,
+    "AUTHORED_BY":  40,
+    "SYNONYM_OF":   65,
+    "ANTONYM_OF":   65,
+    "PART_OF":      65,
+    "RELATED_TO":   65,
+    "TRAVEL_TO":    90,
+    "TRAVEL_FROM":  90,
+    "HAS_ASSET":    90,
+    "NOTE":         40,
+    "EXTRACTED_FROM": 40,
+    "WORKS_AT":     65,
+    "PROVIDES":     65,
+}
+_DEFAULT_EDGE_CONFIDENCE_FALLBACK = 40
 
 # ── Property keys whose values are capped at DISPLAY_CAP chars (human-readable labels).
 # fact_* and ref are intentionally absent — lookup facts must never be truncated.
@@ -170,10 +197,14 @@ def _cypher_fetch(graph: str, query: str, col: str) -> list:
         conn.close()
 
 
-def _merge_edge(graph: str, match_a: str, match_b: str, edge: str) -> None:
+def _merge_edge(graph: str, match_a: str, match_b: str, edge: str, confidence: int | None = None) -> None:
+    """MERGE an edge, stamping confidence only ON CREATE so re-ingestion never
+    resets a confidence that was later changed (e.g. by user suppression)."""
+    conf = confidence if confidence is not None else DEFAULT_EDGE_CONFIDENCE.get(edge, _DEFAULT_EDGE_CONFIDENCE_FALLBACK)
     sql = (f"SELECT * FROM cypher('{graph}', $$"
            f" {match_a} {match_b}"
-           f" MERGE (a)-[:{edge}]->(b)"
+           f" MERGE (a)-[r:{edge}]->(b)"
+           f" ON CREATE SET r.confidence = {conf}"
            f" RETURN count(*)"
            f"$$) AS (r agtype)")
     conn = _conn()
@@ -188,23 +219,49 @@ def _merge_edge(graph: str, match_a: str, match_b: str, edge: str) -> None:
         conn.close()
 
 
+def _merge_edge_with_confidence(graph: str, edge_type: str) -> str:
+    """Return the ON CREATE SET fragment for an inline MERGE Cypher string."""
+    conf = DEFAULT_EDGE_CONFIDENCE.get(edge_type, _DEFAULT_EDGE_CONFIDENCE_FALLBACK)
+    return f"ON CREATE SET r.confidence = {conf}"
+
+
 # ── Node facts + hydration handle ────────────────────────────────────────────
+
+class MissingFactSourceError(Exception):
+    """Raised when set_node_facts is called with a fact that has no factsrc entry.
+    A fact_* property must never be written without provenance — otherwise
+    suppression (zero_edge) can't find and re-derive/delete it."""
+
 
 def set_node_facts(
     graph: str,
     label: str,
     match: dict,
     facts: dict,
+    factsrc: dict,
     ref: str | None = None,
 ) -> None:
-    """SET fact_* properties and ref on an existing node matched by `match`.
+    """SET fact_* and factsrc_* properties on an existing node matched by `match`.
     Keys in `facts` are automatically prefixed with fact_ if not already.
-    Idempotent — safe to call on re-ingest.
+    `factsrc` must have one entry per fact (list of source refs, e.g.
+    ["gmail:1852ab...", "personal.asset:2"]) — every fact_* written must be
+    traceable back to the edges/nodes that support it, or suppression can't
+    re-derive it later. Idempotent — safe to call on re-ingest.
     """
+    missing = [k for k in facts if k.replace("fact_", "", 1) not in factsrc
+               and k not in factsrc]
+    if missing:
+        raise MissingFactSourceError(
+            f"set_node_facts called without factsrc for: {missing} "
+            f"(label={label}, match={match})"
+        )
+
     sets: dict = {}
     for k, v in facts.items():
-        key = k if k.startswith("fact_") else f"fact_{k}"
-        sets[key] = v
+        bare = k.replace("fact_", "", 1) if k.startswith("fact_") else k
+        sets[f"fact_{bare}"] = v
+        src = factsrc.get(bare, factsrc.get(k, []))
+        sets[f"factsrc_{bare}"] = list(src) if src else []
     if ref:
         sets["ref"] = ref
     sets["facts_updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -222,6 +279,259 @@ def set_node_facts(
         )
     except Exception as e:
         print(f"[graph] set_node_facts error ({label} {match}): {e}")
+
+
+def delete_node_fact(graph: str, label: str, match: dict, fact_name: str) -> None:
+    """Remove a fact_* and its factsrc_* — used when re-derivation finds no
+    supporting sources left. AGE supports REMOVE on a single property."""
+    bare = fact_name.replace("fact_", "", 1)
+    match_pred = build_props(match)
+    try:
+        _cypher1(graph,
+            f"MATCH (n:{label} {{{match_pred}}}) "
+            f"REMOVE n.fact_{bare}, n.factsrc_{bare} "
+            f"RETURN n"
+        )
+    except Exception as e:
+        print(f"[graph] delete_node_fact error ({label} {match} fact_{bare}): {e}")
+
+
+# ── Vertex parsing (agtype → dict) ────────────────────────────────────────────
+
+def _strip_agtype_suffix(s: str) -> str:
+    return re.sub(r"::(vertex|edge|path|agtype)$", "", s.strip())
+
+
+def _parse_vertex(raw) -> dict | None:
+    """Parse a raw agtype vertex/edge value returned from a RETURN n / RETURN r."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(_strip_agtype_suffix(str(raw)))
+    except Exception:
+        return None
+
+
+# ── Edge suppression (zero) / restore ─────────────────────────────────────────
+
+def zero_edge(edge_id: int, zeroed_by: str, reason: str = "", graph: str = "personal_graph") -> dict:
+    """
+    Suppress an edge: confidence -> 0. If zeroed_by='user' this is permanent —
+    re-ingestion must not re-create or re-score the same edge (see the
+    zeroed_by='user' guard callers add before MERGE).
+    Enqueues personal.fact_rederive_queue rows for any fact_* on an :Asset node
+    whose factsrc_* cites the edge's source node (by ref or msg_key).
+    Returns {"ok": True, "source_ref": ..., "enqueued": N} or {"ok": False, "error": ...}.
+    """
+    conn = _conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM cypher('{graph}', $$"
+                f" MATCH (a)-[r]->(b) WHERE id(r) = {edge_id} "
+                f" RETURN a.ref, a.msg_key, r.confidence, r.zeroed_by"
+                f"$$) AS (a_ref agtype, a_msgkey agtype, conf agtype, existing_zeroed_by agtype)"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"ok": False, "error": f"edge {edge_id} not found"}
+
+    def _unwrap(v):
+        if v is None:
+            return None
+        s = str(v).strip('"')
+        return None if s in ("null", "None") else s
+
+    a_ref, a_msgkey, prev_conf, existing_zeroed_by = row["a_ref"], row["a_msgkey"], row["conf"], row["existing_zeroed_by"]
+    source_ref = _unwrap(a_ref) or _unwrap(a_msgkey) or f"node:{edge_id}"
+    prev_conf_val = _unwrap(prev_conf)
+    prev_conf_num = int(float(prev_conf_val)) if prev_conf_val not in (None, "") else 0
+
+    # Don't clobber zero_prev_confidence on a repeat zero call
+    already_zeroed = _unwrap(existing_zeroed_by) is not None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    set_parts = [
+        "r.confidence = 0",
+        f"r.zeroed_by = {_cypher_val('zeroed_by', zeroed_by)}",
+        f"r.zeroed_at = {_cypher_val('zeroed_at', now)}",
+        f"r.zero_reason = {_cypher_val('zero_reason', reason)}",
+    ]
+    if not already_zeroed:
+        set_parts.append(f"r.zero_prev_confidence = {prev_conf_num}")
+
+    try:
+        _cypher1(graph,
+            f"MATCH ()-[r]->() WHERE id(r) = {edge_id} "
+            f"SET {', '.join(set_parts)} "
+            f"RETURN r"
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    enqueued = _enqueue_rederive_for_source(source_ref, reason)
+    return {"ok": True, "source_ref": source_ref, "enqueued": enqueued}
+
+
+def restore_edge(edge_id: int, graph: str = "personal_graph") -> dict:
+    """Restore a suppressed edge to its confidence before zeroing."""
+    conn = _conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM cypher('{graph}', $$"
+                f" MATCH ()-[r]->() WHERE id(r) = {edge_id} "
+                f" RETURN r.zero_prev_confidence"
+                f"$$) AS (prev agtype)"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row or row["prev"] is None:
+        return {"ok": False, "error": f"edge {edge_id} not found or was never zeroed"}
+
+    prev_conf = int(float(str(row["prev"]).strip('"')))
+    try:
+        _cypher1(graph,
+            f"MATCH ()-[r]->() WHERE id(r) = {edge_id} "
+            f"SET r.confidence = {prev_conf}, r.zeroed_by = null, "
+            f"    r.zeroed_at = null, r.zero_reason = null, r.zero_prev_confidence = null "
+            f"RETURN r"
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "restored_confidence": prev_conf}
+
+
+def is_user_zeroed(graph: str, match_a: str, match_b: str, edge_type: str) -> bool:
+    """Check whether an edge between two already-matched nodes was permanently
+    suppressed by a user. Callers pass MATCH fragments already bound to aliases
+    a/b (same convention as _merge_edge). Used as the re-ingestion guard —
+    a user's suppression outranks the system's opinion permanently."""
+    rows = _cypher_fetch(
+        graph,
+        f"{match_a} {match_b} MATCH (a)-[r:{edge_type}]->(b) "
+        f"WHERE r.zeroed_by = 'user' RETURN count(r)",
+        "c",
+    )
+    if not rows:
+        return False
+    try:
+        return int(str(rows[0].get("c", 0)).strip('"')) > 0
+    except Exception:
+        return False
+
+
+def _enqueue_rederive_for_source(source_ref: str, reason: str) -> int:
+    """Scan :Asset nodes for factsrc_* properties citing source_ref; enqueue
+    each match into personal.fact_rederive_queue for the nightly job."""
+    rows = _cypher_fetch("personal_graph", "MATCH (n:Asset) RETURN n", "n")
+    enqueued = 0
+    conn = psycopg2.connect(DB_URL)
+    try:
+        with conn.cursor() as cur:
+            for row in rows:
+                vertex = _parse_vertex(row.get("n"))
+                if not vertex:
+                    continue
+                props = vertex.get("properties", {})
+                node_ref = props.get("ref")
+                if not node_ref:
+                    continue
+                for key, val in props.items():
+                    if not key.startswith("factsrc_"):
+                        continue
+                    try:
+                        srcs = val if isinstance(val, list) else json.loads(val)
+                    except Exception:
+                        continue
+                    if source_ref in srcs:
+                        fact_name = key[len("factsrc_"):]
+                        cur.execute(
+                            "INSERT INTO personal.fact_rederive_queue (node_ref, fact_name, source_ref, reason) "
+                            "VALUES (%s, %s, %s, %s)",
+                            (node_ref, fact_name, source_ref, reason or f"source {source_ref} suppressed"),
+                        )
+                        enqueued += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return enqueued
+
+
+# ── Asset neighbourhood (dossier) ────────────────────────────────────────────
+
+def get_asset_neighbourhood(asset_id: int, include_suppressed: bool = False) -> list[dict]:
+    """
+    Return the 1-hop neighbourhood of an :Asset node, grouped for the dossier.
+    Each item: {edge_type, edge_id, confidence, direction, zeroed_by, zero_reason, node}
+    direction is 'out' if the Asset is the edge's start node, else 'in'.
+    Filters r.confidence > 0 unless include_suppressed is True.
+    """
+    graph = "personal_graph"
+    conf_pred = "" if include_suppressed else "AND r.confidence > 0"
+    # Match by ref, not asset_id — asset_id is only ever set by write_asset_node()
+    # (ingestion-path assets). Seeded routine assets are synced by
+    # task_asset_graph_sync() which sets ref but never asset_id, so matching on
+    # asset_id silently misses every routine asset. ref is universally set by
+    # both write paths since it's the MERGE key in each.
+    node_ref = f"personal.asset:{asset_id}"
+    conn = _conn()
+    items: list[dict] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM cypher('{graph}', $$"
+                f" MATCH (a:Asset {{ref: {_cypher_val('ref', node_ref)}}})-[r]->(n) "
+                f" WHERE true {conf_pred} "
+                f" RETURN type(r), id(r), r.confidence, r.zeroed_by, r.zero_reason, n, 'out'"
+                f"$$) AS (etype agtype, eid agtype, conf agtype, zb agtype, zr agtype, node agtype, dir agtype)"
+            )
+            rows_out = cur.fetchall()
+            cur.execute(
+                f"SELECT * FROM cypher('{graph}', $$"
+                f" MATCH (a:Asset {{ref: {_cypher_val('ref', node_ref)}}})<-[r]-(n) "
+                f" WHERE true {conf_pred} "
+                f" RETURN type(r), id(r), r.confidence, r.zeroed_by, r.zero_reason, n, 'in'"
+                f"$$) AS (etype agtype, eid agtype, conf agtype, zb agtype, zr agtype, node agtype, dir agtype)"
+            )
+            rows_in = cur.fetchall()
+    finally:
+        conn.close()
+
+    def _unwrap(v):
+        if v is None:
+            return None
+        s = str(v).strip('"')
+        return None if s in ("null", "None") else s
+
+    for row in (list(rows_out) + list(rows_in)):
+        etype, eid, conf, zb, zr, node_raw, direction = (
+            row["etype"], row["eid"], row["conf"], row["zb"], row["zr"], row["node"], row["dir"],
+        )
+        vertex = _parse_vertex(node_raw)
+        if not vertex:
+            continue
+        conf_val = _unwrap(conf)
+        items.append({
+            "edge_type":   _unwrap(etype),
+            "edge_id":     int(_unwrap(eid)) if _unwrap(eid) else None,
+            "confidence":  int(float(conf_val)) if conf_val not in (None, "") else 0,
+            "zeroed_by":   _unwrap(zb),
+            "zero_reason": _unwrap(zr),
+            "direction":   _unwrap(direction),
+            "node": {
+                "labels": [vertex.get("label", "Unknown")],
+                "properties": vertex.get("properties", {}),
+            },
+        })
+    return items
 
 
 # ── Document node ─────────────────────────────────────────────────────────────
@@ -314,7 +624,7 @@ def write_extracted_nodes(
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Framework {{name: {_cypher_val('name', name)}}}) "
-                f"MERGE (d)-[r:FROM_FRAMEWORK]->(n) RETURN r"
+                f"MERGE (d)-[r:FROM_FRAMEWORK]->(n) {_merge_edge_with_confidence(graph, 'FROM_FRAMEWORK')} RETURN r"
             )
             total += 1
         except Exception as e:
@@ -327,17 +637,21 @@ def write_extracted_nodes(
         props     = build_props({"name": name, "description": desc})
         try:
             _cypher1(graph, f"MERGE (n:Concept {{{props}}}) RETURN n")
+            if is_user_zeroed(graph,
+                    f"MATCH (a:Document {{row_id: {doc_row_id}}})",
+                    f"MATCH (b:Concept {{name: {_cypher_val('name', name)}}})", "MENTIONS"):
+                continue
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Concept {{name: {_cypher_val('name', name)}}}) "
-                f"MERGE (d)-[r:MENTIONS]->(n) RETURN r"
+                f"MERGE (d)-[r:MENTIONS]->(n) {_merge_edge_with_confidence(graph, 'MENTIONS')} RETURN r"
             )
             if framework:
                 try:
                     _cypher1(graph,
                         f"MATCH (n:Concept {{name: {_cypher_val('name', name)}}}) "
                         f"MATCH (f:Framework {{name: {_cypher_val('name', framework)}}}) "
-                        f"MERGE (n)-[r:PART_OF]->(f) RETURN r"
+                        f"MERGE (n)-[r:PART_OF]->(f) {_merge_edge_with_confidence(graph, 'PART_OF')} RETURN r"
                     )
                 except Exception:
                     pass
@@ -352,17 +666,21 @@ def write_extracted_nodes(
         props     = build_props({"name": name, "description": desc})
         try:
             _cypher1(graph, f"MERGE (n:Person {{{props}}}) RETURN n")
+            if is_user_zeroed(graph,
+                    f"MATCH (a:Document {{row_id: {doc_row_id}}})",
+                    f"MATCH (b:Person {{name: {_cypher_val('name', name)}}})", "MENTIONS"):
+                continue
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Person {{name: {_cypher_val('name', name)}}}) "
-                f"MERGE (d)-[r:MENTIONS]->(n) RETURN r"
+                f"MERGE (d)-[r:MENTIONS]->(n) {_merge_edge_with_confidence(graph, 'MENTIONS')} RETURN r"
             )
             if is_author:
                 try:
                     _cypher1(graph,
                         f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                         f"MATCH (n:Person {{name: {_cypher_val('name', name)}}}) "
-                        f"MERGE (d)-[r:AUTHORED_BY]->(n) RETURN r"
+                        f"MERGE (d)-[r:AUTHORED_BY]->(n) {_merge_edge_with_confidence(graph, 'AUTHORED_BY')} RETURN r"
                     )
                 except Exception:
                     pass
@@ -376,10 +694,14 @@ def write_extracted_nodes(
         props = build_props({"name": name, "description": desc})
         try:
             _cypher1(graph, f"MERGE (n:Organisation {{{props}}}) RETURN n")
+            if is_user_zeroed(graph,
+                    f"MATCH (a:Document {{row_id: {doc_row_id}}})",
+                    f"MATCH (b:Organisation {{name: {_cypher_val('name', name)}}})", "MENTIONS"):
+                continue
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Organisation {{name: {_cypher_val('name', name)}}}) "
-                f"MERGE (d)-[r:MENTIONS]->(n) RETURN r"
+                f"MERGE (d)-[r:MENTIONS]->(n) {_merge_edge_with_confidence(graph, 'MENTIONS')} RETURN r"
             )
             total += 1
         except Exception as e:
@@ -401,14 +723,14 @@ def write_extracted_nodes(
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Claim {{claim_id: {_cypher_val('claim_id', claim_id)}}}) "
-                f"MERGE (d)-[r:ASSERTS]->(n) RETURN r"
+                f"MERGE (d)-[r:ASSERTS]->(n) {_merge_edge_with_confidence(graph, 'ASSERTS')} RETURN r"
             )
             if framework:
                 try:
                     _cypher1(graph,
                         f"MATCH (n:Claim {{claim_id: {_cypher_val('claim_id', claim_id)}}}) "
                         f"MATCH (f:Framework {{name: {_cypher_val('name', framework)}}}) "
-                        f"MERGE (n)-[r:APPLIES_TO]->(f) RETURN r"
+                        f"MERGE (n)-[r:APPLIES_TO]->(f) {_merge_edge_with_confidence(graph, 'APPLIES_TO')} RETURN r"
                     )
                 except Exception:
                     pass
@@ -429,7 +751,8 @@ def write_extracted_nodes(
             _cypher1(graph,
                 f"MATCH (a:Concept {{name: {_cypher_val('name', frm)}}}) "
                 f"MATCH (b:Concept {{name: {_cypher_val('name', to)}}}) "
-                f"MERGE (a)-[r:{rel_type} {{notes: {_cypher_val('notes', notes)}}}]->(b) RETURN r"
+                f"MERGE (a)-[r:{rel_type} {{notes: {_cypher_val('notes', notes)}}}]->(b) "
+                f"{_merge_edge_with_confidence(graph, rel_type)} RETURN r"
             )
         except Exception as e:
             print(f"[graph] Relationship error {frm}-[{rel_type}]->{to}: {e}")
@@ -443,7 +766,7 @@ def write_extracted_nodes(
             _cypher1(graph,
                 f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
                 f"MATCH (n:Theme {{theme_id: {_cypher_val('theme_id', theme_id)}}}) "
-                f"MERGE (d)-[r:RELATES_TO]->(n) RETURN r"
+                f"MERGE (d)-[r:RELATES_TO]->(n) {_merge_edge_with_confidence(graph, 'RELATES_TO')} RETURN r"
             )
         except Exception as e:
             print(f"[graph] Theme link error: {e}")
@@ -490,7 +813,7 @@ def write_message_node(
         _cypher1(graph,
             f"MATCH (m:Message {{msg_key: {msg_key_val}}}) "
             f"MATCH (d:Document {{row_id: {doc_row_id}}}) "
-            f"MERGE (m)-[r:LINKED_TO]->(d) RETURN r"
+            f"MERGE (m)-[r:LINKED_TO]->(d) {_merge_edge_with_confidence(graph, 'LINKED_TO')} RETURN r"
         )
     except Exception as e:
         print(f"[graph] Message→Document link error: {e}")
@@ -506,7 +829,7 @@ def write_message_node(
             _cypher1(graph,
                 f"MATCH (m:Message {{msg_key: {msg_key_val}}}) "
                 f"MATCH (s:Sender {{handle: {_cypher_val('handle', from_handle)}}}) "
-                f"MERGE (m)-[r:FROM]->(s) RETURN r"
+                f"MERGE (m)-[r:FROM]->(s) {_merge_edge_with_confidence(graph, 'FROM')} RETURN r"
             )
         except Exception as e:
             print(f"[graph] Sender node error: {e}")
