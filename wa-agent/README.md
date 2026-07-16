@@ -88,9 +88,15 @@ Full reference: [`src/maintenance.md`](src/maintenance.md)
 Runs nightly (or on demand via `POST /maintenance`). Handles event generation from asset rules, scheduling conflict detection, knowledge graph sync, and appointment digest pre-computation.
 
 **Tasks in default run order:**
-`re_embed → link → dedup → prune → generate_events → detect_conflicts → refresh_asset_notes → asset_graph_sync → monitor → tune_weights → appointment_digest`
+`rederive_facts → re_embed → link → dedup → prune → generate_events → detect_conflicts → detect_provider_gaps → reconcile_ingested → refresh_asset_notes → asset_graph_sync → monitor → tune_weights → appointment_digest → routine_context_pack → notify_provider_conflicts → asset_summary`
+
+`rederive_facts` runs first deliberately — it drains the re-derivation queue (facts whose sources were suppressed since the last run) before any other task reads or rewrites facts, so nothing downstream acts on stale conclusions.
 
 Run a subset: `POST /maintenance?tasks=generate_events&tasks=detect_conflicts`
+
+**`rederive_facts`** — for each `(asset_ref, fact_name)` queued by an edge suppression, drops the suppressed source from that fact's `factsrc_*` list and re-derives from what remains; deletes the fact (and its `factsrc_*`) entirely if no sources remain. A `fact_*` must never outlive its evidence — this is what makes suppression trustworthy instead of cosmetic.
+
+**`asset_summary`** — for each active asset (skip-if-fresh via `facts_updated_at`, bypassed when the asset was just re-derived by suppression): assembles non-suppressed neighbourhood + current facts, derives/refreshes named `fact_*` properties, and writes one `fact_summary` one-liner via LLM, derived only from the facts (never raw documents) so it can't assert anything a fact doesn't support. Always match the Asset node by `ref` (`"personal.asset:{id}"`) — **never** by an unlabeled/undirected Cypher `MATCH`, which forces AGE to scan every vertex and edge label table in the graph rather than the much smaller `:Asset`-labeled set.
 
 **Three-stage collision pipeline:**
 - **Stage 1 (Suppress)** — inside `task_generate_events`: skip or delete generated placeholders when a `suppress_on` context event exists for that date

@@ -29,6 +29,9 @@ Central ingestion service. Accepts documents from all channels and routes them i
 | `GET`  | `/scan` | Force immediate scan of ReadyToIngest directory |
 | `GET`  | `/api/notifications` | Active notifications (DETECTED / TRIAGED / PENDING) |
 | `GET`  | `/api/assets` | All tracked assets with rule counts |
+| `GET`  | `/api/assets/:id/dossier` | Full dossier for one asset — facts, factsrc, summary, neighbourhood sections by edge type, events, routine participation. Query param `include_suppressed=1` to include zeroed edges. |
+| `POST` | `/api/edges/suppress` | Zero an edge's confidence (`{edge_id, reason}`) — durable against re-ingestion, enqueues fact re-derivation for any fact sourced from it |
+| `POST` | `/api/edges/restore` | Restore a suppressed edge to its pre-zero confidence (`{edge_id}`) |
 | `GET`  | `/api/events/pending-sync` | Rule-generated events awaiting Google Calendar sync |
 | `POST` | `/api/events/mark-synced` | Mark an event synced with its gcal_event_id |
 | `POST` | `/notifications/run-detectors` | Trigger a full notification detector sweep |
@@ -66,6 +69,13 @@ After any personal-schema ingest, `asset_router.py` runs in a background thread:
 | `src/asset_classifier.py` | Entity type → asset route classification |
 | `src/rule_watcher.py` | Asset rule evaluation and event generation |
 | `src/notification_detectors.py` | Collision, health, staleness, pattern gap, action detectors |
+| `src/graph.py` | Also: `zero_edge()` / `restore_edge()` (suppression), `get_asset_neighbourhood()` (dossier), `is_user_zeroed()` (re-ingestion guard) |
+
+## Edge suppression and the dossier
+
+Every edge written to `personal_graph` carries `confidence INT` (0–100). Suppressing an edge (`zero_edge()` in `graph.py`) sets `confidence = 0` plus `zeroed_by` / `zeroed_at` / `zero_reason` / `zero_prev_confidence` — it never deletes the edge or either node. A `zeroed_by='user'` edge is permanent: any writer that would otherwise create/rescore a MENTIONS/NOTE/etc. edge between the same pair must call `is_user_zeroed()` first and skip if true. System-zeroed edges (`zeroed_by='system'`) may still be re-scored.
+
+`get_asset_neighbourhood(asset_id)` — **always match by `ref` (`"personal.asset:{id}"`), never by an `asset_id` property.** `asset_id` is only ever set by `write_asset_node()` (ingestion-path assets); assets synced solely via wa-agent's `task_asset_graph_sync` never get it set. `ref` is the universal MERGE key on both write paths. The function runs two directed, `:Asset`-labeled queries (`-[r]->` and `<-[r]-`) rather than one unlabeled undirected `MATCH` — AGE has no index support for an unlabeled undirected traversal and it will scan every vertex/edge label table in the graph (verified: this hung for 2+ hours against a ~350k-edge graph before being fixed).
 
 ## Environment variables
 

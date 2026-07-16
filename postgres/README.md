@@ -43,6 +43,12 @@ SET search_path = ag_catalog, "$user", public;
 
 This is handled automatically in `graph.py` and `search.py`. The AGE Viewer (port 8888) does this on connection.
 
+## Edge confidence (AGE)
+
+Every edge in `personal_graph` carries `confidence INT` (0–100, backfilled per source-type prior — email-derived 40, manual 65, system-structural e.g. participant bindings 90). Suppressing an edge sets `confidence = 0` plus `zeroed_by`/`zeroed_at`/`zero_reason`/`zero_prev_confidence` rather than deleting it — see the main [README's Asset Dossier & Suppression section](../README.md#asset-dossier--suppression) for the full semantics. `confidence > 0` is the universal read-path predicate; there is no separate suppression flag to check anywhere in retrieval, enrichment, or the dossier.
+
+`postgres/init/32_graph_indexes.sql` — btree on vertex `name` + GIN on vertex `properties`, one label at a time, for `personal_graph`/`decision_graph`/`property_graph`. There is **no index that helps an unlabeled or undirected Cypher `MATCH`** — AGE stores each vertex/edge label as its own physical table, so a labeled, directed `MATCH (a:Asset {ref: '...'})-[r]->(n)` only ever scans that one small table, while an unlabeled `MATCH (n {ref: '...'})` or an undirected `-[r]-` scans every label table in the graph. On a graph with hundreds of thousands of edges this is the difference between milliseconds and multi-hour hangs — always label and direct Cypher queries used in a hot path (anything run per-row in a maintenance loop).
+
 ## Initialisation
 
 `postgres/init/` contains ordered SQL scripts that run on first container start. To re-run a migration manually:

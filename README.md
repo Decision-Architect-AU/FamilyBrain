@@ -724,6 +724,61 @@ The wa-agent's search pipeline uses all three in a single request: Cypher for en
 
 ---
 
+## Asset Dossier & Suppression
+
+### The philosophy
+
+An asset's graph neighbourhood — every email, note, event, and relationship touching it — is only useful if a human can see it, correct it, and trust that a correction sticks. The dossier is a **generic 1-hop neighbourhood renderer**: one API, one dashboard page (`/assets/[id]`), driven entirely by edge type. There is no per-asset-type page to maintain — a new edge type introduced later (a new document classifier, a new relationship kind) renders automatically via a default presenter, no dashboard change required.
+
+```
+GET /api/assets/:id/dossier
+  → { asset, facts, factsrc, summary, sections: [{edge_type, items[]}], events, participant_of, routine_participants }
+```
+
+Sections are grouped by AGE edge type (`HAS_ASSET`, `MENTIONS`, `NOTE`, `EXTRACTED_FROM`, …) and merged with relational data: events via `personal.event`, routine participation via `event_participant`.
+
+### Edge confidence — the suppression primitive
+
+Every edge in `personal_graph` carries a `confidence INT` (0–100), the same scale used on events. Retrieval, enrichment, and the dossier all read edges with `confidence > 0` by default — suppression is not a special-cased filter bolted onto each consumer, it is the same predicate everywhere.
+
+**Suppressing an item ("this note is irrelevant") zeroes the edge — it never deletes the node:**
+
+```cypher
+SET edge.confidence   = 0,
+    edge.zeroed_by    = 'user',
+    edge.zeroed_at    = now(),
+    edge.zero_reason  = 'marked irrelevant from dossier'
+```
+
+This is durable against re-ingestion — before writing a new MENTIONS/NOTE edge, the writer checks for an existing edge between the same pair; if one was zeroed by a user, it is never re-created or re-scored. A system-zeroed edge (e.g. a stale link the maintenance job dropped) may still be re-scored. The node itself survives regardless — a note linked only to the suppressed asset becomes orphaned but is retained for audit. Restoring an item (`POST /api/edges/restore`) reads back `zero_prev_confidence` (captured at zero-time) and reinstates it everywhere at once.
+
+### Fact provenance — no fact outlives its evidence
+
+Enrichment never writes a bare `fact_*` property. Every fact is written alongside `factsrc_<name>` — the list of source refs it was derived from — using the same discipline as `confidence_reason` on events:
+
+```
+fact_current_ot     = "Sarah Chen"
+factsrc_current_ot  = ["gmail:1852ab...", "gmail:1901cd..."]
+```
+
+When a source edge is suppressed, every fact whose `factsrc_*` cites it is enqueued for re-derivation. The maintenance job's `rederive_facts` task drains this queue before anything else runs: it re-derives each fact from its remaining sources, or deletes the fact entirely if none remain. A suppression that left a stale fact behind would make the whole suppression feature untrustworthy — the visible link disappears from the dossier, but its conclusion would silently persist in the summary. `rederive_facts` is what keeps that from happening.
+
+### Asset summary enrichment
+
+A nightly `asset_summary` task assembles each active asset's non-suppressed neighbourhood plus its current facts, derives/refreshes named facts (`fact_current_ot`, `fact_last_invoice_date`, `fact_visit_cadence_<service>`, …), and writes one `fact_summary` one-liner — generated **from the facts, not the raw documents**, so the summary can never assert something no fact supports. `factsrc_summary` records which fact names it drew on. Skip-if-fresh reuses the existing `facts_updated_at` freshness check; a re-derivation triggered by suppression bypasses that freshness gate so corrections take effect immediately rather than waiting out the TTL.
+
+### Invoice practitioner extraction
+
+Provider invoices (e.g. a therapy clinic billing OT and physio visits from the same org) are extracted **per line item**, never per organisation — one clinic can feed two different routines correctly because the line item, not the sender, carries the service type. Practitioner name resolution follows the same fuzzy-match discipline as participant binding:
+
+- exact/alias match → link at full confidence
+- strong fuzzy match ("S. Chen" vs "Sarah Chen", same org + service) → link at reduced confidence, decision logged
+- no match at high extraction confidence → create a new person asset; below threshold → review queue, never a silent fork or merge
+
+A locum appearing once does not flip an established `fact_current_<service>` — flipping requires 2+ occurrences or manual confirmation; a single below-threshold appearance is queued for review rather than applied automatically.
+
+---
+
 ## Adaptive Intelligence
 
 ### next_update_at scheduling
@@ -1060,7 +1115,7 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `Sender` | `handle`, `name`, `source` |
 | `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `effective_date`, `event_type`, `gcal_event_id`, `next_update_at`, `fact_*`, `ref` |
 | `Bill` | `bill_id`, `payee`, `amount`, `due_date`, `status`, `reference`, `resolved_at` |
-| `Asset` | `ref`, `name`, `asset_type`, `subtype`, `status` |
+| `Asset` | `ref`, `name`, `asset_type`, `subtype`, `status`, `fact_*`/`factsrc_*`, `fact_summary`/`factsrc_summary`, `facts_updated_at` |
 
 `fact_*` properties on `Event` and other nodes are open-ended — extracted fields such as `fact_provider`, `fact_location`, `fact_notes`, `fact_cost`, `fact_duration` are written by the enrichment pipeline and are never truncated. The `ref` field on each node is a hydration handle (`"schema.table:id"`) for resolving back to the full Postgres row.
 
@@ -1079,6 +1134,10 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `TRIGGERED` | Event → Event | `rule_id` — proactive follow-up events |
 | `RESOLVES` | Document/Message → Bill | `match_type`, `confidence` |
 | `HAS_ASSET` | Person → Asset | links person to their assets (medications, therapy, subscriptions) |
+| `WORKS_AT` | Person → Organisation | resolved practitioner → provider org |
+| `PROVIDES` | Person → Asset (routine) | resolved practitioner → the routine/service they provide |
+
+Every edge in `personal_graph` carries `confidence INT` (0–100, same scale as events) plus, once suppressed, `zeroed_by` / `zeroed_at` / `zero_reason` / `zero_prev_confidence`. Retrieval, enrichment, and the dossier all filter `confidence > 0` by default — see [Asset Dossier & Suppression](#asset-dossier--suppression).
 
 ---
 
@@ -1175,6 +1234,13 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] Stage 2: Override — email decomposer computes slot_key, finds generated placeholder, supersedes on rank ≥ match; `superseded_by_event_id` FK preserves history
 - [x] Stage 3: Conflict detection — `task_detect_conflicts` sweeps for overlapping `blocks_person=true` events across different slot_classes for the same person; `personal.conflict` table with full lifecycle
 - [x] Conflict auto-resolution — auto-passes stale conflicts when either event ends, is superseded, or no longer overlaps
+- [x] Edge confidence — `confidence INT` on every `personal_graph` edge, backfilled by source-type prior; `confidence > 0` is the universal read-path predicate
+- [x] Edge suppression — zero-not-delete semantics (`zeroed_by`/`zeroed_at`/`zero_reason`/`zero_prev_confidence`); permanent against re-ingestion for user-zeroed edges; `POST /api/edges/suppress` + `/restore`
+- [x] Fact provenance — `factsrc_*` required alongside every `fact_*`; write-refusal without it
+- [x] Re-derivation queue — suppressing a source enqueues every fact that cited it; `rederive_facts` maintenance task re-derives or deletes before other tasks run
+- [x] Asset dossier — `GET /api/assets/:id/dossier`, generic neighbourhood renderer grouped by edge type, dashboard page at `/assets/[id]`
+- [x] Asset summary enrichment — nightly `asset_summary` task derives named facts + one-line `fact_summary` from facts only, never raw documents
+- [x] Invoice practitioner extraction — per-line-item service disambiguation, fuzzy practitioner resolution with review-queue gate, flip-guard on established `fact_current_*`
 - [ ] Email → Asset matcher — match inbound emails to assets via contact_email / provider_domain / AGE traversal
 - [ ] Email intent classifier — classify matched emails as cancellation / reschedule / provider change / informational
 - [ ] Dashboard conflict cards — surface open `personal.conflict` rows as actionable cards with `suggested_keep` hint

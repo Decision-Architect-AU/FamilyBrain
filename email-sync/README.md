@@ -14,6 +14,24 @@ Runs five sequential stages on each poll cycle:
 | **Bill calendar** | Creates/enriches Google Calendar events for financial notes |
 | **Appointment updater** | Polls `next_update_at <= now()` → writes enriched events to Google Calendar |
 
+## Bill classification & extraction
+
+`bill_calendar.py` uses a **single combined LLM call** per financial document — classification and payment extraction happen together, not as two passes. The prompt returns `document_type`, `requires_payment_from_us`, `is_spam` (+ `spam_reason`), and `payments[]` (populated only when a payment is actually owed). This replaced an earlier extraction-only prompt that had no way to say "this isn't a bill" — it would extract *something* from any document handed to it, including payslips and loan-application paperwork, because the prompt only ever asked "what's the payment", never "is there one at all".
+
+Two documents that surfaced the earlier design's failure mode, both now handled by the pre-filter or the classification step:
+- **A payslip forwarded inside a loan-application email thread** — the LLM had no signal to say "this document has nothing to do with what I'm supposed to extract" and hallucinated a biller/amount/invoice-ref from payslip noise. Fixed with a keyword pre-filter (`_NOT_A_BILL_KW`: payslip/pay-period/loan-application-documents/etc.) *and* the `requires_payment_from_us` field.
+- **Placeholder reference numbers slipping through** — the scrubbing regex only matched `INV1234` (exactly 4 digits) with a trailing word boundary, so a real-looking `INV 12345` (5 digits) sailed through unscrubbed. Fixed to `INV[-\s]*12345?\b` / `REF[-\s]*12345?\b`.
+
+A note that fails classification (`is_spam=true`, `requires_payment_from_us=false`, or the LLM call itself errors) gets `bill_event_id = 'SKIP'` and is never retried — this is deliberate: retrying every cycle on a document that will never become a bill just burns LLM time. On LLM failure the function now **skips rather than falls back to a single-item guess** — the old fallback used the email subject as `biller`, which is exactly the kind of unverified data suppression is meant to catch further downstream.
+
+## Email decomposer — per-item transactions
+
+`email_decomposer.py` processes each extracted item (`calendar_event` / `payment` / `observation` / `task`) inside its **own** `psycopg2.connect(...)` block rather than one connection held open across the whole item list. Holding a single connection across multiple items risked a self-deadlock: `_create_calendar_event` could hold an open transaction on an event row while `upsert_event` (called for a later item) opened a second connection and tried to touch the same row — a genuine 47-hour hang was traced to exactly this. `db.conn()` also sets `lock_timeout=8000`/`statement_timeout=60000` so any future lock conflict fails fast instead of hanging indefinitely.
+
+Every row fetched with `RealDictCursor` is a dict-like object, not a tuple — `cur.fetchone()[0]` raises `KeyError(0)`, not `IndexError`. Every function in this codebase that reads a `RealDictCursor` result accesses it by column name (`row["id"]`), never by position.
+
+Calendar event source metadata (account email, From address, received date) is appended to the event's notes field so its provenance is visible directly in Google Calendar, not just in the DB. The event UPDATE inside `_create_calendar_event` sets `status = 'confirmed'`, not `'ingested'` — `appointment_updater` explicitly excludes `status IN ('cancelled','superseded','ingested')` from its GCal write query, so setting `'ingested'` here silently blocked every email-derived event from ever reaching the calendar.
+
 ## Sent item ingestion
 
 Both Gmail and Outlook sync sent items alongside received mail:
