@@ -14,7 +14,9 @@ Personal brain scope:
   - Property management: rental statements, maintenance, body corporate, council rates
     (NOT property listings/EOI/open homes — those are deals pipeline, not personal brain)
   - Travel bookings: flights, hotels, car hire
-  - School/kids: Compass, excursions, reports, uniform, fees
+  - School/kids: Compass, excursions, reports, uniform, fees, and
+    extracurricular activities (music/sport programs, choir, concerts,
+    recitals, permission forms, group/team assignments, performance schedules)
 
 Two-stage:
   1. Keyword rules (no LLM) — catches obvious cases fast
@@ -105,6 +107,14 @@ _INGEST_SUBJECT_KW = re.compile(
     # School / kids
     r'compass|excursion|permission slip|report card|uniform|'
     r'tuckshop|term dates|'
+    # School / kids — extracurricular (music, sport, performances) — these
+    # carry real calendar events (dates, venues, group/team assignments) and
+    # were previously falling through to the ambiguous LLM triage step, which
+    # inconsistently classified them as skip (e.g. "Melodies Choir - Permission
+    # Forms and Upcoming Performances" never reached the decomposer)
+    r'concert|recital|performance|rehearsal|ensemble|choir|orchestra|band practice|'
+    r'cello|violin|strings|music lesson|music program|'
+    r'gala|sports day|carnival|team assignment|'
     # Insurance
     r'policy|certificate of currency|renewal|claim|'
     # Utilities / rego
@@ -142,7 +152,9 @@ The personal brain only cares about:
 - Property management: rental statements, maintenance, body corporate, council rates
   (NOT property listings, open homes, or market updates — those are NOT personal brain)
 - Travel: flight/hotel booking confirmations, itineraries
-- School/kids: Compass notices, excursions, reports, fees
+- School/kids: Compass notices, excursions, reports, fees, and extracurricular
+  activities (music, sport, choir, ensemble, concerts, recitals) — including
+  permission forms, group/team assignments, and performance schedules for these
 
 Decide:
 - ingest: Fits the personal brain scope above

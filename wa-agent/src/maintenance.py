@@ -28,7 +28,7 @@ import psycopg2.extras
 from datetime import datetime, date, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 
-from src.linker import run_linker, _conn, _embed, _cypher, GRAPHS
+from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, GRAPHS
 from src.routine_context_pack import assemble_all_packs
 
 DB_URL     = os.environ.get("DATABASE_URL")
@@ -72,6 +72,18 @@ def task_re_embed() -> dict:
 def task_link() -> dict:
     """Run concept linker across all graphs."""
     return run_linker()
+
+
+def task_audit_concepts() -> dict:
+    """
+    Sample a handful of already-linked concepts per graph and have the
+    reasoning model validate the linker's own ALIAS_OF/SIMILAR_TO edges,
+    zeroing any it flags as a genuine mismatch. Slow per-call (~200s on the
+    reasoning model) but only a handful of samples per run and it's
+    maintenance, not the chat path — the model's extra care is worth the
+    cost here in a way it isn't for live queries.
+    """
+    return audit_concepts()
 
 
 def task_dedup(graph: str, conn) -> int:
@@ -1576,7 +1588,7 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     all_tasks = tasks or [
         "rederive_facts",
-        "re_embed", "link", "dedup", "prune",
+        "re_embed", "link", "audit_concepts", "dedup", "prune",
         "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
@@ -1609,6 +1621,21 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         else:
             results["link"] = {"skipped": "throttled"}
             print(f"[maintenance] link skipped (throttled, next in {int(_LINK_INTERVAL - (_time.time() - _last))}s)")
+
+    if "audit_concepts" in all_tasks:
+        # Several ~200s reasoning-model calls per run (see linker.audit_concepts
+        # docstring) — throttle independently of link, default once per day.
+        _AUDIT_INTERVAL = int(os.environ.get("CONCEPT_AUDIT_INTERVAL_SECS", "86400"))
+        _audit_flag = "/tmp/last_concept_audit_run"
+        import pathlib, time as _time
+        _last = float(pathlib.Path(_audit_flag).read_text()) if pathlib.Path(_audit_flag).exists() else 0
+        if _time.time() - _last >= _AUDIT_INTERVAL:
+            results["audit_concepts"] = task_audit_concepts()
+            pathlib.Path(_audit_flag).write_text(str(_time.time()))
+            print(f"[maintenance] audit_concepts done: {results['audit_concepts']}")
+        else:
+            results["audit_concepts"] = {"skipped": "throttled"}
+            print(f"[maintenance] audit_concepts skipped (throttled, next in {int(_AUDIT_INTERVAL - (_time.time() - _last))}s)")
 
     if "dedup" in all_tasks or "prune" in all_tasks:
         conn = _conn()

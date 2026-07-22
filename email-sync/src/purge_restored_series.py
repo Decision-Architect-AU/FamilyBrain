@@ -24,6 +24,7 @@ _PURGE_TITLES = {
     "music ensemble",
     "Elliana Music Ensemble",
     "Ellie Music Ensemble",
+    "Ellies music ensemble",
     "Physio",
     "Physiotherapy",
     "Physio appointment",

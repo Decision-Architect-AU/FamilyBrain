@@ -16,6 +16,9 @@ _embed_tokenizers: dict = {}
 _rerank_models: dict = {}
 _rerank_tokenizers: dict = {}
 _whisper_pipelines: dict = {}
+_vlm_pipelines: dict = {}
+_vlm_tokenizers: dict = {}   # model name -> AutoTokenizer, for chat-template rendering (enable_thinking)
+_ovms_models: dict[str, str] = {}   # model name -> OVMS base URL
 _config: dict = {}
 # Per-model locks — CompiledModel.__call__ is not thread-safe on NPU/GPU
 _model_locks: dict[str, threading.Lock] = {}
@@ -27,9 +30,22 @@ def load_registry():
         _config = yaml.safe_load(f)
 
     for name, cfg in _config.get("models", {}).items():
+        model_type = cfg.get("type", "generate")
+
+        # OVMS-routed models have no local IR to load — the actual model
+        # lives wherever OVMS points at it, entirely outside this process.
+        # Just record where to proxy requests for this name; see
+        # src/ovms_proxy.py for why some models (VLM exports with a
+        # decoupled embeddings/decoder submodel) go this route instead of
+        # openvino_genai directly.
+        if model_type == "ovms":
+            ovms_url = cfg.get("ovms_url", os.environ.get("OVMS_BASE_URL", "http://localhost:8000"))
+            _ovms_models[name] = ovms_url
+            print(f"[registry] ✓ {name} registered as OVMS-routed ({ovms_url})")
+            continue
+
         path = cfg["path"]
         device = cfg.get("device", "CPU")
-        model_type = cfg.get("type", "generate")
 
         if not Path(path).exists():
             print(f"[registry] Skipping {name} — path not found: {path}")
@@ -85,6 +101,25 @@ def load_registry():
                 _whisper_pipelines[name] = pipe
                 print(f"[registry] ✓ {name} whisper ready")
 
+            elif model_type == "vlm":
+                # VLM export (separate vision-embeddings + language-model
+                # submodels). VLMPipeline.generate() runs text-only fine when
+                # called with no image argument — confirmed working directly,
+                # no need to route through a separate OVMS process for this.
+                print(f"[registry] Loading VLM {name} on {device}...")
+                pipe = ov_genai.VLMPipeline(path, device, **gpu_props)
+                _vlm_pipelines[name] = pipe
+                # Loaded separately from the pipeline itself — needed to render
+                # the model's real chat_template.jinja with enable_thinking
+                # on/off. The pipeline only takes a plain prompt string; the
+                # thinking/no-thinking branch lives in the Jinja template, not
+                # anywhere openvino_genai's own API surface controls directly.
+                try:
+                    _vlm_tokenizers[name] = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+                except Exception as e:
+                    print(f"[registry]   (no chat-template tokenizer for {name}: {e} — thinking toggle unavailable, falls back to flat prompt)")
+                print(f"[registry] ✓ {name} (vlm, text-only) ready")
+
         except Exception as e:
             print(f"[registry] ✗ Failed to load {name}: {e}")
 
@@ -107,6 +142,22 @@ def get_embed_model(model_name: str):
         key = next(iter(_embed_models))
         return _embed_models[key], _embed_tokenizers[key]
     return None, None
+
+
+def get_ovms_url(model_name: str) -> str | None:
+    return _ovms_models.get(model_name)
+
+
+def list_ovms_model_names() -> list[str]:
+    return list(_ovms_models.keys())
+
+
+def get_vlm_pipeline(model_name: str):
+    return _vlm_pipelines.get(model_name)
+
+
+def get_vlm_tokenizer(model_name: str):
+    return _vlm_tokenizers.get(model_name)
 
 
 def get_whisper_pipeline(model_name: str):
@@ -136,6 +187,13 @@ def list_models() -> list[dict]:
         cfg = _config["models"].get(name, {})
         models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
                         "size": 0, "digest": name, "details": {"family": "openvino-whisper", "device": cfg.get("device")}})
+    for name in _ovms_models:
+        models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
+                        "size": 0, "digest": name, "details": {"family": "ovms", "device": "OVMS"}})
+    for name in _vlm_pipelines:
+        cfg = _config["models"].get(name, {})
+        models.append({"name": name, "modified_at": "2026-01-01T00:00:00Z",
+                        "size": 0, "digest": name, "details": {"family": "openvino-vlm", "device": cfg.get("device")}})
     return models
 
 

@@ -60,12 +60,33 @@ def _creds(account: dict) -> Credentials:
     return creds
 
 
+import time as _time
+
+# Cache built API clients per (account_id, api_name) so repeated calls across the
+# 5/15-min poll loops reuse one underlying httplib2 transport instead of opening a
+# fresh one every call. googleapiclient's build() does not close its transport on
+# GC in a timely way — leaving it uncached leaked sockets into CLOSE_WAIT under
+# sustained polling until the process ran out of usable connections and hung.
+_service_cache: dict[tuple, tuple] = {}   # (account_id, api) -> (service, cached_at)
+_SERVICE_CACHE_TTL_SECS = 1800   # rebuild periodically so credential refresh is picked up
+
+
+def _cached_service(account: dict, api: str, version: str):
+    key = (account["id"], api)
+    cached = _service_cache.get(key)
+    if cached and (_time.monotonic() - cached[1]) < _SERVICE_CACHE_TTL_SECS:
+        return cached[0]
+    svc = build(api, version, credentials=_creds(account), cache_discovery=False)
+    _service_cache[key] = (svc, _time.monotonic())
+    return svc
+
+
 def _gmail_service(account: dict):
-    return build("gmail", "v1", credentials=_creds(account), cache_discovery=False)
+    return _cached_service(account, "gmail", "v1")
 
 
 def _calendar_service(account: dict):
-    return build("calendar", "v3", credentials=_creds(account), cache_discovery=False)
+    return _cached_service(account, "calendar", "v3")
 
 
 # ── Email ──────────────────────────────────────────────────────────────────────

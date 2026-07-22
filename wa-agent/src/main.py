@@ -49,6 +49,8 @@ Default to searching personal information unless the query is clearly about prop
 Be concise — this is a WhatsApp conversation. Aim for 2-5 sentences unless detail is explicitly requested.
 If the knowledge base doesn't contain relevant information, say so honestly rather than guessing.
 Never reveal raw database IDs or internal schema names.
+Respond in plain, easy-to-understand language.
+You may reason through the question first if that helps you get it right. Once you're done, write your final answer wrapped exactly like this: <answer>your final answer here</answer>. Nothing outside those tags will be shown to the user, so make sure the complete, self-contained answer is inside them.
 
 ## Routine context packs
 
@@ -97,6 +99,7 @@ class QueryRequest(BaseModel):
     body: str
     timestamp: int | None = None
     model: str | None = None
+    thinking: bool = False   # only meaningful for models with a chat-template tokenizer loaded
     person_hint: str | None = None   # last focused person name, for pronoun follow-ups
 
     class Config:
@@ -260,7 +263,7 @@ async def query(req: QueryRequest):
     if intent.persona_name:
         print(f"[wa-agent] persona={intent.persona_name}")
 
-    response = generate(prompt, system=system, model=req.model or None)
+    response = generate(prompt, system=system, model=req.model or None, thinking=req.thinking)
 
     graphs_used = list(context_sections.keys()) if context_sections else graphs
     _history[sender].append({"role": "user",      "text": message, "ts": now})
@@ -318,7 +321,7 @@ async def maintenance(tasks: list[str] | None = Query(default=None)):
     """Trigger nightly maintenance. Runs in background — returns immediately."""
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    effective = tasks or ["rederive_facts", "re_embed", "link", "dedup", "prune", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary"]
+    effective = tasks or ["rederive_facts", "re_embed", "link", "audit_concepts", "dedup", "prune", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary"]
     return {"status": "running", "tasks": effective}
 
 

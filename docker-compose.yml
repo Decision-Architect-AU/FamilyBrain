@@ -444,9 +444,6 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    extra_hosts:
-      - "postgres:172.19.0.6"
-      - "ingestor:172.19.0.11"
     networks:
       - familybrain-net
 

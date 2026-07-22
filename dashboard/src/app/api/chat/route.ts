@@ -6,14 +6,18 @@ const WA_AGENT_URL = process.env.WA_AGENT_URL ?? 'http://wa-agent:4002';
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, model, person_hint } = await req.json();
+    const { message, model, thinking, person_hint } = await req.json();
     if (!message?.trim()) return NextResponse.json({ error: 'empty message' }, { status: 400 });
 
     const res = await fetch(`${WA_AGENT_URL}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'dashboard', body: message, ...(model ? { model } : {}), ...(person_hint ? { person_hint } : {}) }),
-      signal: AbortSignal.timeout(120_000),
+      body: JSON.stringify({ from: 'dashboard', body: message, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(person_hint ? { person_hint } : {}) }),
+      // 8192-token reasoning generations (qwen3.6) can run well past 2 minutes,
+      // especially under GPU contention from wa-agent's linker maintenance
+      // task — needs to exceed wa-agent's own 480s timeout to the inference
+      // server, not just the quick qwen2.5 case this was originally tuned for.
+      signal: AbortSignal.timeout(500_000),
     });
 
     if (!res.ok) {

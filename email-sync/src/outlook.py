@@ -290,8 +290,16 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 cursor_is_delta = cursor and ("deltaToken" in cursor or "/delta" in cursor)
                 if not cursor_is_delta:
                     print(f"[outlook] seeding delta cursor for {account.get('email_address', account_id)}")
+                    # Microsoft Graph bakes the $select projection into the deltaLink
+                    # itself — every future poll using this cursor is permanently
+                    # limited to whatever fields were requested here. Seeding with
+                    # $select=id (as this used to do) meant every subsequent
+                    # incremental sync came back with id only: no subject, no body,
+                    # no from/to — silently skipped forever as "empty_body" with
+                    # "(no subject)". Must match the fields the real sync loop needs.
                     seed_resp = requests.get(
-                        f"{GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$top=1&$select=id",
+                        f"{GRAPH_BASE}/me/mailFolders/inbox/messages/delta"
+                        f"?$top=1&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId",
                         headers=_headers(account), timeout=30,
                     )
                     seed_data = seed_resp.json()

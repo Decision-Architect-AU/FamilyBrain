@@ -15,11 +15,14 @@ concurrent requests — embed calls are deliberately serialised with a small int
 """
 import os
 import re
+import json
 import math
 import time
+import random
 import psycopg2
 import psycopg2.extras
 import requests
+from datetime import datetime, timezone
 
 DB_URL      = os.environ.get("DATABASE_URL")
 # OLLAMA_URL kept for env-var compatibility; this points to the local inference engine
@@ -32,6 +35,14 @@ EMBED_DELAY_SECS = float(os.environ.get("LINKER_EMBED_DELAY_SECS", "0.1"))
 EMBED_RETRIES = int(os.environ.get("LINKER_EMBED_RETRIES", "3"))
 
 GRAPHS = ["personal_graph", "property_graph", "decision_graph"]
+
+# Concept audit — periodic validation of ALIAS_OF/SIMILAR_TO edges using the
+# slower reasoning model. Runs in maintenance, not on the chat path, so the
+# model's ~10x slower response time is a non-issue here and its extra care
+# is worth the cost catching mismatches (e.g. two different real-world
+# venues incorrectly ALIAS_OF'd on partial name overlap).
+AUDIT_MODEL       = os.environ.get("CONCEPT_AUDIT_MODEL", "OpenVINO/Qwen3.6-35B-A3B-int4-ov")
+AUDIT_SAMPLE_SIZE = int(os.environ.get("CONCEPT_AUDIT_SAMPLE_SIZE", "5"))
 
 # Minimum cosine similarity to create a SIMILAR_TO edge
 EMBED_THRESHOLD  = float(os.environ.get("LINKER_EMBED_THRESHOLD", "0.82"))
@@ -98,54 +109,132 @@ def _cypher(conn, graph: str, query: str, col_defs: str = "(r agtype)") -> list[
         return []
 
 
+def _esc(s: str) -> str:
+    """Escape single quotes for interpolation into a Cypher string literal."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _merge_edge(conn, graph: str, from_name: str, to_name: str,
                 rel_type: str, confidence: float):
     """Create or update a directed edge if it doesn't already exist."""
     conf_str = f"{confidence:.2f}"
     _cypher(conn, graph,
-        f"MATCH (a:Concept {{name: '{from_name}'}}), (b:Concept {{name: '{to_name}'}}) "
+        f"MATCH (a:Concept {{name: '{_esc(from_name)}'}}), (b:Concept {{name: '{_esc(to_name)}'}}) "
         f"MERGE (a)-[:{rel_type} {{confidence: {conf_str}}}]->(b)",
     )
     conn.commit()
 
 
-def link_graph(graph: str, conn) -> dict:
-    """Run all linkage passes for a single graph. Returns counts."""
-    counts = {"alias": 0, "similar": 0}
+def _unwrap(v) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip('"\'')
+    return None if s in ("null", "None", "") else s
 
-    concepts = _cypher(conn, graph,
-        "MATCH (c:Concept) RETURN c.name AS name",
-        "(name agtype)",
+
+def _get_concepts(conn, graph: str) -> list[dict]:
+    """
+    Fetch every Concept with its cached embedding (if any) and linked_at
+    timestamp (set once a concept has been through both linkage passes).
+    Concepts never change their name after creation, so a cached embedding
+    stays valid indefinitely — no need to ever recompute it.
+    """
+    rows = _cypher(conn, graph,
+        "MATCH (c:Concept) RETURN c.name AS name, c.embedding AS embedding, c.linked_at AS linked_at",
+        "(name agtype, embedding agtype, linked_at agtype)",
     )
-    names = [str(r.get("name", "")).strip('"\'') for r in concepts if r.get("name")]
-    if len(names) < 2:
+    out = []
+    for r in rows:
+        name = _unwrap(r.get("name"))
+        if not name:
+            continue
+        emb_raw = _unwrap(r.get("embedding"))
+        embedding = None
+        if emb_raw:
+            try:
+                embedding = json.loads(emb_raw)
+            except Exception:
+                embedding = None
+        out.append({"name": name, "embedding": embedding, "linked_at": _unwrap(r.get("linked_at"))})
+    return out
+
+
+def _set_embedding(conn, graph: str, name: str, vec: list[float]) -> None:
+    payload = _esc(json.dumps(vec))
+    _cypher(conn, graph,
+        f"MATCH (c:Concept {{name: '{_esc(name)}'}}) SET c.embedding = '{payload}'",
+    )
+    conn.commit()
+
+
+def _mark_linked(conn, graph: str, names: list[str]) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for name in names:
+        _cypher(conn, graph,
+            f"MATCH (c:Concept {{name: '{_esc(name)}'}}) SET c.linked_at = '{now}'",
+        )
+    conn.commit()
+
+
+def link_graph(graph: str, conn) -> dict:
+    """
+    Run all linkage passes for a single graph. Only concepts that have never
+    been linked before (no linked_at) are compared against the full set —
+    already-linked pairs already have their edges from a prior run and don't
+    need re-scoring. Embeddings are cached on the Concept node and computed
+    exactly once per concept, ever, instead of every run for every concept.
+    """
+    counts = {"alias": 0, "similar": 0, "new": 0, "embedded": 0}
+
+    concepts = _get_concepts(conn, graph)
+    if len(concepts) < 2:
         return counts
 
-    print(f"[linker] {graph}: {len(names)} concepts, computing linkages…")
+    new_concepts = [c for c in concepts if not c["linked_at"]]
+    if not new_concepts:
+        print(f"[linker] {graph}: {len(concepts)} concepts, none new since last run — skipping")
+        return counts
 
-    # ── Pass 1: name similarity (ALIAS_OF) ───────────────────────────────────
-    for i, a in enumerate(names):
-        for b in names[i + 1:]:
-            score = _name_similarity(a, b)
+    counts["new"] = len(new_concepts)
+    all_names = [c["name"] for c in concepts]
+    print(f"[linker] {graph}: {len(concepts)} concepts total, {len(new_concepts)} new — linking those against the full set")
+
+    # ── Pass 1: name similarity (ALIAS_OF) — only pairs involving a new concept ──
+    for a in new_concepts:
+        for b_name in all_names:
+            if b_name == a["name"]:
+                continue
+            score = _name_similarity(a["name"], b_name)
             if score >= ALIAS_THRESHOLD:
-                _merge_edge(conn, graph, a, b, "ALIAS_OF", score)
-                _merge_edge(conn, graph, b, a, "ALIAS_OF", score)
+                _merge_edge(conn, graph, a["name"], b_name, "ALIAS_OF", score)
+                _merge_edge(conn, graph, b_name, a["name"], "ALIAS_OF", score)
                 counts["alias"] += 1
-                print(f"[linker]   ALIAS_OF ({score:.2f}): {a!r} ↔ {b!r}")
+                print(f"[linker]   ALIAS_OF ({score:.2f}): {a['name']!r} ↔ {b_name!r}")
 
     # ── Pass 2: embedding similarity (SIMILAR_TO) ────────────────────────────
-    # Serialised with delay — inference engine cannot handle rapid concurrent embed requests
-    embeddings = {}
-    for name in names:
+    # Reuse cached embeddings for already-linked concepts; only call the
+    # inference engine for genuinely new ones.
+    embeddings = {c["name"]: c["embedding"] for c in concepts if c["embedding"]}
+    new_names = []
+    for c in new_concepts:
+        new_names.append(c["name"])
+        if c["embedding"]:
+            continue   # already had a cached embedding somehow (e.g. retry) — don't recompute
         try:
-            embeddings[name] = _embed(name)
+            vec = _embed(c["name"])
+            embeddings[c["name"]] = vec
+            _set_embedding(conn, graph, c["name"], vec)
+            counts["embedded"] += 1
             time.sleep(EMBED_DELAY_SECS)
         except Exception as e:
-            print(f"[linker]   embed failed for {name!r}: {e}")
+            print(f"[linker]   embed failed for {c['name']!r}: {e}")
 
-    embedded = list(embeddings.keys())
-    for i, a in enumerate(embedded):
-        for b in embedded[i + 1:]:
+    for a in new_names:
+        if a not in embeddings:
+            continue
+        for b in embeddings:
+            if b == a:
+                continue
             score = _cosine(embeddings[a], embeddings[b])
             if score >= EMBED_THRESHOLD:
                 _merge_edge(conn, graph, a, b, "SIMILAR_TO", score)
@@ -153,6 +242,7 @@ def link_graph(graph: str, conn) -> dict:
                 counts["similar"] += 1
                 print(f"[linker]   SIMILAR_TO ({score:.2f}): {a!r} ↔ {b!r}")
 
+    _mark_linked(conn, graph, new_names)
     return counts
 
 
@@ -167,3 +257,123 @@ def run_linker(graphs: list[str] | None = None) -> dict:
     finally:
         conn.close()
     return results
+
+
+# ── Concept audit ─────────────────────────────────────────────────────────────
+
+def _sample_linked_concepts(conn, graph: str, n: int) -> list[dict]:
+    """
+    Pick n random concepts that have at least one outgoing ALIAS_OF/SIMILAR_TO
+    edge, with those edges' neighbour + confidence + edge id attached — id(r)
+    is what a flagged-wrong verdict zeroes.
+    """
+    rows = _cypher(conn, graph,
+        "MATCH (c:Concept)-[r:ALIAS_OF|SIMILAR_TO]->() WHERE r.confidence > 0 "
+        "RETURN DISTINCT c.name AS name",
+        "(name agtype)",
+    )
+    names = [_unwrap(r.get("name")) for r in rows if _unwrap(r.get("name"))]
+    if not names:
+        return []
+    sample = random.sample(names, min(n, len(names)))
+
+    out = []
+    for name in sample:
+        nrows = _cypher(conn, graph,
+            f"MATCH (c:Concept {{name: '{_esc(name)}'}})-[r:ALIAS_OF|SIMILAR_TO]->(nb:Concept) "
+            f"WHERE r.confidence > 0 "
+            f"RETURN type(r) AS rel_type, nb.name AS neighbor, r.confidence AS confidence, id(r) AS edge_id",
+            "(rel_type agtype, neighbor agtype, confidence agtype, edge_id agtype)",
+        )
+        neighbors = [{
+            "rel_type": _unwrap(r.get("rel_type")),
+            "neighbor": _unwrap(r.get("neighbor")),
+            "confidence": _unwrap(r.get("confidence")),
+            "edge_id": _unwrap(r.get("edge_id")),
+        } for r in nrows]
+        if neighbors:
+            out.append({"name": name, "neighbors": neighbors})
+    return out
+
+
+def _build_audit_prompt(concept: dict) -> str:
+    lines = [
+        f"  [{i}] {nb['rel_type']} -> {nb['neighbor']!r} (confidence {nb['confidence']})"
+        for i, nb in enumerate(concept["neighbors"])
+    ]
+    body = "\n".join(lines)
+    return (
+        "You are validating an automatically-generated knowledge graph. Below is a concept "
+        "and edges the system created linking it to other concepts. ALIAS_OF means the system "
+        "believes these are the same real-world thing (same person, same place, same entity "
+        "under a different name). SIMILAR_TO means the system believes they are semantically "
+        f"related, not necessarily identical.\n\n"
+        f"Concept: {concept['name']!r}\n{body}\n\n"
+        "For each numbered edge, decide CORRECT (genuinely the same thing for ALIAS_OF, or "
+        "genuinely related for SIMILAR_TO) or WRONG (different real-world things incorrectly "
+        "linked — e.g. two different venues, two different people, coincidental word overlap "
+        "with no real relationship).\n\n"
+        "Reply with ONLY a JSON array, one object per edge, no other text:\n"
+        '[{"index": 0, "verdict": "correct", "reason": "brief reason"}, '
+        '{"index": 1, "verdict": "wrong", "reason": "brief reason"}]'
+    )
+
+
+def _zero_audit_edge(conn, graph: str, edge_id: str, reason: str) -> None:
+    """Same zero-not-delete semantics as the dossier suppression system —
+    zeroed_by='system' so it's re-scorable later, not a one-way action."""
+    rows = _cypher(conn, graph,
+        f"MATCH ()-[r]->() WHERE id(r) = {edge_id} RETURN r.confidence AS conf",
+        "(conf agtype)",
+    )
+    prev_raw = _unwrap(rows[0].get("conf")) if rows else None
+    try:
+        prev_num = int(float(prev_raw)) if prev_raw else 0
+    except (TypeError, ValueError):
+        prev_num = 0
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _cypher(conn, graph,
+        f"MATCH ()-[r]->() WHERE id(r) = {edge_id} "
+        f"SET r.confidence = 0, r.zeroed_by = 'system', r.zeroed_at = '{now}', "
+        f"r.zero_reason = '{_esc(reason)}', r.zero_prev_confidence = {prev_num}",
+    )
+    conn.commit()
+
+
+def audit_concepts(sample_size: int = AUDIT_SAMPLE_SIZE, graphs: list[str] | None = None) -> dict:
+    """
+    Sample a handful of already-linked concepts per graph, ask the reasoning
+    model (slower, but this runs in maintenance, not on a user's chat) to
+    validate the linker's own ALIAS_OF/SIMILAR_TO edges, and zero any it
+    flags as a genuine mismatch. Bad JSON or an unparseable response for one
+    concept doesn't stop the run — just skips that concept.
+    """
+    from .llm import generate
+
+    targets = graphs or GRAPHS
+    counts = {"checked": 0, "flagged": 0}
+    conn = _conn()
+    try:
+        for graph in targets:
+            sampled = _sample_linked_concepts(conn, graph, sample_size)
+            for concept in sampled:
+                prompt = _build_audit_prompt(concept)
+                try:
+                    response = generate(prompt, model=AUDIT_MODEL, thinking=True)
+                    m = re.search(r"\[.*\]", response, re.DOTALL)
+                    verdicts = json.loads(m.group()) if m else json.loads(response)
+                except Exception as e:
+                    print(f"[concept-audit] failed for {concept['name']!r}: {e}")
+                    continue
+                counts["checked"] += 1
+                for v in verdicts:
+                    idx = v.get("index")
+                    if v.get("verdict") == "wrong" and isinstance(idx, int) and 0 <= idx < len(concept["neighbors"]):
+                        nb = concept["neighbors"][idx]
+                        reason = v.get("reason", "flagged by concept-audit")
+                        print(f"[concept-audit] {graph}: {concept['name']!r} -{nb['rel_type']}-> {nb['neighbor']!r} — {reason}")
+                        _zero_audit_edge(conn, graph, nb["edge_id"], reason)
+                        counts["flagged"] += 1
+    finally:
+        conn.close()
+    return counts

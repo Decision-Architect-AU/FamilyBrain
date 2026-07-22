@@ -56,6 +56,28 @@ Update `models.yaml` to point to the converted paths.
 
 OpenVINO NPU requires fully static input shapes. Models on NPU are reshaped to `[1, max_length]` at startup in `src/model_registry.py`. If you see `ZE_RESULT_ERROR_INVALID_ARGUMENT` during model load, verify that `max_length` in `models.yaml` matches the tokenizer's expected sequence length.
 
+## OVMS proxy — models that can't run through openvino_genai directly
+
+Some models can't be served via `openvino_genai.LLMPipeline`/`VLMPipeline` cleanly — the concrete case that motivated this: VLM exports (e.g. `OpenVINO/Qwen3.6-35B-A3B-int4-ov`) split token-embedding lookup from the decoder into separate submodels (`openvino_text_embeddings_model.xml` + `openvino_language_model.xml`, versus a monolithic `input_ids`-in graph a plain LLM export has). `LLMPipeline` expects `input_ids` directly and fails with `Port for tensor name input_ids was not found`; `VLMPipeline`'s Python API has no text-only generate() overload — every path requires an image/video/audio tensor. Reimplementing that embeddings→decoder wiring by hand (manual KV-cache management, position IDs, sampling) would duplicate code OpenVINO Model Server (OVMS) already implements and tests (`--task text_generation` mode).
+
+Rather than adding OVMS as a second endpoint the rest of the stack has to know about, `src/ovms_proxy.py` routes specific model names through a local OVMS instance while every other consumer keeps hitting this server's normal Ollama-style `/api/generate` / `/api/chat` unchanged. The proxy translates: Ollama prompt/messages shape in, OpenAI chat-completions shape to OVMS, response translated back.
+
+**To use it:**
+
+1. Run OVMS separately for the model(s) that need it (see the model's HF card for the exact `ovms.exe`/Docker invocation, typically something like):
+   ```
+   ovms.exe --rest_port 8000 --source_model <model-id> --model_repository_path models --target_device GPU --task text_generation
+   ```
+2. Add an entry to `models.yaml` with `type: ovms` — this is the single source of truth for which models are OVMS-routed and where, same as every other model here:
+   ```yaml
+   <model-id>:
+     type: ovms
+     ovms_url: http://localhost:8000   # optional, defaults to OVMS_BASE_URL env var
+   ```
+3. Restart this server. The model appears in `/api/tags` (family `ovms`) and any call to `/api/generate`/`/api/chat` with that model name transparently proxies to OVMS.
+
+No local path is needed for `type: ovms` entries — `load_registry()` skips the path-existence check for them entirely, since the actual model files live wherever OVMS points at them, not managed by this repo.
+
 ## Docker services connect via
 
 ```

@@ -26,7 +26,6 @@ import requests
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone, date, timedelta
-from googleapiclient.discovery import build
 
 _JOIN_LINK_RE = re.compile(
     r'https?://\S*(?:teams\.microsoft\.com|zoom\.us/j|meet\.google\.com|webex\.com/meet|gotomeeting\.com|whereby\.com|bluejeans\.com)\S*',
@@ -239,9 +238,12 @@ def _enrich_title(title: str, person_name: str | None, notes: str,
 # ── Google Calendar helpers ───────────────────────────────────────────────────
 
 def _cal_service(gmail_account: dict):
-    svc   = _gmail_service(gmail_account)
-    creds = svc._http.credentials
-    return build("calendar", "v3", credentials=creds)
+    # Reuse gmail.py's cached Calendar client — avoid building a second
+    # transport (Gmail service just to steal creds + a separate Calendar
+    # build()) on every call. See bill_calendar.py's _cal_service for the
+    # full story on the socket leak this used to cause.
+    from .gmail import _calendar_service
+    return _calendar_service(gmail_account)
 
 
 def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: list[dict]) -> bool:

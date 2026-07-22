@@ -571,6 +571,13 @@ def decompose_emails(accounts: list[dict]) -> int:
                 WHERE  em.email_decomposed = false
                   AND  em.ingest_status = 'ingested'
                   AND  em.category NOT IN ('junk', 'marketing', 'newsletter', 'notification')
+                  -- Outlook/Exchange meeting-response auto-notifications (Declined:/Accepted:/
+                  -- Tentative:/Canceled:) carry no new information to extract — they're RSVP
+                  -- echoes of an existing calendar invite. A single recurring meeting set decades
+                  -- into the future can generate hundreds of these, one per occurrence, each
+                  -- burning a full LLM call for nothing. Filter at the SQL level so they never
+                  -- reach the LLM at all — the same discipline as the junk/marketing exclusion.
+                  AND  em.subject !~* '^(declined|accepted|tentative|cancel+ed):'
                 ORDER  BY
                   -- Recent emails (< 48 h) always surface first — prevents new activity
                   -- dates being starved by the historical backlog

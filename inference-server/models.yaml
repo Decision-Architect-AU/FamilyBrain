@@ -20,16 +20,16 @@ models:
 
 
   # Primary extraction — GPU (convert qwen2.5:14b INT4 when ready)
-  qwen2.5:14b:
-    path: C:\Users\Glenn\qwen2.5-14b-ov
-    type: generate
-    device: AUTO:GPU,CPU
+ # qwen2.5:14b:
+  #  path: C:\Users\Glenn\qwen2.5-14b-ov
+   # type: generate
+   # device: AUTO:GPU,CPU
 
   # Reasoning — CPU/RAM
-  qwen2.5:32b:
-    path: C:\Users\Glenn\qwen2.5-32b-ov
-    type: generate
-    device: GPU
+  #qwen2.5:32b:
+   # path: C:\Users\Glenn\qwen2.5-32b-ov
+   # type: generate
+   # device: GPU
 
   # Cross-encoder reranker — NPU
   ms-marco-reranker:
@@ -43,3 +43,15 @@ models:
     path: C:\Users\Glenn\whisper-small-ov
     type: whisper
     device: CPU
+
+  # VLM export (decoupled vision-embeddings + language-model submodels) — but
+  # VLMPipeline.generate() runs text-only fine with no image argument,
+  # confirmed directly. No OVMS needed. Emits a visible "Thinking Process:"
+  # chain-of-thought preamble before the answer (this model reasons by
+  # default) — downstream consumers that parse structured output (e.g. JSON)
+  # should still work since they extract the payload regardless of what
+  # precedes it, but raw chat responses will show the reasoning text too.
+  OpenVINO/Qwen3.6-35B-A3B-int4-ov:
+    path: C:\Users\Glenn\qwen3.6-int4-ov2
+    type: vlm
+    device: GPU

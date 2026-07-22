@@ -15,7 +15,6 @@ import psycopg2.extras
 import requests as req
 
 from datetime import datetime, timedelta, timezone
-from googleapiclient.discovery import build
 
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
@@ -25,11 +24,13 @@ AGENT_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("AGENT_MODEL", "
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _cal_service(gmail_account: dict):
-    """Build a Google Calendar service from the Gmail account credentials."""
-    from src.gmail import _gmail_service
-    gmail_svc = _gmail_service(gmail_account)
-    creds = gmail_svc._http.credentials
-    return build("calendar", "v3", credentials=creds)
+    """Google Calendar service for the Gmail account — reuses gmail.py's cached
+    client rather than building a second transport (was: build a Gmail service
+    just to steal its credentials, then build a *separate* Calendar service —
+    two fresh httplib2 transports per call, the main source of the CLOSE_WAIT
+    socket leak that eventually hung the whole email-sync process)."""
+    from src.gmail import _calendar_service
+    return _calendar_service(gmail_account)
 
 
 _STATEMENT_SUBJECT_KW = [

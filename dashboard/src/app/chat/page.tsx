@@ -257,7 +257,14 @@ export default function ChatPage() {
   ]);
   const [input, setInput]     = useState('');
   const [loading, setLoading] = useState(false);
-  const [model, setModel]     = useState<'qwen2.5:14b' | 'qwen2.5:32b'>('qwen2.5:14b');
+  const MODEL_OPTIONS = [
+    { value: 'qwen2.5:14b', label: 'Qwen 2.5 · 14b', supportsThinking: false },
+    { value: 'qwen2.5:32b', label: 'Qwen 2.5 · 32b', supportsThinking: false },
+    { value: 'OpenVINO/Qwen3.6-35B-A3B-int4-ov', label: 'Qwen 3.6 · 35B-A3B', supportsThinking: true },
+  ] as const;
+  const [model, setModel]     = useState<typeof MODEL_OPTIONS[number]['value']>('qwen2.5:14b');
+  const [thinking, setThinking] = useState(false);
+  const modelSupportsThinking = MODEL_OPTIONS.find(o => o.value === model)?.supportsThinking ?? false;
   const [dataPane, setDataPane] = useState<DataPane | null>(null);
   const [showDataPane, setShowDataPane] = useState(false);
   const [lastFocusedPerson, setLastFocusedPerson] = useState<string | null>(null);
@@ -279,7 +286,7 @@ export default function ChatPage() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text.trim(), model, person_hint: lastFocusedPerson }),
+        body: JSON.stringify({ message: text.trim(), model, thinking: modelSupportsThinking && thinking, person_hint: lastFocusedPerson }),
       });
       const data = await res.json();
       const reply: Message = {
@@ -345,13 +352,31 @@ export default function ChatPage() {
             <div className="text-sm font-semibold text-white">Geoff</div>
             <div className="text-[11px] text-gray-500">Family Brain</div>
           </div>
-          <button
-            onClick={() => setModel(m => m === 'qwen2.5:14b' ? 'qwen2.5:32b' : 'qwen2.5:14b')}
-            title={`Switch model (current: ${model})`}
-            className="text-xs px-3 py-1.5 rounded-md border border-[#2a3942] text-gray-300 hover:text-white hover:border-gray-500 transition-colors whitespace-nowrap"
+          <select
+            value={model}
+            onChange={e => setModel(e.target.value as typeof MODEL_OPTIONS[number]['value'])}
+            title="Switch model"
+            className="text-xs px-3 py-1.5 rounded-md border border-[#2a3942] bg-transparent text-gray-300
+              hover:text-white hover:border-gray-500 transition-colors whitespace-nowrap focus:outline-none
+              [&>option]:bg-[#1f2c34]"
           >
-            Qwen 2.5 · {model === 'qwen2.5:32b' ? '32b' : '14b'}
-          </button>
+            {MODEL_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          {modelSupportsThinking && (
+            <button
+              onClick={() => setThinking(t => !t)}
+              title={thinking ? 'Thinking on — model reasons before answering (slower, uses more tokens)' : 'Thinking off — direct answers'}
+              className={`text-xs px-3 py-1.5 rounded-md border transition-colors whitespace-nowrap
+                ${thinking
+                  ? 'border-[#00a884] text-[#00a884]'
+                  : 'border-[#2a3942] text-gray-300 hover:text-white hover:border-gray-500'
+                }`}
+            >
+              🧠 Thinking {thinking ? 'on' : 'off'}
+            </button>
+          )}
           <button
             onClick={() => setShowDataPane(p => !p)}
             className={`text-xs px-3 py-1.5 rounded-md border transition-colors whitespace-nowrap
