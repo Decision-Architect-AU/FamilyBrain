@@ -1,0 +1,4163 @@
+@prefix fb: <https://familybrain.local/ontology#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<https://familybrain.local/data/asset/1> a fb:VehicleAsset ;
+    rdfs:label "2020 Toyota Camry (ABC123)" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/10> a fb:SubscriptionAsset ;
+    rdfs:label "Medication other supports for Thursday" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/12> a fb:SubscriptionAsset ;
+    rdfs:label "Robina Easy T Chempro Chemist new script for epilim" ;
+    fb:doseAmount "9.5ml" ;
+    fb:doseFrequency "pm" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/15> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No1 Pty Ltd" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/16> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No2 Pty Ltd" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/17> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No3 Pty Ltd" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/18> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No4 Pty Ltd" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/2> a fb:MedicationAsset ;
+    rdfs:label "Clobazam 5mg" ;
+    fb:doseAmount "5mg" ;
+    fb:doseFrequency "twice daily" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/24> a fb:EntityAsset ;
+    rdfs:label "West Property SMSF Bare Trust" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/3> a fb:PropertyAsset ;
+    rdfs:label "123 Test St, Brisbane" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/4> a fb:SubscriptionAsset ;
+    rdfs:label "Netflix Standard" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/40> a fb:MedicationAsset ;
+    rdfs:label "Clobazam - Olivia" ;
+    fb:doseAmount "5mg" ;
+    fb:doseFrequency "morning and night" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "inactive" .
+
+<https://familybrain.local/data/asset/45> a fb:Asset ;
+    rdfs:label "Speech Therapy - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/46> a fb:Asset ;
+    rdfs:label "Occupational Therapy - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/47> a fb:Asset ;
+    rdfs:label "Physiotherapy - Centre of Movement - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/49> a fb:SubscriptionAsset ;
+    rdfs:label "Netflix" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/5> a fb:Asset ;
+    rdfs:label "Buddy" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/50> a fb:SubscriptionAsset ;
+    rdfs:label "Amazon Prime" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/51> a fb:SubscriptionAsset ;
+    rdfs:label "Pressmaster" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/52> a fb:SubscriptionAsset ;
+    rdfs:label "LinkedIn Premium" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/53> a fb:SubscriptionAsset ;
+    rdfs:label "Rent - 4 Brighton Crescent" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/54> a fb:SubscriptionAsset ;
+    rdfs:label "Garbage Bin - Robina" ;
+    fb:doseFrequency "weekly" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/55> a fb:SubscriptionAsset ;
+    rdfs:label "Recycle Bin - Robina" ;
+    fb:doseFrequency "fortnightly" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/56> a fb:SubscriptionAsset ;
+    rdfs:label "Greens Bin - Robina" ;
+    fb:doseFrequency "fortnightly" ;
+    fb:status "disposed" .
+
+<https://familybrain.local/data/asset/57> a fb:SubscriptionAsset ;
+    rdfs:label "WeMoney" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/58> a fb:SubscriptionAsset ;
+    rdfs:label "Bin Night - Robina" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/59> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Varsity College - Olivia" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Varsity College - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/6> a fb:SubscriptionAsset ;
+    rdfs:label "PSSap" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/60> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Varsity College - Elliana" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Varsity College - Elliana" ;
+    fb:hasSubject <https://familybrain.local/data/person/2> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/61> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Monday - Babysitter Pickup" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Monday - Babysitter Pickup" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/62> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Tuesday - After School Care" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Tuesday - After School Care" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/63> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Wednesday - Dancing - Elliana" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Wednesday - Dancing - Elliana" ;
+    fb:hasSubject <https://familybrain.local/data/person/2> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/64> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Wednesday - After School Care - Olivia" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Wednesday - After School Care - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/65> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Wednesday - Nanna Pickup" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Wednesday - Nanna Pickup" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/66> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Thursday - Nanna Pickup" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Thursday - Nanna Pickup" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/67> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Friday - Jen Jen Pickup" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Friday - Jen Jen Pickup" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/68> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Tuesday - Cello Class - Elliana" ;
+    skos:altLabel "beginner strings",
+        "blue strings group",
+        "strings",
+        "strings blue" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Tuesday - Cello Class - Elliana" ;
+    fb:hasSubject <https://familybrain.local/data/person/2> ;
+    fb:hasSynonym "beginner strings",
+        "blue strings group",
+        "strings",
+        "strings blue" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/7> a fb:SubscriptionAsset ;
+    rdfs:label "instrumental music program" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/70> a fb:GovernmentSupportAsset ;
+    rdfs:label "NDIS Plan - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/71> a skos:Concept,
+        fb:RoutineAsset ;
+    rdfs:label "Melodies Choir - Elliana" ;
+    skos:altLabel "choir",
+        "melodies choir" ;
+    skos:broader <https://familybrain.local/data/concept-scheme/routine> ;
+    skos:prefLabel "Melodies Choir - Elliana" ;
+    fb:hasSubject <https://familybrain.local/data/person/2> ;
+    fb:hasSynonym "choir",
+        "melodies choir" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/8> a fb:SubscriptionAsset ;
+    rdfs:label "Unknown subscription" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/9> a fb:SubscriptionAsset ;
+    rdfs:label "Now I Can Run program" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/event/232593> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/232769> a fb:Event ;
+    rdfs:label "Moranbah 3 rent review due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/232783> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/232784> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/232785> a fb:Event ;
+    rdfs:label "Currajong Rent Review - AH Realty" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/232897> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233753> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233754> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233755> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233756> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233757> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/233758> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-10T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246911> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246912> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246923> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246924> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review & Timber Pest Check" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246938> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246941> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/246942> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247060> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247127> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247128> a fb:Event ;
+    rdfs:label "Moranbah 3 rent review due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247129> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247130> a fb:Event ;
+    rdfs:label "Currajong rent review with Cameron Jennings & Kate Ribbons" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247162> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247163> a fb:Event ;
+    rdfs:label "Moranbah 2 rent review due - Unit 2/8" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247178> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247179> a fb:Event ;
+    rdfs:label "South Melbourne rent review due - Jellis Craig Ballarat" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247194> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247195> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247196> a fb:Event ;
+    rdfs:label "Strathdale Rent Review - PRD Bendigo" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247211> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247212> a fb:Event ;
+    rdfs:label "Kingston Rent Review - 6a Anchusa St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247213> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247214> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247235> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247236> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247237> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247238> a fb:Event ;
+    rdfs:label "Doveton rent review with Wests" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247239> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247240> a fb:Event ;
+    rdfs:label "Moranbah 1 rent review due - Jellis Craig Ballarat" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247254> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247255> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247256> a fb:Event ;
+    rdfs:label "Kirwan rent review due - Review statement #5" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247257> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247258> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247259> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/247260> a fb:Event ;
+    rdfs:label "Loganholme Rent Review - 177 Howlett Street" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258353> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258354> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258355> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258356> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258357> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258358> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258359> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258360> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258361> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258362> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258363> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258364> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258365> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258366> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258367> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258368> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/258369> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-11T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-11T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300637> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300651> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300652> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300653> a fb:Event ;
+    rdfs:label "Doveton Rent Review - 61 Power Rd" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300688> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300689> a fb:Event ;
+    rdfs:label "South Melbourne Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300704> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300731> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300732> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300733> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300734> a fb:Event ;
+    rdfs:label "Moranbah 2 Rent Review & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300735> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300736> a fb:Event ;
+    rdfs:label "Kirwan Rent Review - 25 Garner Rd" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300737> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300738> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300739> a fb:Event ;
+    rdfs:label "Rent Review for 14 Nandina Court - PRD Bendigo" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300740> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300761> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300762> a fb:Event ;
+    rdfs:label "Kingston Rent Review - Anchusa St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300763> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300764> a fb:Event ;
+    rdfs:label "Moranbah 3 Rent Review & Water Usage" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300765> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300766> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300781> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300782> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300861> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300862> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review @ 61 Rowlands St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300863> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300864> a fb:Event ;
+    rdfs:label "Loganholme Rent Review - 215A Drews Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300865> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300866> a fb:Event ;
+    rdfs:label "Currajong rent review due - 177 Howlett St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300890> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300891> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300946> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300947> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/300948> a fb:Event ;
+    rdfs:label "Moranbah 1 Rent Review Due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304628> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304629> a fb:Event ;
+    rdfs:label "Currajong rent review due - 177 Howlett St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304698> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304699> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304700> a fb:Event ;
+    rdfs:label "Doveton Rent Review - 61 Power Rd" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304791> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304792> a fb:Event ;
+    rdfs:label "South Melbourne Rent Review - 59 Thistlethwaite St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304807> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304834> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304835> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304836> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304837> a fb:Event ;
+    rdfs:label "Moranbah 2 Rent Review & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304838> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304839> a fb:Event ;
+    rdfs:label "Kirwan Rent Review - 25 Garner Rd" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304840> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304841> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304842> a fb:Event ;
+    rdfs:label "Rent Review for 14 Nandina Court - PRD Bendigo" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304843> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304864> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304865> a fb:Event ;
+    rdfs:label "Kingston Rent Review - Anchusa St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304866> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304867> a fb:Event ;
+    rdfs:label "Moranbah 3 rent review - Jellis Craig Ballarat" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304880> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304881> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304882> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304897> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304898> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304923> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304924> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review @ 61 Rowlands St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304925> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304926> a fb:Event ;
+    rdfs:label "Loganholme Rent Review - 215A Drews Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304938> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304939> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304940> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304941> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304942> a fb:Event ;
+    rdfs:label "Moranbah 1 Rent Review & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304978> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304979> a fb:Event ;
+    rdfs:label "Doveton rent review with Wests" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304991> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/304992> a fb:Event ;
+    rdfs:label "Currajong rent review with Cameron Jennings & Kate Ribbons" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305048> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305139> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305140> a fb:Event ;
+    rdfs:label "South Melbourne Rent Review - 509 Thistlethwaite St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305155> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305171> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305172> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305173> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305174> a fb:Event ;
+    rdfs:label "Moranbah 2 rent review with Jellis Craig Ballarat" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305175> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305176> a fb:Event ;
+    rdfs:label "Kirwan rent review with Meg Bell" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305177> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305178> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305179> a fb:Event ;
+    rdfs:label "Glenn West & Debbie McInally - PRD Bendigo Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305180> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305202> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305203> a fb:Event ;
+    rdfs:label "Kingston rent review - 6a Anchusa St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305204> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305205> a fb:Event ;
+    rdfs:label "Moranbah 3 rent review - Unit 2/8 MacArthur St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305218> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305219> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305220> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305222> a fb:Event ;
+    rdfs:label "Olivia CHQ Disability Rehab Review - Amy & Caitlin" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/44> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-10T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305234> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305235> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305258> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305259> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review 61 Rowlands St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305271> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305272> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305273> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305274> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305275> a fb:Event ;
+    rdfs:label "Moranbah 1 Rent Review - Water Usage & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305289> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305290> a fb:Event ;
+    rdfs:label "Loganholme rent review for 215A Drews Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305954> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Olivia Physio" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/305955> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Pay day" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309094> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309095> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309096> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309097> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309098> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309099> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309100> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309101> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309102> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309103> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309104> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309105> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309106> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309107> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309108> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309109> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309110> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309360> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309361> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309362> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309363> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309364> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309365> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309366> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309367> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309368> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309369> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309370> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309371> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309372> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309373> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309374> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309375> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309376> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309377> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309378> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309379> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309380> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309381> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309382> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309383> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309384> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309385> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309386> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309387> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309388> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309389> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309390> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309391> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309392> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/309393> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319506> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319507> a fb:Event ;
+    rdfs:label "Doveton rent review with Meg Bell" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319508> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319509> a fb:Event ;
+    rdfs:label "Currajong rent review with Cameron Jennings & Kate Ribbons" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319510> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319598> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319599> a fb:Event ;
+    rdfs:label "Review Rent Increase for 509/59 Thistlethwaite St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319614> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319616> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319617> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319618> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319619> a fb:Event ;
+    rdfs:label "Moranbah 2 rent review due - Unit 2/8 MacArthur St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319620> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319621> a fb:Event ;
+    rdfs:label "Kirwan rent review with Meg Bell" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319622> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319623> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319624> a fb:Event ;
+    rdfs:label "Strathdale Rent Review - PRD Bendigo" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319625> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319647> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319648> a fb:Event ;
+    rdfs:label "Kingston rent review with Ray White Springwood" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319649> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319650> a fb:Event ;
+    rdfs:label "Moranbah 3 rent review due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319651> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319652> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319653> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319655> a fb:Event ;
+    rdfs:label "Olivia CHQ Disability Rehab Review - Amy & Caitlin" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/44> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319656> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319657> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319680> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319681> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review 18 Jul 2027" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319682> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319683> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319684> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319698> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319699> a fb:Event ;
+    rdfs:label "Loganholme rent review for 215A Drews Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319735> a fb:Event ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/48> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319736> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/319737> a fb:Event ;
+    rdfs:label "Moranbah 1 Rent Review - Water Usage & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/320012> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Private health" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-15T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-15T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322115> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-13T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-13T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322116> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322117> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322118> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322370> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322371> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322372> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322373> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322374> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322375> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322376> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322377> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322378> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322379> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322380> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322381> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322902> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/322903> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-18T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-18T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/325640> a fb:Event ;
+    rdfs:label "Shannon Document Expiry Date" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2028-05-08T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332374> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2067-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2067-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332375> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2068-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2068-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332376> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2069-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2069-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332377> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2070-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2070-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332378> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2070-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2070-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332379> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2071-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2071-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332380> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2076-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2076-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332381> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2077-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2077-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332382> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2079-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2079-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332383> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2080-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2080-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332384> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2081-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2081-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332385> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2082-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2082-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332386> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2083-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2083-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332387> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2084-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2084-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332888> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2090-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2090-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332889> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2093-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2093-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332890> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2095-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2095-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332891> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2096-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2096-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332892> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2097-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2097-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332893> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2098-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2098-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332894> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2099-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2099-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332895> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2063-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2063-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332896> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2063-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2063-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332897> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2064-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2064-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332898> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2064-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2064-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332899> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2064-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2064-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332900> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2064-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2064-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332901> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2065-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2065-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332902> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2065-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2065-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332903> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2066-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2066-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332904> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2066-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2066-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332905> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2065-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2065-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332906> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2065-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2065-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/332907> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2066-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2066-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333408> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2066-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2066-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333409> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2067-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2067-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333410> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2067-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2067-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333411> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2067-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2067-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333412> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2068-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2068-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333413> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2068-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2068-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333414> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2068-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2068-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333415> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2069-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2069-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333416> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2069-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2069-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333417> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2070-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2070-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333418> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2070-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2070-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333419> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2071-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2071-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333420> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2071-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2071-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333421> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2071-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2071-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333422> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2072-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2072-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333423> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2072-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2072-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333424> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2072-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2072-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333425> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2072-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2072-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333426> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2073-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2073-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333427> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2073-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2073-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333428> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2074-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2074-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333429> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2074-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2074-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333930> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2074-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2074-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333931> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2075-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2075-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333932> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2075-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2075-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333933> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2075-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2075-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333934> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2075-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2075-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333935> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2076-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2076-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333936> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2076-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2076-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333937> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2076-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2076-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333938> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2077-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2077-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333939> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2077-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2077-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333940> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2078-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2078-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333941> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2078-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2078-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333942> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2078-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2078-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333943> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2078-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2078-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333944> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2079-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2079-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333945> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2079-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2079-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333946> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2080-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2080-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333947> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2080-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2080-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333948> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2080-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2080-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333949> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2081-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2081-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333950> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2081-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2081-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333951> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2081-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2081-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/333952> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2082-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2082-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334453> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2082-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2082-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334454> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2083-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2083-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334455> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334456> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review - 27 Oman Pass" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334457> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334458> a fb:Event ;
+    rdfs:label "Moranbah 3 Rent Review & Water Usage" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334470> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334484> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334485> a fb:Event ;
+    rdfs:label "Loganholme Rent Review - 215A Drews Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334540> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334541> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334542> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334554> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334555> a fb:Event ;
+    rdfs:label "South Melbourne Rent Review 19 Jul" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334556> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334557> a fb:Event ;
+    rdfs:label "Doveton Rent Review - 61 Power Rd" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334558> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334559> a fb:Event ;
+    rdfs:label "Currajong rent review for 177 Howlett St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334574> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334575> a fb:Event ;
+    rdfs:label "Kingston Rent Review - Anchusa St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334576> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334577> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334680> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334681> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334682> a fb:Event ;
+    rdfs:label "Glenn West - Strathdale Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334684> a fb:Event ;
+    rdfs:label "Olivia West NDIS Review with Amy & Caitlin" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/44> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334685> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334686> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334701> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334702> a fb:Event ;
+    rdfs:label "Moranbah 2 Rent Review & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334703> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334704> a fb:Event ;
+    rdfs:label "Kirwan Rent Review - 25 Garner Road" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334705> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334749> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334750> a fb:Event ;
+    rdfs:label "Meg Bell Rent Review - 61 Rowlands St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334751> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334752> a fb:Event ;
+    rdfs:label "Rockingham Rent Review - 23 Henry St" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334788> a fb:Event ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/48> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334789> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334790> a fb:Event ;
+    rdfs:label "Moranbah 1 Rent Review & Maintenance" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334812> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2083-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2083-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334813> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2084-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2084-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334814> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2084-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2084-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334815> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2085-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2085-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334816> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2085-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2085-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334817> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2085-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2085-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334818> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2086-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2086-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334819> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2086-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2086-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334820> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2086-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2086-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334821> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2086-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2086-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334822> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2087-02-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2087-02-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334823> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2087-05-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2087-05-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334824> a fb:Event ;
+    rdfs:label "Shannon Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2087-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:hasSubject <https://familybrain.local/data/person/3> ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2087-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334825> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2056-08-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2056-08-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/334826> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Logan rates and water due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2056-11-19T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 10 ;
+    fb:startsAt "2056-11-19T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337293> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-14T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-14T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337294> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337295> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337296> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337297> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337298> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337299> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337300> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337301> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337302> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337303> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337304> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337305> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337306> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337307> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337308> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337558> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/337559> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-19T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-19T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/379987> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Olivia Physio" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-20T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-20T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/403456> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Olivia Speech therapy" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-21T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-21T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/450863> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Pay liberty annual fee to liberty account" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-23T23:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-23T22:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477602> a fb:MedicalEvent ;
+    rdfs:label "Olivia Perampanel refill due" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/72> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477605> a fb:Event ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/25> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477659> a fb:Event ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/14> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477660> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No2 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/20> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477661> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No1 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/19> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477673> a fb:Event ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477674> a fb:Event ;
+    rdfs:label "South Melbourne rent review due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/27> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477675> a fb:Event ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477676> a fb:Event ;
+    rdfs:label "Doveton rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/36> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477688> a fb:MedicalEvent ;
+    rdfs:label "Olivia Sodium Valproate (Epilim) refill due" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/38> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477691> a fb:Event ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477692> a fb:Event ;
+    rdfs:label "Currajong rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/34> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477693> a fb:Event ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477694> a fb:Event ;
+    rdfs:label "Kingston rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/11> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477695> a fb:Event ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/13> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477696> a fb:Event ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477697> a fb:Event ;
+    rdfs:label "Canning Vale Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/28> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477698> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No3 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/21> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477723> a fb:MedicalEvent ;
+    rdfs:label "Olivia Keppra refill due" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/39> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-15T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477800> a fb:Event ;
+    rdfs:label "Olivia Neurology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/42> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477801> a fb:Event ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477802> a fb:Event ;
+    rdfs:label "Strathdale rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/35> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477804> a fb:Event ;
+    rdfs:label "Olivia CHQ Disability Rehab review" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/44> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-20T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477805> a fb:Event ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/23> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477806> a fb:Event ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477807> a fb:Event ;
+    rdfs:label "Moranbah rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/31> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477819> a fb:MedicalEvent ;
+    rdfs:label "Olivia Topiramate refill due" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/41> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-20T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477822> a fb:Event ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477823> a fb:Event ;
+    rdfs:label "Moranbah 2 Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/30> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477824> a fb:Event ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477825> a fb:Event ;
+    rdfs:label "Kirwan rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/37> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477826> a fb:Event ;
+    rdfs:label "Olivia Ophthalmology referral renewal due - Olivia" ;
+    fb:blocksPerson false ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/43> ;
+    fb:precedenceRank 30 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477833> a fb:Event ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477834> a fb:Event ;
+    rdfs:label "Sebastapol rent review due" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/32> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477858> a fb:Event ;
+    rdfs:label "Director statements due — West Property Inv No4 Disc Trust" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/22> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477859> a fb:Event ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477860> a fb:Event ;
+    rdfs:label "Loganholme Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/26> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477861> a fb:Event ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477862> a fb:Event ;
+    rdfs:label "Rockingham Rent Review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/33> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477898> a fb:Event ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/48> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-20T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477899> a fb:Event ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/477900> a fb:Event ;
+    rdfs:label "Moranbah rent review" ;
+    fb:blocksPerson false ;
+    fb:linkedToRoutine <https://familybrain.local/data/asset/29> ;
+    fb:precedenceRank 5 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478851> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "TaxTank subscription renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-20T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-20T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478852> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Trailer insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478853> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "VW Tiguan insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478854> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "South Melbourne property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478855> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Doveton insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478856> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Currajong insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478857> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kingston property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478858> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Ford Ranger insurance renewal due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478859> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Canning Vale property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478860> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Strathdale insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478861> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "SMSF annual audit due" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478862> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 3 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478863> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 2 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478864> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Kirwan insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478865> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Sebastapol insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478866> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Loganholme property insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478867> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Rockingham insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/event/478868> a fb:Event,
+        fb:UnattachedEvent ;
+    rdfs:label "Moranbah 1 insurance renewal" ;
+    fb:blocksPerson false ;
+    fb:endsAt "2027-07-25T01:00:00+00:00"^^xsd:dateTime ;
+    fb:precedenceRank 0 ;
+    fb:startsAt "2027-07-25T00:00:00+00:00"^^xsd:dateTime .
+
+<https://familybrain.local/data/person/10> a fb:Person ;
+    rdfs:label "Varsity College" .
+
+<https://familybrain.local/data/person/4> a fb:Person ;
+    rdfs:label "Cindy Blignaut" ;
+    fb:relationship "contact" .
+
+<https://familybrain.local/data/person/5> a fb:Person ;
+    rdfs:label "Meg" ;
+    fb:relationship "grandmother" .
+
+<https://familybrain.local/data/person/6> a fb:Person ;
+    rdfs:label "Ray" ;
+    fb:relationship "grandfather" .
+
+<https://familybrain.local/data/person/7> a fb:Person ;
+    rdfs:label "Caity Spence" ;
+    fb:relationship "provider" .
+
+<https://familybrain.local/data/person/8> a fb:Person ;
+    rdfs:label "Centre of Movement OT" ;
+    fb:relationship "provider" .
+
+<https://familybrain.local/data/person/9> a fb:Person ;
+    rdfs:label "Simone Seeney" ;
+    fb:relationship "provider" .
+
+<https://familybrain.local/data/asset/38> a fb:MedicationAsset ;
+    rdfs:label "Sodium Valproate (Epilim) - Olivia" ;
+    fb:doseAmount "10ml" ;
+    fb:doseFrequency "morning and night" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/39> a fb:MedicationAsset ;
+    rdfs:label "Keppra (Levetiracetam) - Olivia" ;
+    fb:doseAmount "5.2ml" ;
+    fb:doseFrequency "morning and night" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/41> a fb:MedicationAsset ;
+    rdfs:label "Topiramate - Olivia" ;
+    fb:doseAmount "75mg" ;
+    fb:doseFrequency "morning and night" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/72> a fb:MedicationAsset ;
+    rdfs:label "Perampanel - Olivia" ;
+    fb:doseAmount "4mg" ;
+    fb:doseFrequency "nightly" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/48> a fb:SubscriptionAsset ;
+    rdfs:label "TaxTank" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/44> a fb:Asset ;
+    rdfs:label "CHQ Disability Rehab - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/person/2> a fb:Person ;
+    rdfs:label "Elliana West" ;
+    fb:relationship "daughter" .
+
+<https://familybrain.local/data/asset/13> a fb:VehicleAsset ;
+    rdfs:label "Ford Ranger 2019 (008YZY)" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/14> a fb:VehicleAsset ;
+    rdfs:label "VW Tiguan 2018 (182AM2)" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/19> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No1 Disc Trust" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/20> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No2 Disc Trust" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/21> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No3 Disc Trust" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/22> a fb:EntityAsset ;
+    rdfs:label "West Property Inv No4 Disc Trust" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/23> a fb:EntityAsset ;
+    rdfs:label "West Property SMSF" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/42> a fb:Asset ;
+    rdfs:label "Neurology - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/43> a fb:Asset ;
+    rdfs:label "Ophthalmology - Terrace Eye Centre - Olivia" ;
+    fb:hasSubject <https://familybrain.local/data/person/1> ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/25> a fb:VehicleAsset ;
+    rdfs:label "Trailer (TMR)" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/concept-scheme/routine> a skos:Concept ;
+    skos:prefLabel "routine" .
+
+<https://familybrain.local/data/asset/11> a fb:PropertyAsset ;
+    rdfs:label "6 & 6A Anchusa St, Kingston" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/26> a fb:PropertyAsset ;
+    rdfs:label "215a Drews Road, Loganholme" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/27> a fb:PropertyAsset ;
+    rdfs:label "509/59 Thistlethwaite St, South Melbourne" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/28> a fb:PropertyAsset ;
+    rdfs:label "27 Oman Pass, Canning Vale" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/29> a fb:PropertyAsset ;
+    rdfs:label "1/8 Macarthur St, Moranbah" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/30> a fb:PropertyAsset ;
+    rdfs:label "2/8 Macarthur St, Moranbah" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/33> a fb:PropertyAsset ;
+    rdfs:label "23 Henry Street, Rockingham" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/35> a fb:PropertyAsset ;
+    rdfs:label "14 Nandina Court, Strathdale" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/37> a fb:PropertyAsset ;
+    rdfs:label "25 Garner Road, Kirwan" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/31> a fb:PropertyAsset ;
+    rdfs:label "3/8 Macarthur St, Moranbah" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/32> a fb:PropertyAsset ;
+    rdfs:label "61 Rowlands St, Sebastapol" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/asset/36> a fb:PropertyAsset ;
+    rdfs:label "61 Power Road, Doveton" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/person/3> a fb:Person ;
+    rdfs:label "Shannon West" ;
+    fb:relationship "partner" .
+
+<https://familybrain.local/data/asset/34> a fb:PropertyAsset ;
+    rdfs:label "177 Howlett Street, Currajong" ;
+    fb:status "active" .
+
+<https://familybrain.local/data/person/1> a fb:Person ;
+    rdfs:label "Olivia West" ;
+    fb:relationship "daughter" .
+

@@ -1,0 +1,109 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix fb: <https://familybrain.local/ontology#> .
+
+# Formalises exactly the kind of consistency checks the nightly concept-audit
+# maintenance task (linker.py audit_concepts()) does informally via an LLM
+# judgment call. A SHACL validation pass is deterministic and free — run it
+# BEFORE spending an LLM call, so the model only ever gets asked about
+# genuinely ambiguous cases, not structural violations a shape can catch outright.
+
+
+# ── Every Event should resolve to a Subject (directly or via its routine) ────
+# This is the exact gap found live: 216 production events (mostly insurance
+# renewals) with neither hasSubject nor linkedToRoutine set at all.
+fb:EventSubjectShape a sh:NodeShape ;
+    sh:targetClass fb:Event ;
+    sh:or (
+        [ sh:path fb:hasSubject ;      sh:minCount 1 ]
+        [ sh:path fb:linkedToRoutine ; sh:minCount 1 ]
+    ) ;
+    sh:message "Event has no Subject and no linked routine — see fb:UnattachedEvent." .
+
+
+# ── Medication assets: exactly one subject, dose fields present ─────────────
+fb:MedicationAssetShape a sh:NodeShape ;
+    sh:targetClass fb:MedicationAsset ;
+    sh:property [
+        sh:path fb:hasSubject ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "MedicationAsset must have exactly one Subject (person)." ;
+    ] ;
+    sh:property [
+        sh:path fb:doseAmount ;
+        sh:minCount 1 ;
+        sh:severity sh:Warning ;
+        sh:message "MedicationAsset has no recorded dose — likely an incomplete record (see Perampanel, created without a dose initially and flagged for follow-up)." ;
+    ] .
+
+
+# ── Event temporal sanity — ends_at must not precede starts_at ──────────────
+fb:EventTemporalShape a sh:NodeShape ;
+    sh:targetClass fb:Event ;
+    sh:property [
+        sh:path fb:startsAt ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:dateTime ;
+    ] .
+
+
+# ── Confidence values must be in [0, 100] ────────────────────────────────────
+fb:ConfidenceRangeShape a sh:NodeShape ;
+    sh:targetSubjectsOf fb:confidence ;
+    sh:property [
+        sh:path fb:confidence ;
+        sh:minInclusive 0 ;
+        sh:maxInclusive 100 ;
+        sh:message "confidence must be between 0 and 100 — 0 means suppressed/zeroed, never negative or unbounded." ;
+    ] .
+
+
+# ── precedenceRank must be in [0, 100], matching the documented rank table ──
+fb:PrecedenceRankShape a sh:NodeShape ;
+    sh:targetClass fb:Event ;
+    sh:property [
+        sh:path fb:precedenceRank ;
+        sh:minInclusive 0 ;
+        sh:maxInclusive 100 ;
+        sh:message "precedenceRank must be 0-100 per the documented collision-precedence table (README: Event Collision & Precedence)." ;
+    ] .
+
+
+# ── ContextEvent must never block person time ────────────────────────────────
+# Encodes the key collision-model invariant: "context events are never
+# committed time — they exist only to gate generation."
+fb:ContextEventNeverBlocksShape a sh:NodeShape ;
+    sh:targetClass fb:ContextEvent ;
+    sh:property [
+        sh:path fb:blocksPerson ;
+        sh:hasValue false ;
+        sh:message "A ContextEvent (holiday/leave) must never have blocksPerson=true — it is a generation gate, not committed time." ;
+    ] .
+
+
+# ── Routine synonyms must be non-empty strings, no duplicates across routines ─
+fb:RoutineSynonymShape a sh:NodeShape ;
+    sh:targetClass fb:RoutineAsset ;
+    sh:property [
+        sh:path skos:altLabel ;
+        sh:minLength 2 ;
+        sh:message "Synonym too short to be a meaningful alternate label." ;
+    ] .
+
+
+# ── PropertyAsset/EntityAsset are valid Subjects even with no Person ────────
+# (they satisfy fb:Subject via the owl:unionOf in the ontology — this shape
+# is a placeholder for future cross-checking against the SPARQL-computed
+# union, since SHACL's sh:or above only checks presence of the triple, not
+# that the object is actually IN the fb:Subject union.)
+fb:SubjectRangeShape a sh:NodeShape ;
+    sh:targetSubjectsOf fb:hasSubject ;
+    sh:property [
+        sh:path fb:hasSubject ;
+        sh:message "hasSubject object should be typed Person, Organisation, PropertyAsset, or EntityAsset." ;
+        sh:severity sh:Info ;
+    ] .
