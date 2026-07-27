@@ -1,0 +1,199 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix fb: <https://familybrain.local/ontology#> .
+
+<https://familybrain.local/ontology> a owl:Ontology ;
+    rdfs:label "FamilyBrain Domain Ontology" ;
+    rdfs:comment """Formal model of the FamilyBrain personal-AI domain: assets, routines,
+        events, and the people/entities/properties they trace back to. Derived from the
+        production Postgres schema (personal.asset, personal.event, personal.person) and
+        the AGE property-graph Concept/edge model (ALIAS_OF, SIMILAR_TO) — this is a
+        description of a real, running system, not a toy example.""" ;
+    owl:versionInfo "0.1.0" .
+
+
+# ============================================================================
+# Core classes
+# ============================================================================
+
+fb:Person a owl:Class ;
+    rdfs:label "Person" ;
+    rdfs:comment "A family member or other individual known to the system." .
+
+fb:Organisation a owl:Class ;
+    rdfs:label "Organisation" ;
+    rdfs:comment "A business, school, clinic, or other non-person entity that can be a Provider." .
+
+fb:Subject a owl:Class ;
+    rdfs:label "Subject" ;
+    rdfs:comment """Anything an Event or Asset can meaningfully trace back to. A bare event
+        title with no Subject is close to meaningless in isolation — this class exists
+        specifically to make that requirement explicit and checkable.""" ;
+    owl:unionOf ( fb:Person fb:Organisation fb:PropertyAsset fb:EntityAsset ) .
+
+fb:Asset a owl:Class ;
+    rdfs:label "Asset" ;
+    rdfs:comment "A persistent real-world entity with an ongoing lifecycle that generates events." .
+
+fb:Event a owl:Class ;
+    rdfs:label "Event" ;
+    rdfs:comment "The atomic unit of the domain — something that happens, with a date, a state, and a consequence." .
+
+fb:Concept a owl:Class ;
+    rdfs:subClassOf skos:Concept ;
+    rdfs:label "Concept" ;
+    rdfs:comment "A named entity/topic extracted from ingested documents — aligned to SKOS for the thesaurus export." .
+
+
+# ============================================================================
+# Asset subclasses — pairwise disjoint (an asset is exactly one of these)
+# ============================================================================
+
+fb:MedicationAsset       a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Medication Asset" .
+fb:PropertyAsset         a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Property Asset" .
+fb:VehicleAsset          a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Vehicle Asset" .
+fb:SubscriptionAsset     a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Subscription Asset" .
+fb:EntityAsset           a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Entity Asset" ;
+    rdfs:comment "A trust, company, or SMSF — an ownership/governance structure, not a physical thing." .
+fb:GovernmentSupportAsset a owl:Class ; rdfs:subClassOf fb:Asset ; rdfs:label "Government Support Asset" ;
+    rdfs:comment "An NDIS plan or similar government-administered support arrangement." .
+fb:RoutineAsset a owl:Class ;
+    rdfs:subClassOf fb:Asset ;
+    rdfs:label "Routine Asset" ;
+    rdfs:comment """A recurring pattern of life (school schedule, therapy block, pickup roster) —
+        modelled as an asset because it has the same lifecycle shape (rules generate events,
+        a provider can change, it can be retired) even though nothing is owned.""" .
+
+[] a owl:AllDisjointClasses ;
+    owl:members ( fb:MedicationAsset fb:PropertyAsset fb:VehicleAsset fb:SubscriptionAsset
+                  fb:EntityAsset fb:GovernmentSupportAsset fb:RoutineAsset ) .
+
+
+# ============================================================================
+# Event subclasses
+# ============================================================================
+
+fb:MedicalEvent    a owl:Class ; rdfs:subClassOf fb:Event ; rdfs:label "Medical Event" .
+fb:SchoolEvent     a owl:Class ; rdfs:subClassOf fb:Event ; rdfs:label "School Event" .
+fb:ActivityEvent   a owl:Class ; rdfs:subClassOf fb:Event ; rdfs:label "Activity Event" ;
+    rdfs:comment "Concerts, recitals, sport, and other extracurricular commitments." .
+fb:FinancialEvent  a owl:Class ; rdfs:subClassOf fb:Event ; rdfs:label "Financial Event" .
+fb:ContextEvent    a owl:Class ; rdfs:subClassOf fb:Event ;
+    rdfs:label "Context Event" ;
+    rdfs:comment """A holiday, leave period, or other event that gates generation of other
+        events (suppress_on) but is never itself a time commitment — see blocksPerson.""" .
+
+# The real finding from production use: events that resolve to no Subject at all
+# ("Gold Coast Eisteddfod" names no attendee) are a distinct, checkable failure mode.
+fb:UnattachedEvent a owl:Class ;
+    rdfs:subClassOf fb:Event ;
+    rdfs:label "Unattached Event" ;
+    owl:disjointWith [ a owl:Restriction ; owl:onProperty fb:hasSubject ; owl:minCardinality "1"^^xsd:nonNegativeInteger ] ;
+    rdfs:comment "An Event with no resolvable Subject — flags exactly the gap found and fixed in the routine-synonym work: person inheritance from a matched routine." .
+
+
+# ============================================================================
+# Object properties
+# ============================================================================
+
+fb:hasSubject a owl:ObjectProperty ;
+    rdfs:domain fb:Event ;
+    rdfs:range fb:Subject ;
+    rdfs:label "has subject" ;
+    rdfs:comment "The person, entity, or property this event is actually about." .
+
+fb:hasProvider a owl:ObjectProperty ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( fb:RoutineAsset fb:Event ) ] ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( fb:Person fb:Organisation ) ] ;
+    rdfs:label "has provider" .
+
+fb:generatesEvent a owl:ObjectProperty ;
+    rdfs:domain fb:Asset ;
+    rdfs:range fb:Event ;
+    rdfs:label "generates event" ;
+    rdfs:comment "Rule-driven event generation — the asset is the source of truth, events are projections of it." .
+
+fb:linkedToRoutine a owl:ObjectProperty ;
+    rdfs:domain fb:Event ;
+    rdfs:range fb:RoutineAsset ;
+    rdfs:label "linked to routine" ;
+    rdfs:comment "Set via synonym matching (independent of slot-key/date matching) — see hasSynonym." .
+
+fb:supersedes a owl:ObjectProperty ;
+    rdfs:domain fb:Event ;
+    rdfs:range fb:Event ;
+    rdfs:label "supersedes" ;
+    rdfs:comment "Stage 2 override: an email-derived event replacing a generated placeholder in the same slot." .
+
+fb:suppressedBy a owl:ObjectProperty ;
+    rdfs:domain fb:Event ;
+    rdfs:range fb:ContextEvent ;
+    rdfs:label "suppressed by" ;
+    rdfs:comment "Stage 1: a context event (e.g. school holiday) prevented this event from being generated at all." .
+
+fb:hasSynonym a owl:ObjectProperty, owl:SymmetricProperty ;
+    rdfs:domain fb:RoutineAsset ;
+    rdfs:range rdfs:Literal ;
+    rdfs:label "has synonym" ;
+    rdfs:comment "SKOS-alignable: corresponds to skos:altLabel in the thesaurus export — see skos-export.py." .
+
+# The genuine reasoning payoff of using OWL here: ALIAS_OF should chain
+# (A alias-of B, B alias-of C implies A alias-of C) and is symmetric — a
+# real inference a Cypher-only system has to re-derive by hand every time,
+# rather than getting for free from the property's declared characteristics.
+fb:aliasOf a owl:ObjectProperty, owl:SymmetricProperty, owl:TransitiveProperty ;
+    rdfs:label "alias of" ;
+    rdfs:comment "Maps to the AGE graph's ALIAS_OF edge — name-similarity match between Concept nodes." .
+
+# SIMILAR_TO is explicitly NOT declared transitive — semantic similarity does
+# not chain reliably (A similar to B, B similar to C does not imply A similar to C),
+# and that's a deliberate modelling choice worth stating, not an oversight.
+fb:similarTo a owl:ObjectProperty, owl:SymmetricProperty ;
+    rdfs:label "similar to" ;
+    rdfs:comment "Maps to the AGE graph's SIMILAR_TO edge — embedding-cosine match. Deliberately not transitive." .
+
+
+# ============================================================================
+# Data properties
+# ============================================================================
+
+fb:doseAmount     a owl:DatatypeProperty ; rdfs:domain fb:MedicationAsset ; rdfs:range xsd:string ; rdfs:label "dose amount" .
+fb:doseFrequency  a owl:DatatypeProperty ; rdfs:domain fb:MedicationAsset ; rdfs:range xsd:string ; rdfs:label "dose frequency" .
+fb:startsAt       a owl:DatatypeProperty ; rdfs:domain fb:Event ; rdfs:range xsd:dateTime ; rdfs:label "starts at" .
+fb:endsAt         a owl:DatatypeProperty ; rdfs:domain fb:Event ; rdfs:range xsd:dateTime ; rdfs:label "ends at" .
+fb:precedenceRank a owl:DatatypeProperty ; rdfs:domain fb:Event ; rdfs:range xsd:integer ;
+    rdfs:label "precedence rank" ;
+    rdfs:comment "0-100; determines which of two competing events in the same slot wins (Stage 2/3)." .
+fb:blocksPerson   a owl:DatatypeProperty ; rdfs:domain fb:Event ; rdfs:range xsd:boolean ;
+    rdfs:label "blocks person" ;
+    rdfs:comment "False for ContextEvent — a holiday is not committed time, only a generation gate." .
+fb:confidence     a owl:DatatypeProperty ; rdfs:range xsd:integer ;
+    rdfs:label "confidence" ;
+    rdfs:comment "0-100 on graph edges. confidence=0 means zeroed/suppressed, never deleted — see SHACL shape fb:ZeroedEdgeShape." .
+
+
+# ============================================================================
+# Cardinality restrictions — the axioms that make this more than a class list
+# ============================================================================
+
+fb:MedicationAsset rdfs:subClassOf [
+    a owl:Restriction ;
+    owl:onProperty fb:hasSubject ;
+    owl:cardinality "1"^^xsd:nonNegativeInteger
+] ; rdfs:comment "Exactly one person per medication asset — no shared or unattached medications in this domain." .
+
+fb:RoutineAsset rdfs:subClassOf [
+    a owl:Restriction ;
+    owl:onProperty fb:hasSubject ;
+    owl:minCardinality "0"^^xsd:nonNegativeInteger
+] ; rdfs:comment "A routine MAY have no direct subject of its own (e.g. a pickup roster serving multiple children) — subject resolution can instead flow from Event -> Routine -> inherited Person, which is exactly the person-inheritance fix built into email_decomposer.py." .
+
+fb:Event rdfs:subClassOf [
+    a owl:Restriction ;
+    owl:onProperty fb:hasSubject ;
+    owl:minQualifiedCardinality "1"^^xsd:nonNegativeInteger ;
+    owl:onClass fb:Subject
+] ; rdfs:comment "Every Event should resolve to at least one Subject, directly or via linkedToRoutine — violations are exactly UnattachedEvent instances." .

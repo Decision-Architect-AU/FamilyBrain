@@ -10,6 +10,8 @@ Tasks (run in order):
 5. generate_events        — generate future events from asset rules up to per-rule horizon
 6. detect_conflicts       — find person-blocking event overlaps
 7. detect_provider_gaps   — flag routines whose provider is unavailable with no substitute
+7a. check_data_expectations — light SQL pass tracking config.data_expectation violations, every cycle
+7b. review_data_expectations — LLM review that moves expectation confidence, throttled ~daily
 8. refresh_asset_notes    — write structured prose summary back to asset.notes
 9. asset_graph_sync       — upsert Asset nodes in AGE, link to Person nodes, prune disposed
 10. appointment_digest    — pre-compute appointment summaries for common windows
@@ -84,6 +86,166 @@ def task_audit_concepts() -> dict:
     cost here in a way it isn't for live queries.
     """
     return audit_concepts()
+
+
+# ---------------------------------------------------------------------------
+# Data expectations — soft, evidence-weighted rules (config.data_expectation)
+# ---------------------------------------------------------------------------
+#
+# Not hard constraints. A row is a claim ("MedicationAsset should have
+# exactly one Subject") with a confidence that moves based on accumulated
+# evidence, not something enforced at write time. Two tiers, deliberately:
+#
+#   task_check_data_expectations — light, every cycle, pure SQL. Only counts
+#     violations and tracks which target rows are currently violating vs
+#     previously-violating-now-fixed. Never touches confidence.
+#
+#   task_review_data_expectations — deeper, throttled to ~daily, one LLM call
+#     per expectation with open violations. Reads the actual sampled
+#     violations and decides whether the expectation is holding up (raise/
+#     hold confidence) or too strict (lower confidence, possibly retire).
+#     This is the only thing that moves confidence — the point is that it
+#     acts on accumulated evidence across many check cycles, not a single
+#     run, so the picture should genuinely improve run over run rather than
+#     being asserted correct on day one.
+
+def task_check_data_expectations() -> dict:
+    """Light, cheap, every-cycle pass — see module note above."""
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    results = {"expectations_checked": 0, "new_violations": 0, "auto_resolved": 0, "total_open": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM config.data_expectation WHERE status != 'retired'")
+            expectations = [dict(r) for r in cur.fetchall()]
+
+        for exp in expectations:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(exp["check_sql"])
+                    violating_ids = {str(r["id"]) for r in cur.fetchall()}
+            except Exception as e:
+                print(f"[data-expectations] check_sql failed for {exp['name']}: {e}")
+                continue
+
+            target_refs = {f"{exp['target_type']}:{vid}" for vid in violating_ids}
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_ref FROM config.data_expectation_violation "
+                    "WHERE expectation_id = %s AND resolved_at IS NULL",
+                    (exp["id"],),
+                )
+                already_open = {r["target_ref"] for r in cur.fetchall()}
+
+            new_refs = target_refs - already_open
+            # No longer violating -> the underlying row was fixed since we last checked
+            resolved_refs = already_open - target_refs
+
+            with conn.cursor() as cur:
+                for ref in new_refs:
+                    cur.execute(
+                        "INSERT INTO config.data_expectation_violation (expectation_id, target_ref) VALUES (%s, %s)",
+                        (exp["id"], ref),
+                    )
+                if resolved_refs:
+                    cur.execute(
+                        "UPDATE config.data_expectation_violation SET resolved_at = now(), resolution = 'fixed' "
+                        "WHERE expectation_id = %s AND target_ref = ANY(%s) AND resolved_at IS NULL",
+                        (exp["id"], list(resolved_refs)),
+                    )
+                cur.execute(
+                    "UPDATE config.data_expectation SET violations_seen = violations_seen + %s, "
+                    "last_checked_at = now() WHERE id = %s",
+                    (len(new_refs), exp["id"]),
+                )
+            conn.commit()
+
+            results["expectations_checked"] += 1
+            results["new_violations"] += len(new_refs)
+            results["auto_resolved"] += len(resolved_refs)
+            results["total_open"] += len(target_refs)
+            if new_refs or resolved_refs:
+                print(f"[data-expectations] {exp['name']}: +{len(new_refs)} new, "
+                      f"-{len(resolved_refs)} resolved, {len(target_refs)} open")
+    finally:
+        conn.close()
+    return results
+
+
+def task_review_data_expectations() -> dict:
+    """
+    Deeper, throttled pass — samples up to 5 open violations per expectation
+    with open violations and asks the fast model whether the pattern still
+    looks like a real rule (confidence holds/rises) or too strict (confidence
+    falls, possibly retired). Only expectations with at least one open
+    violation get reviewed — nothing to judge otherwise.
+    """
+    from .llm import generate
+
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    results = {"reviewed": 0, "confidence_changed": 0, "retired": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM config.data_expectation WHERE status = 'active'")
+            expectations = [dict(r) for r in cur.fetchall()]
+
+        for exp in expectations:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_ref, detected_at FROM config.data_expectation_violation "
+                    "WHERE expectation_id = %s AND resolved_at IS NULL "
+                    "ORDER BY detected_at DESC LIMIT 5",
+                    (exp["id"],),
+                )
+                sample = [dict(r) for r in cur.fetchall()]
+
+            if not sample:
+                continue
+
+            sample_lines = "\n".join(f"- {s['target_ref']} (flagged {s['detected_at']})" for s in sample)
+            prompt = (
+                "A data-quality expectation in a personal knowledge system:\n"
+                f"\"{exp['description']}\"\n\n"
+                f"Current confidence: {exp['confidence']}. Cumulative violations seen: {exp['violations_seen']}. "
+                f"Currently open violations sampled:\n{sample_lines}\n\n"
+                "Decide, based on the pattern of what keeps getting flagged: is this expectation still a "
+                "reasonable rule for this domain, or is it too strict (i.e. these look like legitimate "
+                "exceptions rather than bugs)? Should confidence rise, fall, or hold?\n\n"
+                'Reply with ONLY JSON: {"confidence_delta": <float, -0.2 to 0.2>, "reasoning": "<one sentence>", "retire": <true|false>}'
+            )
+            try:
+                response = generate(prompt)
+                m = re.search(r"\{.*\}", response, re.DOTALL)
+                verdict = json.loads(m.group()) if m else {}
+            except Exception as e:
+                print(f"[data-expectations] review failed for {exp['name']}: {e}")
+                continue
+
+            try:
+                delta = max(-0.2, min(0.2, float(verdict.get("confidence_delta", 0))))
+            except (TypeError, ValueError):
+                delta = 0.0
+            new_confidence = max(0.0, min(1.0, float(exp["confidence"]) + delta))
+            new_status = "retired" if verdict.get("retire") else exp["status"]
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE config.data_expectation SET confidence = %s, status = %s, "
+                    "last_reviewed_at = now(), review_notes = %s WHERE id = %s",
+                    (new_confidence, new_status, verdict.get("reasoning", ""), exp["id"]),
+                )
+            conn.commit()
+
+            results["reviewed"] += 1
+            if abs(delta) > 0.001:
+                results["confidence_changed"] += 1
+            if new_status == "retired":
+                results["retired"] += 1
+            print(f"[data-expectations] reviewed {exp['name']}: "
+                  f"confidence {exp['confidence']} -> {new_confidence:.3f} ({verdict.get('reasoning', '')})")
+    finally:
+        conn.close()
+    return results
 
 
 def task_dedup(graph: str, conn) -> int:
@@ -1607,6 +1769,7 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     all_tasks = tasks or [
         "rederive_facts",
         "re_embed", "link", "audit_concepts", "dedup", "prune",
+        "check_data_expectations", "review_data_expectations",
         "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
@@ -1654,6 +1817,28 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         else:
             results["audit_concepts"] = {"skipped": "throttled"}
             print(f"[maintenance] audit_concepts skipped (throttled, next in {int(_AUDIT_INTERVAL - (_time.time() - _last))}s)")
+
+    if "check_data_expectations" in all_tasks:
+        # Cheap SQL only — no throttle, runs every cycle so violations get
+        # tracked as soon as they appear (and resolved as soon as they're fixed).
+        results["check_data_expectations"] = task_check_data_expectations()
+        print(f"[maintenance] check_data_expectations done: {results['check_data_expectations']}")
+
+    if "review_data_expectations" in all_tasks:
+        # One LLM call per expectation with open violations — throttle like
+        # audit_concepts, default once per day. This is the only task that
+        # moves an expectation's confidence; the light check above only counts.
+        _REVIEW_INTERVAL = int(os.environ.get("DATA_EXPECTATION_REVIEW_INTERVAL_SECS", "86400"))
+        _review_flag = "/tmp/last_data_expectation_review"
+        import pathlib, time as _time
+        _last = float(pathlib.Path(_review_flag).read_text()) if pathlib.Path(_review_flag).exists() else 0
+        if _time.time() - _last >= _REVIEW_INTERVAL:
+            results["review_data_expectations"] = task_review_data_expectations()
+            pathlib.Path(_review_flag).write_text(str(_time.time()))
+            print(f"[maintenance] review_data_expectations done: {results['review_data_expectations']}")
+        else:
+            results["review_data_expectations"] = {"skipped": "throttled"}
+            print(f"[maintenance] review_data_expectations skipped (throttled, next in {int(_REVIEW_INTERVAL - (_time.time() - _last))}s)")
 
     if "dedup" in all_tasks or "prune" in all_tasks:
         conn = _conn()
