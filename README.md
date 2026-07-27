@@ -524,6 +524,18 @@ What routines gain over raw calendar entries:
 
 Therapy and medical routines add `"holiday_immune": true` — they generate regardless of holiday context and are never suppressed. The maintenance job still detects the overlap and surfaces a conflict notification; it just doesn't prevent the appointment from existing.
 
+### Synonyms — matching a routine under whatever name an email uses
+
+A routine's canonical name (`"Tuesday - Cello Class - Elliana"`) is an internal display label — it never appears verbatim in an email from the actual provider. A school emails "Beginner Strings Blue - Term 3", a music program emails about "the Blue Strings Group", an eisteddfod entry mentions neither — all three are the same routine, but nothing ties them together without a shared vocabulary.
+
+`personal.asset.synonyms` (`TEXT[]`) holds that vocabulary — alternate names, group labels, and provider-specific terms that all resolve to one routine. Matching is keyword-based (case-insensitive substring, longest match wins so a specific synonym like `"beginner strings blue"` beats a generic one like `"strings"`) rather than fuzzy — deterministic and cheap, since it runs on every decomposed calendar item.
+
+**Why this closes a real gap:** the *only* other mechanism that ties an email to a routine is slot-key matching (Stage 2 override — see [Event Collision & Precedence](#event-collision--precedence)), which requires the email's extracted event to land on the *exact date* of a generated placeholder. Purely informational emails — term information, permission forms, "upcoming performances" — usually aren't tied to one specific date at all, so they never hit that path. Synonym matching is the second, independent route: `_resolve_routine_asset()` in `email_decomposer.py` checks the event's title+detail text against every active routine's name and synonym list, and if it matches, sets `personal.event.asset_id` directly — regardless of date.
+
+**Every event should trace back to someone.** A bare title like `"Gold Coast Eisteddfod"` says nothing about who's attending — an event with no person, entity, or property attached is close to meaningless in isolation. So when routine matching succeeds and the event's own text resolution didn't find a person (`_resolve_person_id()` requires the person's name to literally appear in the text, and "Gold Coast Eisteddfod" never mentions the child by name), the event **inherits the routine's `person_id`** — the routine already knows whose activity this is.
+
+**The circular-reinforcement design** (not yet built — routines currently need synonyms seeded manually, e.g. via direct SQL when a gap is discovered): the maintenance engine should periodically scan documents/notes already linked to a routine, ask a fast LLM pass to notice recurring alternate terms not yet in the synonym list, and append them — so a routine's vocabulary grows on its own as more emails arrive, rather than requiring a human to notice every new naming variant by hand. Retrieval (chat queries about a routine) should match on name **or** any synonym via Cypher, so asking about "the strings group" surfaces the same routine as asking about "cello class." This loop is the natural next step, not yet implemented.
+
 ---
 
 ## Event Collision & Precedence
@@ -780,6 +792,23 @@ A locum appearing once does not flip an established `fact_current_<service>` —
 ---
 
 ## Adaptive Intelligence
+
+### Maintenance engine — concept linking and self-auditing
+
+Nightly maintenance (`wa-agent/src/maintenance.py`, `linker.py`) keeps the AGE graphs' `Concept` nodes connected and internally consistent, without re-doing that work from scratch every run.
+
+**Incremental linking, not a full rescan.** The concept linker (`task_link`) creates `ALIAS_OF` (name-similarity) and `SIMILAR_TO` (embedding-cosine) edges between concepts across `personal_graph`/`property_graph`/`decision_graph`. It used to re-embed and re-compare *every* concept against *every other* concept on every run — genuinely O(n²), including concepts that hadn't changed since the previous run. Now:
+- Each `Concept` node carries a `linked_at` timestamp, set once it's been through both linkage passes.
+- Only concepts with no `linked_at` (new since the last run) get compared against the full set — already-linked pairs keep the edges from their prior run and are never re-scored.
+- Embeddings are cached directly on the node (`c.embedding`, JSON-serialised) and computed exactly once per concept, ever — concept names don't change after creation, so a cached embedding never goes stale.
+
+The very first run after this changed still processes every existing concept once (nothing has `linked_at` yet) — a one-time backfill, not a regression. Every run after that only touches what's actually new.
+
+**Self-auditing with the slower, more careful model.** `task_audit_concepts` samples a handful of already-linked concepts per graph, hands each one (with its `ALIAS_OF`/`SIMILAR_TO` neighbours) to the larger reasoning model (`CONCEPT_AUDIT_MODEL`, default a 35B-class model — see [Model routing](#hardware) below), and asks it to validate whether the linker's own automatic matches actually hold up semantically — catching things like two different real-world venues merged on partial name overlap, or a coincidental word match linked as if it were an alias. This is deliberately *not* run on the live chat path: the audit model can take ~10x longer per call than the fast extraction model, which is a non-issue in a nightly background job and a real problem for someone waiting on a chat response.
+
+Any edge the audit model flags as wrong gets zeroed using the exact same suppression mechanism as the [asset dossier](#asset-dossier--suppression) — `confidence = 0`, `zeroed_by = 'system'`, re-scorable later, not a one-way deletion. No new infrastructure was needed for this: the linker's edges already carried `confidence`, and every graph read already excludes `confidence <= 0` by default.
+
+Both tasks are independently throttled (`LINK_INTERVAL_SECS`, `CONCEPT_AUDIT_INTERVAL_SECS`, default once/day each) since the audit specifically costs several slow LLM calls per run.
 
 ### next_update_at scheduling
 
@@ -1155,14 +1184,26 @@ Every edge in `personal_graph` carries `confidence INT` (0–100, same scale as 
 
 | Model | Format | Device | Role |
 |---|---|---|---|
-| qwen2.5:14b | OpenVINO INT4 | Arc GPU | Email decomposition, financial extraction, bill calendar |
+| qwen2.5:14b | OpenVINO INT4 | Arc GPU | Email decomposition, financial extraction, bill calendar, default chat |
 | qwen2.5:3b | OpenVINO INT4 | AUTO:GPU,CPU | Fast classification (Pass 1) |
 | qwen2.5:32b | OpenVINO INT4 | GPU,CPU | Deep extraction (Pass 3, optional) |
+| OpenVINO/Qwen3.6-35B-A3B-int4-ov | OpenVINO INT4 (VLM export) | GPU | Concept audit (nightly), optional deep-reasoning chat — see below |
 | nomic-embed-text | OpenVINO | NPU | Semantic embeddings (768-dim) |
 | ms-marco-reranker | OpenVINO INT8 | NPU | Cross-encoder reranking of search candidates |
 | whisper-small | OpenVINO | CPU | Speech-to-text transcription |
 
 The NPU runs embedding and reranking continuously without competing with the GPU for LLM inference, giving low-latency semantic search at effectively zero GPU cost.
+
+### The reasoning model — a VLM export used text-only, not via OVMS
+
+`OpenVINO/Qwen3.6-35B-A3B-int4-ov` is a Mixture-of-Experts checkpoint (35B total, ~3B active per token) whose only registered export task in `optimum-intel` is `image-text-to-text` — it's packaged as a vision-language model, with separate `openvino_language_model`/`openvino_vision_embeddings_model` submodels. That looked at first like it would require standing up a full OpenVINO Model Server (OVMS) alongside the existing OpenVINO-GenAI-backed `inference-server` just to get *text* generation out of it. It doesn't: `openvino_genai.VLMPipeline(path, device).generate(prompt_string, ...)` runs perfectly well with no image argument at all — confirmed directly, and it's what `inference-server/src/model_registry.py` actually uses (`type: vlm` in `models.yaml`), not OVMS.
+
+**Two real gotchas found integrating it, both now handled in `inference-server/src/server.py`:**
+
+- **Never pre-render the chat template yourself.** `VLMPipeline.generate()` applies its own chat-template formatting internally on a plain string. Manually calling `tokenizer.apply_chat_template(...)` and feeding the already-formatted result back into `generate()` double-applies the template and produces a duplicated response.
+- **It reasons regardless of any thinking flag.** Neither the textbook-correct `enable_thinking=False` chat-template control nor the in-band `/no_think` convention (both standard for Qwen3-family models) suppress this checkpoint's "Thinking Process:" preamble — it appears to be an ingrained habit from training, not something a flag toggles off. The reliable fix wasn't suppressing the reasoning; it was a **positive** instruction the model does follow: the system prompt asks it to wrap the final answer in `<answer>...</answer>`, and `wa-agent/src/llm.py` extracts just that (falling back to the raw text untouched for every other model, which never emits the tag). The token budget (`_VLM_MIN_MAX_TOKENS` in `server.py`) is set high (8192) and applied unconditionally for this model, since the reasoning preamble alone can consume most of a normal budget before any answer text appears.
+
+**Speed/quality tradeoff, measured, not assumed:** on a real query, this model took ~200s versus qwen2.5:14b's ~21s, with comparable answer quality once retrieval context was already good (see the [dossier/suppression work](#asset-dossier--suppression) above — that's very likely why the smaller model's answers improved too, independent of which model answers). At a 10x time cost for no consistent quality gain, `qwen2.5:14b` remains the better default for interactive chat. This model earns its keep in the **concept audit** maintenance task above, where nothing is waiting on it in real time and its extra care catches things the fast model wouldn't.
 
 ---
 
@@ -1241,6 +1282,13 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] Asset dossier — `GET /api/assets/:id/dossier`, generic neighbourhood renderer grouped by edge type, dashboard page at `/assets/[id]`
 - [x] Asset summary enrichment — nightly `asset_summary` task derives named facts + one-line `fact_summary` from facts only, never raw documents
 - [x] Invoice practitioner extraction — per-line-item service disambiguation, fuzzy practitioner resolution with review-queue gate, flip-guard on established `fact_current_*`
+- [x] Routine synonyms — `personal.asset.synonyms TEXT[]`; `_resolve_routine_asset()` matches event text against a routine's name/synonyms independent of slot-key/date matching, sets `event.asset_id`; events with no person of their own inherit the routine's `person_id`
+- [x] Incremental concept linker — `linked_at` timestamp + cached node embeddings; only new concepts compared against the full set, not a full O(n²) rescan every run
+- [x] Concept audit — nightly task samples linked concepts, validates ALIAS_OF/SIMILAR_TO edges with the larger reasoning model, zeroes flagged mismatches via the same suppression mechanism as the dossier
+- [x] Reasoning-model integration (VLM export, text-only) — `<answer>` tag extraction for a checkpoint that reasons regardless of any thinking flag; used for concept audit, optional for chat
+- [x] Email attachment OCR — image/PDF attachments (Gmail + Outlook) fetched and OCR'd via the existing ingestor `/ingest/extract` pipeline, merged into body text before triage; previously always submitted as an empty list regardless of what the email actually had
+- [ ] Routine synonym auto-discovery — maintenance task that scans documents linked to a routine and proposes new synonyms via LLM, closing the loop that currently requires manual seeding
+- [ ] Retrieval synonym matching — wa-agent Cypher lookups for a routine currently match on name only, not yet on `synonyms`
 - [ ] Email → Asset matcher — match inbound emails to assets via contact_email / provider_domain / AGE traversal
 - [ ] Email intent classifier — classify matched emails as cancellation / reschedule / provider change / informational
 - [ ] Dashboard conflict cards — surface open `personal.conflict` rows as actionable cards with `suggested_keep` hint

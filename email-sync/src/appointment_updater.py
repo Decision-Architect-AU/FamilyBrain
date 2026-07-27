@@ -323,6 +323,8 @@ def _write_outlook(outlook_acct: dict, ev: dict, outlook_ac=None, route: str = "
             "start": _fmt(starts),
             "end":   _fmt(ends),
         }
+        if ev.get("location"):
+            body["location"] = {"displayName": ev["location"]}
 
         cal_id = target_calendar_id(outlook_ac, route) if outlook_ac else None
         url = (f"{GRAPH_BASE}/me/calendars/{cal_id}/events" if cal_id and cal_id != "primary"
@@ -368,6 +370,8 @@ def _patch_outlook_mirror(outlook_acct: dict, outlook_event_id: str, ev: dict) -
             "start": _fmt(starts),
             "end":   _fmt(ends),
         }
+        if ev.get("location"):
+            body["location"] = {"displayName": ev["location"]}
         resp = req.patch(
             f"{GRAPH_BASE}/me/events/{outlook_event_id}",
             headers={**_headers(outlook_acct), "Content-Type": "application/json"},
@@ -656,6 +660,8 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
+    if ev.get("location"):
+        body["location"] = ev["location"]
     if fb_id:
         body.update(_gcal_extended_props(fb_id))
     if color_id:
@@ -714,6 +720,8 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
     }
+    if ev.get("location"):
+        body["location"] = ev["location"]
     if fb_id:
         body.update(_gcal_extended_props(fb_id))
     if color_id:
@@ -835,7 +843,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             cur.execute(
                 """
                 SELECT id, title, event_type, starts_at, ends_at, effective_date,
-                       calendar_source, notes, person_id,
+                       calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
                        updated_at
                 FROM personal.event

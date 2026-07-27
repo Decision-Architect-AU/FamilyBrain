@@ -233,6 +233,7 @@ def upsert_event(
     item_type: Optional[str] = None,
     category: Optional[str] = None,
     source_slug: Optional[str] = None,
+    location: Optional[str] = None,
 ) -> int:
     """
     Upsert into personal.event, return event id.
@@ -283,14 +284,15 @@ def upsert_event(
                 ),
                 upserted AS (
                     INSERT INTO personal.event
-                        (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date, status, provenance)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'email')
+                        (title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, effective_date, status, provenance, location)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'email', %s)
                     ON CONFLICT (calendar_event_id) DO UPDATE
                         SET title          = EXCLUDED.title,
                             starts_at      = EXCLUDED.starts_at,
                             ends_at        = EXCLUDED.ends_at,
                             notes          = COALESCE(NULLIF(personal.event.notes, ''), EXCLUDED.notes),
                             effective_date = EXCLUDED.effective_date,
+                            location       = COALESCE(personal.event.location, EXCLUDED.location),
                             updated_at     = CASE
                                 WHEN personal.event.starts_at IS DISTINCT FROM EXCLUDED.starts_at
                                   OR personal.event.ends_at   IS DISTINCT FROM EXCLUDED.ends_at
@@ -305,7 +307,7 @@ def upsert_event(
                 LEFT JOIN old o ON o.id = u.id
                 """,
                 (calendar_event_id,
-                 title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date),
+                 title, event_type, starts_at, ends_at, calendar_source, calendar_event_id, notes, eff_date, location),
             )
             row = cur.fetchone()
         c.commit()

@@ -77,7 +77,8 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
     r'prdbendigo|ailo\.io|propertyme|propertytree|enotices|'
     r'commbank|westpac|nab\.com\.au|anz|macquarie|'
     r'firstmac|resimac|peppermoney|brighten|mamoney|'
-    r'ignitionapp\.com)',                    # service agreements / accounting
+    r'ignitionapp\.com|'
+    r'sammygordonsschoolofproperty\.com\.au)',   # property education — Q&A session reminders carry real dates/times
     re.I,
 )
 
@@ -100,7 +101,7 @@ _INGEST_SUBJECT_KW = re.compile(
     r'ndis|support worker|service agreement|plan management|'
     r'occupational therapy|speech therapy|physiotherapy|'
     # Travel bookings
-    r'booking confirmation|itinerary|check-in|flight|hotel|accommodation|'
+    r'booking confirmation|itinerary|check-in|flight|hotels?|accommodation|'
     r'car hire|travel insurance|passport|'
     # Legal
     r'legal notice|asic|court|solicitor|settlement|'
@@ -115,6 +116,10 @@ _INGEST_SUBJECT_KW = re.compile(
     r'concert|recital|performance|rehearsal|ensemble|choir|orchestra|band practice|'
     r'cello|violin|strings|music lesson|music program|'
     r'gala|sports day|carnival|team assignment|'
+    # Education / professional development sessions with real dates/times —
+    # "school of property" catches forwarded copies from a personal address
+    # that don't match the sender-domain rule above
+    r'school of property|live q&a|'
     # Insurance
     r'policy|certificate of currency|renewal|claim|'
     # Utilities / rego

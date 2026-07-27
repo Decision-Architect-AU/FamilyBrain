@@ -156,6 +156,49 @@ def _parse_address(addr_obj: dict) -> tuple[str, str]:
     return ea.get("name", ""), ea.get("address", "")
 
 
+_ATTACHMENT_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".pdf")
+
+
+def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> str:
+    """
+    Fetch image/PDF attachments via Graph and OCR them through the
+    ingestor's existing /ingest/extract endpoint. Previously attachments
+    were never even fetched — schedules, venue details, and timetables sent
+    as an attached image were invisible to triage and the decomposer.
+    """
+    try:
+        resp = requests.get(
+            f"{GRAPH_BASE}/me/messages/{msg_id}/attachments"
+            "?$select=name,contentType,contentBytes,size",
+            headers=_headers(account), timeout=30,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("value", [])
+    except Exception as e:
+        print(f"[outlook] attachment list failed for {msg_id}: {e}")
+        return ""
+
+    blocks = []
+    for att in items:
+        filename = att.get("name") or ""
+        content_b64 = att.get("contentBytes")
+        if not content_b64 or not filename.lower().endswith(_ATTACHMENT_EXTS):
+            continue
+        try:
+            r = requests.post(
+                f"{ingestor_url}/ingest/extract",
+                json={"content_b64": content_b64, "filename": filename},
+                timeout=60,
+            )
+            if r.ok and r.json().get("ok"):
+                text = r.json().get("text", "").strip()
+                if text:
+                    blocks.append(f"--- Attachment: {filename} ---\n{text}")
+        except Exception as e:
+            print(f"[outlook] attachment extract failed for {filename!r}: {e}")
+    return "\n\n".join(blocks)
+
+
 def sync_email(account: dict, ingestor_url: str) -> int:
     """
     Sync new Outlook/Hotmail emails for an account.
@@ -176,7 +219,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             initial_days = int(os.environ.get("OUTLOOK_INITIAL_DAYS", "90"))
             since = (datetime.now(timezone.utc) - timedelta(days=initial_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             # Use regular messages endpoint for initial fetch — delta ignores $filter
-            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId&$filter=receivedDateTime+ge+{since}"
+            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments&$filter=receivedDateTime+ge+{since}"
 
         while url:
             resp = requests.get(url, headers=_headers(account), timeout=30)
@@ -204,6 +247,11 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 # (happens with image-only or layout-only emails)
                 if not body_text.strip():
                     body_text = msg.get("bodyPreview", "")
+
+                if msg.get("hasAttachments"):
+                    attachment_text = _extract_attachments_text(account, msg_id, ingestor_url)
+                    if attachment_text:
+                        body_text = f"{body_text}\n\n{attachment_text}"
 
                 subject = msg.get("subject") or "(no subject)"
 
@@ -299,7 +347,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     # "(no subject)". Must match the fields the real sync loop needs.
                     seed_resp = requests.get(
                         f"{GRAPH_BASE}/me/mailFolders/inbox/messages/delta"
-                        f"?$top=1&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId",
+                        f"?$top=1&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments",
                         headers=_headers(account), timeout=30,
                     )
                     seed_data = seed_resp.json()
@@ -340,7 +388,7 @@ def _sync_sent_items(account: dict, ingestor_url: str) -> int:
             url = (
                 f"{GRAPH_BASE}/me/mailFolders/SentItems/messages"
                 f"?$top=50&$orderby=receivedDateTime+desc"
-                f"&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId"
+                f"&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments"
                 f"&$filter=receivedDateTime+ge+{since}"
             )
 

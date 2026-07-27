@@ -38,6 +38,34 @@ A note that fails classification (`is_spam=true`, `requires_payment_from_us=fals
 
 Every row fetched with `RealDictCursor` is a dict-like object, not a tuple — `cur.fetchone()[0]` raises `KeyError(0)`, not `IndexError`. Every function in this codebase that reads a `RealDictCursor` result accesses it by column name (`row["id"]`), never by position.
 
+## Triage keyword coverage — extracurricular activities
+
+`ingestor/src/triage.py`'s fast keyword gate is what decides whether an email reaches the decomposer at all. The "School/kids" keyword group only covered `compass|excursion|permission slip|report card|uniform|tuckshop|term dates` — nothing for concerts, choir, music programs, or performances. Anything about those fell through to the ambiguous LLM triage step, which inconsistently classified genuinely relevant emails ("Melodies Choir - Permission Forms and Upcoming Performances", "Beginner Strings - End of Term Information") as `skip`, with no error logged anywhere — they looked enough like generic newsletter content that the fast classifier judged them irrelevant. Fixed by expanding the keyword group to cover `concert|recital|performance|rehearsal|ensemble|choir|orchestra|cello|violin|strings|music lesson|music program|gala|sports day|carnival|team assignment`.
+
+**Recovering already-mis-skipped emails is not automatic.** A `skip`-classified email only gets a minimal DB record (`ingest_status='skip'`) — its body text is never persisted (`ingest_email()` in ingestor's `main.py` discards the payload entirely on that branch). Fixing the keyword gate only affects emails ingested *from that point forward*; anything already sitting as `skip` needs to be re-fetched from source (Gmail/Outlook, by `provider_msg_id`) and re-submitted — Outlook's delta feed in particular won't return an old message again just because the cursor is intact, since delta only returns what's changed since the last token.
+
+## Routine synonym matching and person inheritance
+
+`_resolve_routine_asset()` in `email_decomposer.py` matches a calendar item's title+detail text against every active routine asset's name and `synonyms` (`personal.asset.synonyms TEXT[]`) — longest match wins. This is a second, independent route to linking an event to a routine, alongside slot-key/date matching (Stage 2 override): informational emails ("Beginner Strings Blue - Term 3", "Melodies Choir - Upcoming Performances") don't land on one specific placeholder date, so they never hit Stage 2 at all, and previously never got tied to any routine.
+
+When a match is found and the event's own person resolution (`_resolve_person_id()`, requires the person's name to literally appear in the text) comes up empty, the event **inherits the routine's `person_id`** — a bare title like "Gold Coast Eisteddfod" says nothing about who's attending, and an event untethered from a person/entity/property is close to meaningless on its own.
+
+**Not yet automatic:** routines currently need synonyms seeded manually (e.g. direct SQL) whenever a naming gap is discovered. The natural next step is a maintenance task that notices recurring alternate terms in documents already linked to a routine and appends them on its own — see the main [README's Routines section](../README.md#synonyms--matching-a-routine-under-whatever-name-an-email-uses).
+
+## Email attachment OCR
+
+Image/PDF email attachments were never processed at all — `"attachments": []` was hardcoded in every payload sent to the ingestor, regardless of what the email actually had. Schedules, venue details, and timetables sent as an attached image/screenshot (not in the email body text) were invisible to both triage and the decomposer.
+
+Fixed by reusing the ingestor's existing `/ingest/extract` endpoint (tesseract OCR, already used for the file-drop pipeline) for email attachments too:
+- **Gmail** (`gmail.py`) — `_find_attachment_parts()` recursively walks the message payload for parts with a filename + `attachmentId`, fetches each via `messages().attachments().get()`, and OCRs image/PDF ones.
+- **Outlook** (`outlook.py`) — `_extract_attachments_text()` calls `/me/messages/{id}/attachments`, which returns `contentBytes` directly (no second per-attachment fetch needed like Gmail); gated behind `hasAttachments` on the message so accounts without attachments don't pay for the extra API call.
+
+Extracted text is appended to `body_text` before triage/`should_ingest()` runs, so both the fast keyword gate and the LLM decomposer see attachment content the same as body content — no separate code path needed downstream.
+
+## Location was captured but never stored
+
+`_create_calendar_event()` in `email_decomposer.py` extracted `item.get("location")` from the LLM's output but never passed it anywhere — `upsert_event()` had no `location` parameter at all, and neither the GCal event body nor the Outlook event body included a `location` field despite both APIs supporting one directly. Fixed: `upsert_event()` now accepts and stores `location`; `appointment_updater.py`'s GCal (`body["location"]`) and Outlook (`body["location"] = {"displayName": ...}`) write paths both include it when present. The `personal.event` SELECT that feeds the update loop was also missing the `location` column entirely, so this required three separate fixes to actually reach the calendar, not one.
+
 Calendar event source metadata (account email, From address, received date) is appended to the event's notes field so its provenance is visible directly in Google Calendar, not just in the DB. The event UPDATE inside `_create_calendar_event` sets `status = 'confirmed'`, not `'ingested'` — `appointment_updater` explicitly excludes `status IN ('cancelled','superseded','ingested')` from its GCal write query, so setting `'ingested'` here silently blocked every email-derived event from ever reaching the calendar.
 
 ## Sent item ingestion

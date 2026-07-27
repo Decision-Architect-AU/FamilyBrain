@@ -209,6 +209,54 @@ def _resolve_person_id(text: str) -> int | None:
     return None
 
 
+def _resolve_routine_asset(text: str, person_id: int | None) -> tuple[int | None, int | None]:
+    """
+    Match event text against a routine asset's name or synonyms — this is
+    what ties an email like "Beginner Strings Blue - Term 3" or "Melodies
+    Choir - Upcoming Performances" back to the right routine even when it
+    doesn't land on the exact date of a generated placeholder (the only
+    other linkage mechanism, via slot_key in _supersede_placeholder/
+    _enrich_asset_from_confirmed — informational/schedule emails usually
+    don't hit that path at all).
+    Longest matching name/synonym wins so a more specific match (e.g.
+    "beginner strings blue") beats a shorter one (e.g. "strings").
+
+    Returns (asset_id, asset_person_id) — an event whose own text never names
+    a person ("Gold Coast Eisteddfod" alone says nothing about who's
+    attending) can still inherit one from the routine it just matched, since
+    an event that isn't tied to a person/entity/property is close to
+    meaningless on its own — something has to be the subject of it.
+    """
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            with c.cursor() as cur:
+                if person_id:
+                    cur.execute(
+                        "SELECT id, name, synonyms, person_id FROM personal.asset "
+                        "WHERE asset_type = 'routine' AND status = 'active' "
+                        "AND (person_id = %s OR person_id IS NULL)",
+                        (person_id,),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, name, synonyms, person_id FROM personal.asset "
+                        "WHERE asset_type = 'routine' AND status = 'active'"
+                    )
+                routines = cur.fetchall()
+        text_lower = text.lower()
+
+        best_id, best_person_id, best_len = None, None, 0
+        for routine in routines:
+            candidates = [routine["name"]] + list(routine.get("synonyms") or [])
+            for cand in candidates:
+                cand_lower = (cand or "").lower().strip()
+                if len(cand_lower) > 2 and cand_lower in text_lower and len(cand_lower) > best_len:
+                    best_id, best_person_id, best_len = routine["id"], routine.get("person_id"), len(cand_lower)
+        return best_id, best_person_id
+    except Exception:
+        return None, None
+
+
 def _supersede_placeholder(cur, slot_key: str, new_event_id: int,
                             incoming_rank: int) -> dict | None:
     """
@@ -372,6 +420,7 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             calendar_event_id=cal_id,
             notes=notes,
             ingestor_url=ingestor_url or None,
+            location=location,
         )
 
         if not event_id:
@@ -383,6 +432,18 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
 
         # Resolve person from title + detail
         person_id = _resolve_person_id(f"{title} {detail}")
+
+        # Resolve routine asset by name/synonym match — the only other route to
+        # this (slot_key override in _supersede_placeholder below) requires
+        # landing on the exact date of a generated placeholder, which
+        # informational/schedule emails ("Beginner Strings Blue - Term 3",
+        # "Melodies Choir - Upcoming Performances") usually never do.
+        routine_asset_id, routine_person_id = _resolve_routine_asset(f"{title} {detail}", person_id)
+        # An event whose text names no person ("Gold Coast Eisteddfod" alone
+        # says nothing about who's attending) inherits one from the routine —
+        # every event should trace back to a person/entity/property, not float
+        # unattached.
+        person_id = person_id or routine_person_id
 
         # Classify incoming event
         from .slot_classify import classify as _classify_slot
@@ -402,10 +463,13 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                 blocks_person   = %s,
                 precedence_rank = %s,
                 person_id       = COALESCE(person_id, %s),
+                asset_id        = COALESCE(asset_id, %s),
                 occurrence_date = %s
             WHERE id = %s
         """, (slot_key, slot_class, blocks_person, rank,
-              person_id, effective_dt, event_id))
+              person_id, routine_asset_id, effective_dt, event_id))
+        if routine_asset_id:
+            print(f"[decompose] linked event {event_id} ({title[:40]!r}) to routine asset {routine_asset_id}")
 
         # Attempt override: supersede a generated placeholder in the same slot
         if slot_key and event_type not in _CONTEXT_TYPES:

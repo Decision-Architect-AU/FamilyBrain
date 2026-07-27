@@ -16,6 +16,7 @@ OpenVINO-backed inference server. Runs on the Windows host (not in Docker) and s
 | qwen2.5:14b | Arc GPU (INT4) | Email decomposition, financial extraction, primary agent |
 | qwen2.5:3b | AUTO:GPU,CPU (INT4) | Fast classification, Pass 1 extraction, triage |
 | qwen2.5:32b | GPU,CPU (INT4) | Deep extraction (Pass 3, opt-in) |
+| OpenVINO/Qwen3.6-35B-A3B-int4-ov | GPU (INT4, VLM export) | Concept audit (nightly), optional deep-reasoning chat |
 | nomic-embed-text | NPU | Semantic embeddings (768-dim) |
 | ms-marco-reranker | NPU (INT8) | Cross-encoder reranking of search candidates |
 | whisper-small | CPU | Speech-to-text transcription |
@@ -56,27 +57,24 @@ Update `models.yaml` to point to the converted paths.
 
 OpenVINO NPU requires fully static input shapes. Models on NPU are reshaped to `[1, max_length]` at startup in `src/model_registry.py`. If you see `ZE_RESULT_ERROR_INVALID_ARGUMENT` during model load, verify that `max_length` in `models.yaml` matches the tokenizer's expected sequence length.
 
-## OVMS proxy — models that can't run through openvino_genai directly
+## VLM exports used text-only — no OVMS needed
 
-Some models can't be served via `openvino_genai.LLMPipeline`/`VLMPipeline` cleanly — the concrete case that motivated this: VLM exports (e.g. `OpenVINO/Qwen3.6-35B-A3B-int4-ov`) split token-embedding lookup from the decoder into separate submodels (`openvino_text_embeddings_model.xml` + `openvino_language_model.xml`, versus a monolithic `input_ids`-in graph a plain LLM export has). `LLMPipeline` expects `input_ids` directly and fails with `Port for tensor name input_ids was not found`; `VLMPipeline`'s Python API has no text-only generate() overload — every path requires an image/video/audio tensor. Reimplementing that embeddings→decoder wiring by hand (manual KV-cache management, position IDs, sampling) would duplicate code OpenVINO Model Server (OVMS) already implements and tests (`--task text_generation` mode).
+`OpenVINO/Qwen3.6-35B-A3B-int4-ov` is a Mixture-of-Experts checkpoint whose only registered `optimum-intel` export task is `image-text-to-text` — it's packaged as a vision-language model, split into separate `openvino_language_model.xml`/`openvino_vision_embeddings_model.xml` submodels rather than a monolithic `input_ids`-in graph. `LLMPipeline(path, device)` fails on it with `Port for tensor name input_ids was not found` since it expects that plain-LLM graph shape.
 
-Rather than adding OVMS as a second endpoint the rest of the stack has to know about, `src/ovms_proxy.py` routes specific model names through a local OVMS instance while every other consumer keeps hitting this server's normal Ollama-style `/api/generate` / `/api/chat` unchanged. The proxy translates: Ollama prompt/messages shape in, OpenAI chat-completions shape to OVMS, response translated back.
+The fix is much smaller than it first looks: `openvino_genai.VLMPipeline(path, device).generate(prompt_string, ...)` runs text-only perfectly well with **no image argument at all** — confirmed directly, not assumed. `model_registry.py` has a `type: vlm` entry that loads it via `VLMPipeline` exactly like `type: generate` loads `LLMPipeline`, just a different pipeline class:
 
-**To use it:**
+```yaml
+OpenVINO/Qwen3.6-35B-A3B-int4-ov:
+  path: C:\Users\Glenn\qwen3.6-int4-ov2
+  type: vlm
+  device: GPU
+```
 
-1. Run OVMS separately for the model(s) that need it (see the model's HF card for the exact `ovms.exe`/Docker invocation, typically something like):
-   ```
-   ovms.exe --rest_port 8000 --source_model <model-id> --model_repository_path models --target_device GPU --task text_generation
-   ```
-2. Add an entry to `models.yaml` with `type: ovms` — this is the single source of truth for which models are OVMS-routed and where, same as every other model here:
-   ```yaml
-   <model-id>:
-     type: ovms
-     ovms_url: http://localhost:8000   # optional, defaults to OVMS_BASE_URL env var
-   ```
-3. Restart this server. The model appears in `/api/tags` (family `ovms`) and any call to `/api/generate`/`/api/chat` with that model name transparently proxies to OVMS.
+**Two gotchas found integrating it, both handled in `server.py`:**
+- **Never pre-render the chat template yourself.** `VLMPipeline.generate()` applies its own chat-template formatting internally on a plain string — feeding it an already-templated string (via `tokenizer.apply_chat_template(...)`) double-applies the template and produces a duplicated response. Pass plain text, always.
+- **It reasons regardless of any thinking flag.** Neither `enable_thinking=False` (the textbook Qwen3 chat-template control) nor the in-band `/no_think` convention suppresses this checkpoint's "Thinking Process:" preamble. The token budget (`_VLM_MIN_MAX_TOKENS`, 8192) is applied unconditionally for `type: vlm` models rather than only when thinking is requested on, since the reasoning happens either way. See [`wa-agent`'s README](../wa-agent/README.md#model-selection-and-the-thinking-toggle) for how the actual answer gets separated from the reasoning trace (a positive `<answer>` tag instruction, not suppression).
 
-No local path is needed for `type: ovms` entries — `load_registry()` skips the path-existence check for them entirely, since the actual model files live wherever OVMS points at them, not managed by this repo.
+**`src/ovms_proxy.py` still exists** for a genuinely different case: a model whose export task has *no* text-generation-shaped path through `openvino_genai` at all (not just "packaged as a VLM" — actually requiring multimodal input to produce any output). None of the models currently in `models.yaml` need it, but the `type: ovms` mechanism is there if one shows up — see git history for the original writeup if reviving it.
 
 ## Docker services connect via
 

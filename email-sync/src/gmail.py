@@ -117,6 +117,62 @@ def _header(headers: list, name: str) -> str:
     return ""
 
 
+_ATTACHMENT_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".pdf")
+
+
+def _find_attachment_parts(payload: dict) -> list[dict]:
+    """Recursively collect payload parts that are actual attachments (have a
+    filename and an attachmentId) rather than inline text/html body parts."""
+    found = []
+    filename = payload.get("filename") or ""
+    if filename and payload.get("body", {}).get("attachmentId"):
+        found.append(payload)
+    for part in payload.get("parts", []):
+        found.extend(_find_attachment_parts(part))
+    return found
+
+
+def _extract_attachments_text(svc, msg_id: str, payload: dict, ingestor_url: str) -> str:
+    """
+    Fetch each image/PDF attachment's bytes via the Gmail API and OCR them
+    through the ingestor's existing /ingest/extract endpoint (tesseract-based,
+    already used for the file-drop pipeline — this just reuses it for email
+    attachments, which previously went entirely unprocessed: schedules, venue
+    details, and timetables sent as an attached image/screenshot were
+    invisible to triage and the decomposer, since "attachments" was always
+    submitted as an empty list regardless of what the email actually had.
+    """
+    import requests as req
+
+    parts = [p for p in _find_attachment_parts(payload)
+             if (p.get("filename") or "").lower().endswith(_ATTACHMENT_EXTS)]
+    if not parts:
+        return ""
+
+    blocks = []
+    for part in parts:
+        filename = part["filename"]
+        attachment_id = part["body"]["attachmentId"]
+        try:
+            att = svc.users().messages().attachments().get(
+                userId="me", messageId=msg_id, id=attachment_id,
+            ).execute()
+            raw = base64.urlsafe_b64decode(att["data"] + "==")
+            content_b64 = base64.b64encode(raw).decode("ascii")
+            resp = req.post(
+                f"{ingestor_url}/ingest/extract",
+                json={"content_b64": content_b64, "filename": filename},
+                timeout=60,
+            )
+            if resp.ok and resp.json().get("ok"):
+                text = resp.json().get("text", "").strip()
+                if text:
+                    blocks.append(f"--- Attachment: {filename} ---\n{text}")
+        except Exception as e:
+            print(f"[gmail] attachment extract failed for {filename!r}: {e}")
+    return "\n\n".join(blocks)
+
+
 def _parse_message(msg: dict) -> dict:
     payload = msg.get("payload", {})
     headers = payload.get("headers", [])
@@ -265,6 +321,10 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 msg    = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
                 parsed = _parse_message(msg)
 
+                attachment_text = _extract_attachments_text(svc, msg_id, msg.get("payload", {}), ingestor_url)
+                if attachment_text:
+                    parsed["body_text"] = f"{parsed['body_text']}\n\n{attachment_text}"
+
                 # Extract raw headers for bulk-mail heuristics
                 raw_headers = {
                     h["name"]: h["value"]
@@ -316,6 +376,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             try:
                 msg = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
                 parsed = _parse_message(msg)
+                attachment_text = _extract_attachments_text(svc, msg_id, msg.get("payload", {}), ingestor_url)
+                if attachment_text:
+                    parsed["body_text"] = f"{parsed['body_text']}\n\n{attachment_text}"
                 raw_headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
                 # Drop promotions/social/updates — but allow-list overrides Gmail's auto-categorisation
                 msg_labels = set(msg.get("labelIds", []))

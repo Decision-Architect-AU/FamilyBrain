@@ -81,6 +81,12 @@ The appointment digest task also doubles as a pre-computed cache: results are sa
 
 `config.response_persona` rows match trigger patterns and inject a context-specific system prompt. The `appointment` persona fires only on specific time-lookup queries (`when is my`, `what time is`) — general questions about appointments get a conversational prose response instead.
 
+## Model selection and the `thinking` toggle
+
+`generate(prompt, system, model, thinking)` in `llm.py` accepts a per-call `model` override (the dashboard's chat model dropdown uses this) and a `thinking` bool, both forwarded straight through to `inference-server`'s `/api/generate`. `thinking` is meaningful only for models with a chat-template tokenizer loaded (currently just the reasoning VLM — see the main [README's model section](../README.md#the-reasoning-model--a-vlm-export-used-text-only-not-via-ovms)) and is silently ignored by qwen2.5 models, which have no such concept.
+
+**`<answer>` extraction.** The reasoning model narrates a "Thinking Process:" preamble regardless of the thinking flag or any system-prompt instruction telling it not to — a system prompt saying "don't narrate your reasoning" gets read, acknowledged in the model's own reasoning trace, and ignored anyway. What does work: a positive, structural instruction. The system prompt (`main.py`'s `SYSTEM_PROMPT`) asks the model to wrap its final answer in `<answer>...</answer>`, and `llm.py`'s `_extract_answer()` pulls just that content out via regex, discarding everything before it. Falls back to the raw response untouched if no tags are found — every other model never emits them, so this is a no-op for the normal chat path.
+
 ## Maintenance job (`maintenance.py`)
 
 Full reference: [`src/maintenance.md`](src/maintenance.md)
@@ -88,11 +94,15 @@ Full reference: [`src/maintenance.md`](src/maintenance.md)
 Runs nightly (or on demand via `POST /maintenance`). Handles event generation from asset rules, scheduling conflict detection, knowledge graph sync, and appointment digest pre-computation.
 
 **Tasks in default run order:**
-`rederive_facts → re_embed → link → dedup → prune → generate_events → detect_conflicts → detect_provider_gaps → reconcile_ingested → refresh_asset_notes → asset_graph_sync → monitor → tune_weights → appointment_digest → routine_context_pack → notify_provider_conflicts → asset_summary`
+`rederive_facts → re_embed → link → audit_concepts → dedup → prune → generate_events → detect_conflicts → detect_provider_gaps → reconcile_ingested → refresh_asset_notes → asset_graph_sync → monitor → tune_weights → appointment_digest → routine_context_pack → notify_provider_conflicts → asset_summary`
 
 `rederive_facts` runs first deliberately — it drains the re-derivation queue (facts whose sources were suppressed since the last run) before any other task reads or rewrites facts, so nothing downstream acts on stale conclusions.
 
 Run a subset: `POST /maintenance?tasks=generate_events&tasks=detect_conflicts`
+
+**`link`** (`linker.py`) — creates `ALIAS_OF`/`SIMILAR_TO` edges between `Concept` nodes. Incremental, not a full rescan: each concept gets a `linked_at` timestamp once processed, and only concepts with no `linked_at` are compared against the full set on subsequent runs — already-linked pairs keep their edges without being re-scored. Embeddings are cached on the node (`c.embedding`, JSON) and computed exactly once per concept ever, not on every run. Throttled independently via `LINK_INTERVAL_SECS` (default once/day). The very first run after this changed still processes everything (nothing has `linked_at` yet) — expected one-time backfill, not a bug.
+
+**`audit_concepts`** (`linker.audit_concepts()`) — samples 5 already-linked concepts per graph (`CONCEPT_AUDIT_SAMPLE_SIZE`), asks the larger reasoning model (`CONCEPT_AUDIT_MODEL`, default `OpenVINO/Qwen3.6-35B-A3B-int4-ov`) to validate whether the linker's own `ALIAS_OF`/`SIMILAR_TO` edges actually hold up semantically, and zeroes any it flags as a genuine mismatch (`confidence=0, zeroed_by='system'` — same suppression mechanism as the asset dossier, re-scorable later). This runs several ~200s reasoning-model calls per invocation — a non-issue in a nightly background job, a real problem on the chat path, which is exactly why it lives here instead. Throttled independently via `CONCEPT_AUDIT_INTERVAL_SECS` (default once/day).
 
 **`rederive_facts`** — for each `(asset_ref, fact_name)` queued by an edge suppression, drops the suppressed source from that fact's `factsrc_*` list and re-derives from what remains; deletes the fact (and its `factsrc_*`) entirely if no sources remain. A `fact_*` must never outlive its evidence — this is what makes suppression trustworthy instead of cosmetic.
 

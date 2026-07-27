@@ -589,6 +589,7 @@ def task_generate_events() -> dict:
             person_id  = asset.get("person_id")
             facts      = asset.get("facts") or {}
             rules      = asset.get("rules") or []
+            anchor_was_unset = not asset.get("last_event_date")
             anchor_raw = asset.get("last_event_date") or now
 
             if isinstance(anchor_raw, str):
@@ -600,6 +601,23 @@ def task_generate_events() -> dict:
                 anchor = anchor_raw.date()
             else:
                 anchor = anchor_raw or now
+
+            # An asset with no last_event_date used to silently anchor to
+            # today() EVERY run, forever — since nothing ever wrote it back.
+            # The whole recurring schedule recalculated from a constantly
+            # shifting reference point, producing a fresh near-duplicate
+            # event every time maintenance ran on a new day, with nothing
+            # cleaning up the stale ones (traced live: 125-146 duplicate
+            # MEDICATION_REFILL/SCRIPT rows per asset for Olivia's
+            # medications). Persist the anchor the first time so it's fixed
+            # from here on, instead of drifting indefinitely.
+            if anchor_was_unset:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE personal.asset SET last_event_date = %s WHERE id = %s",
+                        (anchor, asset_id),
+                    )
+                conn.commit()
 
             asset_created = 0
 

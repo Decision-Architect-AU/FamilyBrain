@@ -26,6 +26,7 @@ Central ingestion service. Accepts documents from all channels and routes them i
 | `POST` | `/ingest/event` | Calendar event from any source |
 | `POST` | `/ingest/message` | Generic inbound message (WhatsApp, voice, SMS) |
 | `POST` | `/ingest/observation` | Approved observation item |
+| `POST` | `/ingest/extract` | `{content_b64, filename}` → `{ok, text}`. Tesseract OCR for images, PDF text extraction (OCR fallback for image-only scanned PDFs). Originally for the file-drop pipeline; email-sync also calls this directly for image/PDF email attachments (Gmail/Outlook), merging the extracted text into the email body before triage — schedules/venue details sent as an attached image are otherwise invisible to the whole pipeline. |
 | `GET`  | `/scan` | Force immediate scan of ReadyToIngest directory |
 | `GET`  | `/api/notifications` | Active notifications (DETECTED / TRIAGED / PENDING) |
 | `GET`  | `/api/assets` | All tracked assets with rule counts |
