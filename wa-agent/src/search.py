@@ -13,6 +13,7 @@ import os
 import re
 import json
 import time
+from datetime import date
 import psycopg2
 import psycopg2.extras
 from src.llm import embed, generate
@@ -62,12 +63,32 @@ RERANK_ENABLED  = os.environ.get("RERANK_ENABLED", "true").lower() == "true"
 RERANK_MODEL    = os.environ.get("RERANK_MODEL", "ms-marco-reranker")
 _RERANK_FETCH   = 40  # candidates fetched before reranking
 
-# Stop-words excluded from entity name matching
+# Stop-words excluded from entity name matching. Confirmed live that gaps
+# here are load-bearing, not cosmetic: "do"/"of"/"between" surviving into
+# _targeted_event_search's ILIKE terms matched as noise across hundreds of
+# unrelated rows (any title/notes containing "do" as a substring, e.g.
+# "Doveton"), and with ORDER BY starts_at DESC + LIMIT 30, that noise crowded
+# out the actual date-range match the query was asking about.
 _STOP = {
     'tell', 'about', 'what', 'show', 'find', 'give', 'info', 'the', 'and',
     'for', 'with', 'this', 'that', 'from', 'how', 'much', 'does', 'did',
     'has', 'have', 'are', 'was', 'were', 'can', 'could', 'would', 'should',
     'who', 'when', 'where', 'why', 'just', 'me', 'my', 'its', 'all', 'any',
+    'do', 'of', 'between', 'on', 'in', 'at', 'to', 'so', 'if', 'or', 'is',
+    'be', 'it', 'we', 'you', 'they', 'them', 'get', 'got', 'not', 'now',
+}
+
+# Month/day names are capitalised, always >3 chars — indistinguishable from a
+# proper person name by the naive "starts with uppercase" heuristic
+# person-query detection uses. Confirmed live: a query mentioning "August"
+# got treated as being about a person named August, triggering a filter that
+# discarded genuinely date-matched rows in favour of ones merely containing
+# the literal word "August" — the exact opposite of what date-range search
+# needs. Excluded from that heuristic's candidate-name list at both call sites.
+_MONTH_DAY_NAMES = {
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
 }
 
 # Vector search config per graph.
@@ -96,7 +117,7 @@ _VECTOR_SEARCH = {
                      || COALESCE(' | for: ' || p.name, '')
                      || COALESCE(' | ends: ' || e.ends_at::text, '')
                      || COALESCE(' | source: ' || e.calendar_source, '')
-                     || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                     || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), '[[:space:]]+', ' ', 'g'), '')
                    AS text,
                    e.starts_at::text
                      || COALESCE(' → ' || e.ends_at::text, '')
@@ -311,7 +332,7 @@ def _fetch_person_records(conn, pid: int, name: str, base_cost: int) -> list[dic
                          || COALESCE(' | ' || to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'Dy DD Mon YYYY HH12:MIam'), '')
                          || COALESCE(' | ends: ' || to_char(e.ends_at AT TIME ZONE 'Australia/Brisbane', 'HH12:MIam'), '')
                          || COALESCE(' | source: ' || e.calendar_source, '')
-                         || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                         || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), '[[:space:]]+', ' ', 'g'), '')
                        AS text,
                        e.starts_at::text AS meta,
                        NULL::float AS dist,
@@ -564,7 +585,7 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
                         SELECT 'event' AS source_type, e.id,
                                e.title || COALESCE(' | type: ' || e.event_type, '')
                                  || COALESCE(' | ' || to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'Dy DD Mon YYYY HH12:MIam'), '')
-                                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), '[[:space:]]+', ' ', 'g'), '')
                                AS text,
                                e.starts_at::text AS meta,
                                NULL::float AS dist,
@@ -614,30 +635,108 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
 
 
 _APPOINTMENT_KW = re.compile(
-    r'\b(appointment|appointments|session|sessions|schedule|scheduled|booking|meeting|'
+    r'\b(appointment|appointments|session|sessions|schedule|scheduled|booking|bookings|meeting|meetings|'
     r'medical|speech|therapy|physio|ot\b|psycholog|dentist|gp|doctor|specialist|'
-    r'referral|clinic|hospital|class|lesson|training|event|carnival|excursion|assembly)\b',
+    r'referral|clinic|hospital|class|lesson|training|event|events|carnival|excursion|assembly)\b',
+    re.I,
+)
+
+_MON3 = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+_MONTH_ALT = r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+_DATE_RANGE_RE = re.compile(
+    rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:-|–|to|and|through|until)\s*(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_ALT})\b',
+    re.I,
+)
+_DATE_SINGLE_RE = re.compile(
+    rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_ALT})\b',
     re.I,
 )
 
 
+def _extract_date_range(query: str, today: date | None = None) -> tuple[date, date] | None:
+    """
+    Pull an explicit day/month (range) out of free text, e.g. "28th to 30th of
+    August" or "on the 30th of August". Rolls into next year if the parsed date
+    would otherwise fall more than 60 days in the past, so a query about a month
+    name resolves to the upcoming occurrence rather than one that's already gone.
+    """
+    today = today or date.today()
+
+    m = _DATE_RANGE_RE.search(query)
+    if m:
+        d1, d2, mon_text = int(m.group(1)), int(m.group(2)), m.group(3)
+    else:
+        m = _DATE_SINGLE_RE.search(query)
+        if not m:
+            return None
+        d1 = d2 = int(m.group(1))
+        mon_text = m.group(2)
+
+    month = _MON3.get(mon_text[:3].lower())
+    if not month:
+        return None
+
+    year = today.year
+    try:
+        start = date(year, month, min(d1, d2))
+        end = date(year, month, max(d1, d2))
+    except ValueError:
+        return None
+    if (today - end).days > 60:
+        year += 1
+        start = date(year, month, min(d1, d2))
+        end = date(year, month, max(d1, d2))
+
+    return start, end
+
+
 def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
     """
-    Query-aware event search: filter personal.event by query terms in title/notes.
+    Query-aware event search: filter personal.event by query terms in title/notes,
+    or by an explicit date (range) parsed from the query text — a query naming a
+    date but no matching title/notes text (e.g. "what's booked 28th-30th of
+    August") would otherwise match nothing even though events exist in that window.
     Runs when the query mentions appointments or schedule keywords.
     Returns matching events across all time (past and future) so history is visible.
     """
-    if not _APPOINTMENT_KW.search(query) or not terms:
+    if not _APPOINTMENT_KW.search(query):
+        return []
+
+    date_range = _extract_date_range(query)
+    if not terms and not date_range:
         return []
 
     # Build ILIKE conditions for each meaningful term
-    conditions = " OR ".join(
+    term_conditions = " OR ".join(
         f"(e.title ILIKE %s OR COALESCE(e.notes,'') ILIKE %s)"
         for _ in terms[:6]
     )
     params = []
     for t in terms[:6]:
         params += [f"%{t}%", f"%{t}%"]
+
+    where_parts = []
+    if term_conditions:
+        where_parts.append(f"({term_conditions})")
+    date_range_condition = None
+    if date_range:
+        date_range_condition = "e.starts_at::date BETWEEN %s AND %s"
+        where_parts.append(date_range_condition)
+        params += [date_range[0], date_range[1]]
+    if not where_parts:
+        return []
+    conditions = " OR ".join(where_parts)
+
+    # A date range in the query is a specific, deliberate signal — rank those
+    # matches first so generic term noise (any row where a leftover common
+    # word happens to ILIKE-match) can't crowd them out of LIMIT 30. Confirmed
+    # live: without this, "bookings between 28th and 30th of August" returned
+    # 30 unrelated 2027-dated rows and never reached the real matches.
+    priority_case = f"CASE WHEN ({date_range_condition}) THEN 0 ELSE 1 END, " if date_range_condition else ""
+    priority_params = [date_range[0], date_range[1]] if date_range_condition else []
 
     sql = f"""
         SELECT 'health_event' AS source_type, e.id,
@@ -646,7 +745,7 @@ def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
                  || COALESCE(' | for: ' || p.name, '')
                  || COALESCE(' | ends: ' || e.ends_at::text, '')
                  || COALESCE(' | source: ' || e.calendar_source, '')
-                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), E'\\s+', ' ', 'g'), '')
+                 || COALESCE(' | notes: ' || regexp_replace(regexp_replace(e.notes, E'<[^>]+>', ' ', 'g'), '[[:space:]]+', ' ', 'g'), '')
                  || ' (' || e.starts_at::date::text || ')'
                AS text,
                e.starts_at::text
@@ -654,23 +753,58 @@ def _targeted_event_search(conn, query: str, terms: list[str]) -> list[dict]:
                  || COALESCE(' [' || e.gcal_calendar_id || ']', '')
                AS meta,
                3 AS match_score,
-               NULL::float AS dist
+               NULL::float AS dist,
+               e.starts_at::date AS _starts_at_date,
+               e.provenance AS _provenance
         FROM personal.event e
         LEFT JOIN personal.person p ON p.id = e.person_id
         WHERE ({conditions})
           AND e.status NOT IN ('cancelled', 'done')
-        ORDER BY e.starts_at DESC
+        ORDER BY {priority_case}e.starts_at DESC
         LIMIT 30
     """
+    # priority_case's placeholders render into ORDER BY, which comes after
+    # WHERE in the SQL text — its params must be appended, not prepended, to
+    # match psycopg2's left-to-right positional binding.
+    params = params + priority_params
     _log("SQL personal.event (targeted)", f"title/notes ILIKE terms={terms[:6]}  all-time  LIMIT 30")
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[search] Targeted event search error: {e}")
         conn.rollback()
         return []
+
+    # A date range in the query is a deliberate, specific signal — mark rows
+    # that satisfy it so the caller can pin them ahead of the cross-encoder
+    # reranker. Confirmed live that reranking alone wasn't enough: it scores
+    # on surface text similarity, and a row like "General Surgeon
+    # Appointment... 17th of august" can out-rank the actual requested-range
+    # match purely by sharing the literal words "of august", regardless of
+    # whether its date is anywhere near the range asked about.
+    if date_range:
+        for row in rows:
+            d = row.pop("_starts_at_date", None)
+            provenance = row.pop("_provenance", None)
+            in_range = bool(d and date_range[0] <= d <= date_range[1])
+            # Unbounded priority is reserved for genuine one-off bookings
+            # (provenance='email' — a real confirmation/invite), not routine-
+            # generated administrative rows (provenance='rule' — school days,
+            # medication refills) that also happen to land in the range.
+            # Confirmed live: without this split, a date range spanning a
+            # couple of school days pulled in enough recurring-routine noise
+            # (27 documents, 5KB of context) that the answering model's
+            # response truncated after one sentence, even with a raised
+            # token budget — the fix is less context, not more tokens.
+            row["_date_priority"] = in_range and provenance == "email"
+    else:
+        for row in rows:
+            row.pop("_starts_at_date", None)
+            row.pop("_provenance", None)
+
+    return rows
 
 
 def _rerank(query: str, rows: list[dict]) -> list[dict]:
@@ -994,6 +1128,7 @@ def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> t
         focused_entity: folder_slug of detected focal entity or None,
         rules_matched:  {graph: rule_name} for any intent rules that fired,
         traversal_mode: "person_hierarchy" | "entity_hierarchy" | "flat" per graph,
+        hit_counts:     {graph: post-rerank row count actually included in context},
     }
     """
     global _cypher_dead, _query_log
@@ -1011,6 +1146,7 @@ def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> t
         "focused_entity": None,
         "rules_matched": {},
         "traversal_mode": {},
+        "hit_counts": {},   # graph -> post-rerank row count actually included in context
     }
     conn = _conn()
 
@@ -1045,45 +1181,25 @@ def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> t
             # ── Cypher: always runs ───────────────────────────────────────────
             cypher_result = _cypher_search(conn, graph, query)
 
-            # ── Auto-create missing Concepts and retry once ───────────────────
-            if not cypher_result["entities"] and graph == "personal_graph":
-                terms = _query_terms(query)
-                created = []
-                for term in terms[:3]:
-                    try:
-                        safe_term = term.replace('"', '\\"')
-                        # Check existence first — AGE doesn't support MERGE...ON CREATE SET
-                        exists = _cypher(
-                            conn, graph,
-                            f'MATCH (c:Concept {{name: "{safe_term}"}}) RETURN c LIMIT 1',
-                            "(c agtype)",
-                        )
-                        if not exists:
-                            # Ask LLM to describe this term so the retry has real content
-                            try:
-                                desc = generate(
-                                    f"In 1-2 sentences, what is '{term}'? Be factual and concise.",
-                                    system="You are a knowledge assistant. Answer only with a short factual description, no preamble.",
-                                )
-                                desc = desc.strip().replace('"', "'")[:400]
-                            except Exception:
-                                desc = "auto-created from query"
-                            _cypher(
-                                conn, graph,
-                                f'CREATE (c:Concept {{name: "{safe_term}", description: "{desc}", type: "unknown"}})',
-                                "(c agtype)",
-                            )
-                        created.append(term)
-                    except Exception:
-                        conn.rollback()
-                if created:
-                    print(f"[search] Auto-created Concepts: {created} — retrying search")
-                    cypher_result = _cypher_search(conn, graph, query)
+            # NOTE: this used to auto-create a Concept node per unmatched query
+            # term (up to 3), asking the LLM to "define" it (e.g. "what is
+            # '28th'?"), then retry search against these fabricated nodes.
+            # Removed — confirmed live it actively derails retrieval quality:
+            # asking "what bookings do I have between 28th and 30th of
+            # August" produced a real booking event in _targeted_event_search,
+            # but this block fired first (no existing Concept named "bookings"
+            # or "28th"), manufactured LLM-hallucinated one-line definitions
+            # of those fragments, and the retry's junk "entities" crowded the
+            # real booking out of the final context entirely. The nodes never
+            # actually persisted (the connection closes without committing at
+            # the end of retrieve(), so it's an implicit rollback — no lasting
+            # graph pollution), but the derailment happens within the same
+            # request regardless, which is where the user-visible harm was.
 
             if cypher_result["entities"]:
                 has_content = True
                 # Detect if query is about a specific other person (not self)
-                query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
+                query_names = [t for t in terms if len(t) > 3 and t[0].isupper() and t.lower() not in _MONTH_DAY_NAMES]
                 person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
                 # Use first name only for entity filtering — surnames match too many unrelated entities
                 focal_first = focused_person["name"].split()[0].lower() if focused_person else None
@@ -1261,7 +1377,7 @@ def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> t
 
                 if rows:
                     # When querying about a specific person, suppress rows with no mention of their name
-                    query_names = [t for t in terms if len(t) > 3 and t[0].isupper()]
+                    query_names = [t for t in terms if len(t) > 3 and t[0].isupper() and t.lower() not in _MONTH_DAY_NAMES]
                     person_query = bool(query_names) and not all(_SELF_NAMES.search(n) for n in query_names)
                     if person_query:
                         if focused_person:
@@ -1298,12 +1414,28 @@ def retrieve(query: str, graphs: list[str], person_hint: str | None = None) -> t
                     _, matched_rule = _source_weights(query, graph, rules_cache)
                     if matched_rule:
                         meta["rules_matched"][graph] = matched_rule
-                    if RERANK_ENABLED and rows:
-                        _log(f"RERANK {graph}", f"cross-encoder {RERANK_MODEL}  {len(rows)} candidates → top {TOP_K}")
-                    rows = _rerank(query, rows)
+                    # Date-range-priority rows (see _targeted_event_search) are
+                    # pinned ahead of reranking rather than fed into it — the
+                    # cross-encoder has no notion of "this row's date literally
+                    # satisfies what was asked", only surface text similarity,
+                    # which confirmed live is not a reliable proxy for it.
+                    priority_rows = [r for r in rows if r.get("_date_priority")]
+                    rest_rows     = [r for r in rows if not r.get("_date_priority")]
+                    if RERANK_ENABLED and rest_rows:
+                        _log(f"RERANK {graph}", f"cross-encoder {RERANK_MODEL}  {len(rest_rows)} candidates → top {TOP_K}")
+                    # Priority rows are never truncated by TOP_K — they're the
+                    # literal, date-bounded answer to an explicit range in the
+                    # query, not open-ended noise. Confirmed live that slicing
+                    # them along with everything else cut the earliest-dated
+                    # match (Aug 28, sorted last under ORDER BY ... DESC)
+                    # right at the TOP_K=15 boundary when 17 priority rows
+                    # existed. TOP_K still caps how much of the generic
+                    # reranked remainder tops up the context beyond that.
+                    display_rows = priority_rows + _rerank(query, rest_rows)[:max(TOP_K - len(priority_rows), 0)]
                     has_content = True
+                    meta["hit_counts"][graph] = meta["hit_counts"].get(graph, 0) + len(display_rows)
                     section_lines.append("Documents:")
-                    for row in rows[:TOP_K]:
+                    for row in display_rows:
                         text     = _strip_html((row.get("text") or "").strip())[:1200]
                         row_meta = (row.get("meta") or "").strip()[:200]
                         score    = row.get("match_score")

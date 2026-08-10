@@ -594,7 +594,10 @@ def _api_get_notifications() -> dict:
 
 
 def _api_get_pending_sync() -> dict:
-    """Return rule-generated events that haven't been pushed to Google Calendar yet."""
+    """Return events that haven't been pushed to Google Calendar yet: rule-generated
+    events awaiting confirmation, plus confirmed events from any source (email-derived
+    bookings included) — anything still 'pending'/unclassified from a rule is excluded
+    since it hasn't passed the same legitimacy bar a 'confirmed' status implies."""
     import psycopg2
     import psycopg2.extras
     DB_URL = os.environ.get("DATABASE_URL")
@@ -609,8 +612,10 @@ def _api_get_pending_sync() -> dict:
                            a.name AS asset_name, a.asset_type
                     FROM personal.event e
                     LEFT JOIN personal.asset a ON a.id = e.asset_id
-                    WHERE e.status = 'pending'
-                      AND e.generated_by_rule IS NOT NULL
+                    WHERE (
+                        (e.status = 'pending' AND e.generated_by_rule IS NOT NULL)
+                        OR e.status = 'confirmed'
+                      )
                       AND (e.gcal_event_id IS NULL OR e.gcal_event_id = '')
                       AND e.starts_at > now()
                     ORDER BY e.starts_at

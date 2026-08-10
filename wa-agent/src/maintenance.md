@@ -8,17 +8,27 @@ Runs nightly (or on demand via `POST /maintenance`) as a background task inside 
 
 | Task | Function | Default order |
 |---|---|---|
-| `re_embed` | Embed any notes or themes missing pgvector embeddings | 1 |
-| `link` | Run concept linker — `ALIAS_OF` / `SIMILAR_TO` edges in AGE | 2 |
-| `dedup` | Merge Concept nodes with identical names within each graph | 3 |
-| `prune` | Delete orphan Concept nodes (no edges, no documents) | 4 |
-| `generate_events` | Generate future `personal.event` rows from asset rules | 5 |
-| `detect_conflicts` | Sweep for overlapping person-blocking events | 6 |
-| `refresh_asset_notes` | Write prose summaries back to `asset.notes` for retrieval | 7 |
-| `asset_graph_sync` | Upsert `Asset` nodes in AGE, link via `HAS_ASSET` to `Person`, prune disposed | 8 |
-| `monitor` | Audit query patterns, update IntentRule hit counts | 9 |
-| `tune_weights` | Adjust `__default__` intent rule weights from content mix | 10 |
-| `appointment_digest` | Pre-compute appointment summaries for 5 time windows | 11 |
+| `rederive_facts` | Drain the fact re-derivation queue after edge suppressions | 1 |
+| `re_embed` | Embed any notes or themes missing pgvector embeddings | 2 |
+| `link` | Run concept linker — `ALIAS_OF` / `SIMILAR_TO` edges in AGE (throttled ~daily) | 3 |
+| `audit_concepts` | 35B model validates the linker's own edges (throttled ~daily) | 4 |
+| `dedup` / `prune` | Merge duplicate / remove orphan Concept nodes (throttled ~daily) | 5 |
+| `detect_provider_gaps` | Bridge calendar→availability, sweep into `personal.routine_gap` | 6 |
+| `generate_events` | Generate future `personal.event` rows from asset rules; suspend (not delete) on collision | 7 |
+| `detect_conflicts` | Sweep for overlapping person-blocking events | 8 |
+| `reconcile_ingested` | Resolve ingested events to final status after conflict detection | 9 |
+| `refresh_asset_notes` | Write prose summaries back to `asset.notes` for retrieval | 10 |
+| `asset_graph_sync` | Upsert `Asset` nodes in AGE, link via `HAS_ASSET` to `Person`, prune disposed | 11 |
+| `monitor` | Audit query patterns, update IntentRule hit counts | 12 |
+| `tune_weights` | Adjust `__default__` intent rule weights from content mix | 13 |
+| `appointment_digest` | Pre-compute appointment summaries for 5 time windows | 14 |
+| `routine_context_pack` | Assemble tier-1 context packs for active routines | 15 |
+| `notify_provider_conflicts` | Push notifications for open provider gaps | 16 |
+| `asset_summary` | Derive `fact_*` + `fact_summary` for active assets | 17 |
+| `review_query_flags` | 35B model reviews `/query` fallback activations (throttled ~daily) | 18 |
+| `query_flags_report` | Sends owner report of unresolved data gaps (throttled ~daily) | 19 |
+
+`detect_provider_gaps` runs **before** `generate_events` deliberately — `generate_events`'s provider-aware suspension reads `personal.routine_gap`, which only `detect_provider_gaps` populates. The reverse order would mean `generate_events` always sees the previous cycle's gap data, a full cycle stale.
 
 Run a subset:
 ```
@@ -64,10 +74,16 @@ with a `UNIQUE INDEX WHERE provenance = 'rule'`. Re-runs UPSERT on this key — 
   // Horizon
   "horizon_months": 3,               // overrides per-type default from _EVENT_HORIZONS
 
-  // Stage 1 — Suppress gate
+  // Stage 1 — Suppress-or-suspend gate
   "suppress_on": ["SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY"],
-  "holiday_immune": false,           // true → skip suppress gate entirely (therapy/medical)
+  "holiday_immune": false,           // true → skip the gate entirely (therapy/medical)
   "collision_aware": true,           // legacy — maps to suppress_on: [SCHOOL_HOLIDAY, PUBLIC_HOLIDAY, HOLIDAY, LEAVE]
+  // Of suppress_on, only SCHOOL_HOLIDAY/PUBLIC_HOLIDAY are checked as a blind
+  // "does this context event exist on this date" match (legitimately global —
+  // a school holiday suppresses every school-day routine regardless of
+  // provider). HOLIDAY/LEAVE-type suppression instead routes through
+  // personal.routine_gap — this routine's actual provider (via
+  // personal.event_participant) must be the one who's away, not just anyone.
 
   // Classification overrides (normally derived from event_type)
   "blocks_person": true,
@@ -101,14 +117,26 @@ with a `UNIQUE INDEX WHERE provenance = 'rule'`. Re-runs UPSERT on this key — 
 
 All overridable per rule via `horizon_months`.
 
-### Stage 1 suppress gate
+### Stage 1 suppress-or-suspend gate
 
-Before inserting each date, the generator checks for context events on that date matching the rule's `suppress_on` list. If found:
+Before inserting each date, the generator checks two independent signals:
 
-1. Skip generation for this date
-2. If a generated placeholder already exists for this genkey, **delete it** — suppress events can arrive after the placeholder was generated
+1. **Institutional** (`_has_suppress_event`, restricted to `SCHOOL_HOLIDAY`/`PUBLIC_HOLIDAY`) — any live context event of that type covering the date, regardless of who it's about.
+2. **Provider-specific** (`_find_routine_gap`) — an open `personal.routine_gap` row for *this asset*, meaning the routine's actual assigned provider (resolved via `personal.event_participant`, `role='provider'`) is unavailable on that date. `routine_gap` is populated by `detect_provider_gaps`, which runs earlier in the same cycle.
+
+Either match suspends the occurrence — **it is no longer deleted**:
+
+- `status` → `'suspended'`
+- `suspended_reason` set (`"Suppressed: <institutional event title>"` or `"Provider away: <provider display name>"`)
+- `suspended_by_event_id` links to the overriding event — for the provider-specific path, resolved by joining `routine_gap.availability_id` through `personal.calendar_availability_hint` back to the calendar event that produced it
+
+If neither matches and the row was previously suspended, `_reinstate_if_suspended` clears the suspension (`status` → `'generated'`, reason/link cleared) before the normal upsert runs — automatic, no separate sweep needed. The row survives either way; nothing a suspended occurrence carried is ever lost, which is what lets the digest (weekly-digest spec) report *"no scheduled pickup Wednesday — grandparents still on holidays"* instead of just having nothing to say.
 
 `holiday_immune: true` bypasses the gate entirely. Therapy and medical routines always generate regardless of holidays; Stage 3 will detect any genuine clash and surface it as a conflict for review.
+
+**Why the institutional/provider-specific split exists:** the gate used to be a single blind check — "does *any* context event of a suppress_on type exist on this date, for *anyone*" — which correctly suppressed school-day routines on school holidays, but could just as easily suppress an unrelated routine because a completely different family member's leave happened to overlap the same date. Confirmed live and fixed; see the worked example below.
+
+**Outbound routing.** A suspended occurrence is routed to the **Tentative** calendar (`email-sync/appointment_updater.py`) instead of its natural one — removed from the family's main calendars, visible in one place with the reason in the description, reusing the existing reroute-on-calendar-change logic (already "move, never copy").
 
 ---
 
@@ -208,7 +236,7 @@ detected (resolved_at IS NULL)
 
 | provenance | Status on arrival | Can generator touch it? |
 |---|---|---|
-| `rule` | `generated` | Yes — UPSERT on genkey, delete on suppress |
+| `rule` | `generated` | Yes — UPSERT on genkey; `suspended` (not deleted) on collision, auto-reinstated when the collision clears |
 | `email` | `ingested` | No — read-only |
 | `human` | `confirmed` | No — read-only |
 
@@ -278,13 +306,17 @@ Events are batched 15 per LLM call. All five windows are requested in a single s
 | `personal.event` | All events across all provenances and statuses |
 | `personal.event_class_precedence` | Canonical type→slot_class/blocks_person/rank mapping |
 | `personal.conflict` | Open and resolved conflict pairs |
+| `personal.event_participant` | Routine → person/asset role links (`provider`/`subject`/`location`), keyed to `routine_asset_id` — a routine's provider is resolved here, not from free text |
+| `personal.asset_availability` | `person_id`/`asset_id` unavailable for a date range, `source` = `manual`/`email`/`calendar`/`inferred`. Deduplicated on `(COALESCE(person_id,-1), COALESCE(asset_id,-1), start_date, end_date, source)` — the original bare `ON CONFLICT DO NOTHING` had no constraint to actually conflict against, so re-running the same still-open holiday created a fresh duplicate row every cycle rather than deduplicating. |
+| `personal.calendar_availability_hint` | Bridges a calendar event → the `asset_availability` row it produced. Previously dead (schema existed, nothing wrote to it) — now populated by `_sync_calendar_hints_to_availability`, which is what lets `suspended_by_event_id` resolve back to a real source event. |
+| `personal.routine_gap` | Open/resolved provider-specific gaps per routine, written by `detect_provider_gaps`; read by `generate_events`'s Stage 1 suspend check |
 
 **`personal.event` columns added by this module:**
 
 | Column | Type | Purpose |
 |---|---|---|
 | `provenance` | text | `rule` / `email` / `human` |
-| `status` | text | `generated` / `superseded` / `ingested` / `confirmed` / `cancelled` / `completed` |
+| `status` | text | `generated` / `superseded` / `ingested` / `confirmed` / `cancelled` / `completed` / `suspended` |
 | `slot_key` | text | `{person_id}:{effective_date}:{slot_class}` — Stage 2 match key |
 | `slot_class` | text | Derived from event_type via `_classify()` |
 | `blocks_person` | bool | Whether this event commits the person's time |
@@ -293,6 +325,8 @@ Events are batched 15 per LLM call. All five windows are requested in a single s
 | `gen_asset_id` | bigint | Genkey part 1 |
 | `gen_rule_id` | text | Genkey part 2 — rule `name` |
 | `occurrence_date` | date | Genkey part 3 |
+| `suspended_reason` | text | Human-readable — set only when `status='suspended'` |
+| `suspended_by_event_id` | bigint | FK to the overriding event, when resolvable |
 
 ---
 
@@ -306,14 +340,43 @@ A `SCHOOL_HOLIDAY` event exists on 2026-07-14.
 
 ```
 generate_events for 2026-07-14:
-  SCHOOL_DAY         → suppress_on match → skip; delete placeholder if exists
-  PICKUP (Monday)    → suppress_on match → skip
-  AFTERCARE (Tue)    → suppress_on match → skip
-  CELLO_CLASS (Tue)  → suppress_on match → skip
+  SCHOOL_DAY         → institutional suppress_on match → SUSPENDED (reason: "Suppressed: School Holidays - Term 3")
+  PICKUP (Monday)    → institutional suppress_on match → SUSPENDED
+  AFTERCARE (Tue)    → institutional suppress_on match → SUSPENDED
+  CELLO_CLASS (Tue)  → institutional suppress_on match → SUSPENDED
   THERAPY_SESSION    → holiday_immune: true → GENERATES normally
 ```
 
-The holiday is `blocks_person=false` — it doesn't commit Olivia's time. The therapy session generating on a holiday is not a conflict; her time is free.
+The holiday is `blocks_person=false` — it doesn't commit Olivia's time. The therapy session generating on a holiday is not a conflict; her time is free. Each suspended row survives with its reason and a link to the holiday event — none are deleted.
+
+### Example 1b — Provider-specific leave suspends only the affected routine
+
+Grandparent ("Nanna", person_id 5) is on leave 2026-08-12 to 2026-08-15. Two routines have Nanna as `event_participant.role='provider'`: Wednesday and Thursday pickup.
+
+```
+detect_provider_gaps:
+  finds "Nanna Annual Leave" event (person_id=5, multi-day, away-keyword match)
+  → asset_availability row (person_id=5, unavailable, 2026-08-12..2026-08-15)
+  → calendar_availability_hint row bridges the event back to this availability row
+  → sweeps event_participant (role='provider') × asset_availability
+  → routine_gap rows for BOTH Wednesday and Thursday pickup routines
+    (both have Nanna as provider — correctly caught, not just one)
+
+generate_events for 2026-08-13 (Thursday pickup occurrence):
+  institutional check → no match (not a school/public holiday)
+  routine_gap check → open gap for this asset_id, date within range → MATCH
+  → status = 'suspended'
+  → suspended_reason = "Provider away: Nanna"
+  → suspended_by_event_id = the "Nanna Annual Leave" event's id (via the hint bridge)
+
+generate_events for 2026-08-20 (the following week's Thursday occurrence):
+  routine_gap check → gap_end (08-15) is before this date → no match
+  → generates normally, unaffected
+```
+
+A *different* family member's unrelated leave on the same dates would produce no `routine_gap` for these routines at all (no `event_participant` row linking them), so it never reaches the suspend check — this is what the institutional/provider-specific split fixes over the old blind "any suppress_on event on this date" behaviour.
+
+When Nanna's leave ends and the gap's `gap_end` passes, the next `generate_events` run finds no matching `routine_gap` for 08-13's future occurrences and lets the normal upsert reinstate them (`_reinstate_if_suspended` runs first, clearing `status`/`suspended_reason`/`suspended_by_event_id`).
 
 ### Example 2 — Swimming carnival overrides school day placeholder
 

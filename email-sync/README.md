@@ -87,7 +87,22 @@ When multiple accounts are connected (e.g. yours and your partner's), emails you
 | Bills / invoices | Bills calendar (reminder 3 days before due, day-of) |
 | Child events (matched by `CHILD1_NAMES` / `CHILD2_NAMES`) | Family calendar |
 | Public holidays | Holidays calendar + individual day events in Family calendar |
+| Suspended routine occurrences (see below) | Tentative calendar (falls back to Primary if unconfigured) |
 | Everything else | Primary calendar |
+
+### Suspended events → Tentative calendar
+
+wa-agent's maintenance cycle can mark a generated routine occurrence `status='suspended'` instead of deleting it — e.g. a school holiday suppresses a pickup routine, or a `personal.routine_gap` row suspends just the occurrences tied to a specific away provider (see [wa-agent's maintenance docs](../wa-agent/src/maintenance.md) for how suspension is decided). `appointment_updater.py` checks `status` on every row it processes: a `suspended` event routes to the Tentative calendar regardless of what `classify_event()` would otherwise pick, and `[reason]` (from `suspended_reason`) is prepended to the calendar notes so the reason is visible directly in Google Calendar, not just in the DB.
+
+This reuses the existing "move, never copy" reroute logic in `calendar_router.py` (`target_calendar_id()` compares the event's currently-stored `gcal_calendar_id` against the newly computed target and moves it if they differ) — no special-case code was needed for suspend/reinstate transitions. When wa-agent later reinstates a suspended event (the gap or holiday no longer applies), the next `appointment_updater` pass sees a normal `status` again, `classify_event()` picks its regular target calendar, and the event moves back automatically.
+
+Configure the Tentative calendar per account via `personal.email_account.tentative_calendar_id`:
+```sql
+UPDATE personal.email_account
+SET tentative_calendar_id = '<google_calendar_id>'
+WHERE id = <account_id>;
+```
+If unset, `target_calendar_id()` falls back to the account's default/primary calendar — suspension still works, it just isn't visually separated in Calendar.
 
 ## Adding an account
 

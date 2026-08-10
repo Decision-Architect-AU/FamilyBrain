@@ -76,6 +76,9 @@ export default function Home() {
           <Link href="/feedback" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Feedback
           </Link>
+          <Link href="/query-flags" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Query fallback
+          </Link>
           <Link href="/maintenance" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Maintenance
           </Link>

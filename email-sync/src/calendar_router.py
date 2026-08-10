@@ -148,6 +148,7 @@ class AccountCalendars:
     bills_cal_id:       Optional[str] = None
     holidays_cal_id:    Optional[str] = None
     family_cal_id:      Optional[str] = None
+    tentative_cal_id:   Optional[str] = None
     # Mirror targets: list of (account_id, calendar_slot) to copy events to
     mirror_to:          list[tuple[int, str]] = field(default_factory=list)
 
@@ -179,6 +180,7 @@ def load_routing(accounts: list[dict]) -> dict[int, AccountCalendars]:
             bills_cal_id    = acct.get("bills_calendar_id"),
             holidays_cal_id = acct.get("holidays_calendar_id"),
             family_cal_id   = acct.get("family_calendar_id"),
+            tentative_cal_id = acct.get("tentative_calendar_id"),
         )
 
         # Mirror secondary (e.g. Outlook) events to primary Gmail shared calendars
@@ -196,12 +198,14 @@ def load_routing(accounts: list[dict]) -> dict[int, AccountCalendars]:
 
 def target_calendar_id(ac: AccountCalendars, route: str) -> str:
     """Return the calendar ID to write an event to, falling back to default."""
-    if route == "bills"   and ac.bills_cal_id:
+    if route == "bills"     and ac.bills_cal_id:
         return ac.bills_cal_id
-    if route == "holiday" and ac.holidays_cal_id:
+    if route == "holiday"   and ac.holidays_cal_id:
         return ac.holidays_cal_id
-    if route == "family"  and ac.family_cal_id:
+    if route == "family"    and ac.family_cal_id:
         return ac.family_cal_id
+    if route == "tentative" and ac.tentative_cal_id:
+        return ac.tentative_cal_id
     return ac.default_cal_id
 
 

@@ -584,13 +584,15 @@ Every event carries a `precedence_rank` derived from its `event_type`, and a `pr
 
 **1 — School holiday knocks out school days and pickups (Stage 1: Suppress)**
 
-A school holiday event (`SCHOOL_HOLIDAY`, rank=0, `blocks_person=false`) lands on a date. The maintenance job checks each routine's `suppress_on` list before generating. School day, babysitter pickup, after school care, and cello class all have `suppress_on: ["SCHOOL_HOLIDAY"]` — none of them are generated for that date. If they already existed as generated placeholders, they are deleted.
+A school holiday event (`SCHOOL_HOLIDAY`, rank=0, `blocks_person=false`) lands on a date. The maintenance job checks each routine's `suppress_on` list before generating. School day, babysitter pickup, after school care, and cello class all have `suppress_on: ["SCHOOL_HOLIDAY"]` — none of them are generated for that date. If they already existed as generated placeholders, they are **suspended, not deleted**: `status='suspended'`, `suspended_reason` set to the matched holiday's title, `suspended_by_event_id` linking back to it. The suspended occurrence still exists — `appointment_updater` routes it to the Tentative calendar (see [email-sync's Calendar routing](email-sync/README.md#suspended-events--tentative-calendar)) instead of removing it from view. When the holiday no longer applies to a future occurrence, the next generation pass reinstates it automatically.
+
+A second, independent gate does the same for a single provider being away rather than an institution-wide holiday: `task_detect_provider_gaps` matches `event_participant(role='provider')` rows against a person's own unavailability (an "on leave" event), producing `personal.routine_gap` rows scoped to just the routines that provider actually serves — so one grandparent's leave suspends only the pickups they do, not a sibling's unrelated routine on the same days. See [wa-agent's maintenance docs](wa-agent/src/maintenance.md) for the worked example.
 
 The holiday itself is **context**, not a commitment — Olivia has no committed time. A medical appointment for that date will generate cleanly: `holiday_immune: true` skips the suppress gate.
 
 ```
-SCHOOL_HOLIDAY (context, rank=0)  →  suppresses:  SCHOOL_DAY, PICKUP, AFTERCARE, CELLO_CLASS, ACTIVITY
-                                  →  does NOT suppress:  THERAPY_SESSION (holiday_immune)
+SCHOOL_HOLIDAY (context, rank=0)  →  suspends:  SCHOOL_DAY, PICKUP, AFTERCARE, CELLO_CLASS, ACTIVITY
+                                  →  does NOT suspend:  THERAPY_SESSION (holiday_immune)
                                   →  does NOT block person time (free day for appointments)
 ```
 
@@ -809,6 +811,38 @@ The very first run after this changed still processes every existing concept onc
 Any edge the audit model flags as wrong gets zeroed using the exact same suppression mechanism as the [asset dossier](#asset-dossier--suppression) — `confidence = 0`, `zeroed_by = 'system'`, re-scorable later, not a one-way deletion. No new infrastructure was needed for this: the linker's edges already carried `confidence`, and every graph read already excludes `confidence <= 0` by default.
 
 Both tasks are independently throttled (`LINK_INTERVAL_SECS`, `CONCEPT_AUDIT_INTERVAL_SECS`, default once/day each) since the audit specifically costs several slow LLM calls per run.
+
+### Query fallback & self-healing
+
+Primary retrieval (Cypher entity match + pgvector similarity + reranker, see [Hierarchy-aware retrieval](#hierarchy-aware-retrieval)) doesn't cover everything in the graph — a query can name something real that just isn't reachable by name/embedding match alone. Rather than answer "no data" and stop, wa-agent treats a self-rated-insufficient or empty-context answer as a signal to retry once, differently, before giving up:
+
+```
+/query  →  primary retrieval + generate()
+             │
+             ├─ model marks <INSUFFICIENT_CONTEXT/> or context was empty
+             │        │
+             │        ▼
+             │   flag written to config.query_flags (query, path so far)
+             │        │
+             │        ▼
+             │   interim WhatsApp message sent ("still looking...")
+             │        │
+             │        ▼
+             │   generic_fallback_query() — keyword-driven scan across
+             │   GENERIC_SEARCH_PROPERTIES, not entity/embedding-gated
+             │        │
+             │        ▼
+             │   retry generate() with the broader context
+             │        │
+             │        ▼
+             └─ flag updated with outcome (resolved / still insufficient)
+```
+
+This is deliberately a **fallback of last resort**, not a first pass — the generic scan is unranked and comparatively noisy, so it only runs after the primary pipeline has already had its shot.
+
+**The self-healing loop closes the gap for next time.** A nightly `review_query_flags` task hands accumulated flags to the LLM in batches, looking for a recurring pattern (e.g. a term that keeps needing the fallback because it's missing from a synonym list or keyword group). A detected pattern becomes a row in `config.resolution_fixes` — a proposed, human-reviewable change, never auto-applied. The dashboard's [Query fallback page](dashboard/README.md) lists these for Approve/Reject. Once approved, `_cached_pattern_fixes()` (60s TTL) checks incoming queries against approved patterns *before* the first `generate()` call — a query matching an approved fix gets its context enriched up front, so the fallback path is no longer needed for that pattern going forward. A `query_flags_report` task sends a morning digest of the day's flags and any pending fixes.
+
+See [wa-agent's README](wa-agent/README.md#query-fallback--self-healing) for the endpoint list and prompt contract.
 
 ### next_update_at scheduling
 
@@ -1271,7 +1305,7 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] Event status model — `generated / superseded / ingested / confirmed / scheduled / cancelled / rescheduled / completed`
 - [x] Event classification — `event_class_precedence` table; every event carries `slot_class`, `blocks_person`, `precedence_rank` materialised at write time
 - [x] Slot keys — `{person_id}:{effective_date}:{slot_class}` — the load-bearing identity for Stage 2 override matching
-- [x] Stage 1: Suppress gate — `suppress_on` list per rule; `holiday_immune: true` for medical/therapy; generated placeholders deleted when suppressed
+- [x] Stage 1: Suppress gate — `suppress_on` list per rule; `holiday_immune: true` for medical/therapy; generated placeholders suspended (not deleted) when suppressed, routed to the Tentative calendar
 - [x] Stage 2: Override — email decomposer computes slot_key, finds generated placeholder, supersedes on rank ≥ match; `superseded_by_event_id` FK preserves history
 - [x] Stage 3: Conflict detection — `task_detect_conflicts` sweeps for overlapping `blocks_person=true` events across different slot_classes for the same person; `personal.conflict` table with full lifecycle
 - [x] Conflict auto-resolution — auto-passes stale conflicts when either event ends, is superseded, or no longer overlaps
@@ -1287,6 +1321,12 @@ OpenVINO NPU requires fully static input shapes. Models loaded on NPU are reshap
 - [x] Concept audit — nightly task samples linked concepts, validates ALIAS_OF/SIMILAR_TO edges with the larger reasoning model, zeroes flagged mismatches via the same suppression mechanism as the dossier
 - [x] Reasoning-model integration (VLM export, text-only) — `<answer>` tag extraction for a checkpoint that reasons regardless of any thinking flag; used for concept audit, optional for chat
 - [x] Email attachment OCR — image/PDF attachments (Gmail + Outlook) fetched and OCR'd via the existing ingestor `/ingest/extract` pipeline, merged into body text before triage; previously always submitted as an empty list regardless of what the email actually had
+- [x] WhatsApp self-chat LID resolution — bridge resolves both the phone-number JID and the separate LID-namespace identifier for the self-chat thread; LID-routed messages were previously silently ignored
+- [x] WhatsApp reply-loop prevention — outgoing text registered in a pending-list before send, not after, so the bot's own replies (which re-arrive through the same inbound event) are recognised and dropped instead of re-answered
+- [x] Query fallback & self-healing — insufficient-context/empty-result queries trigger a generic keyword-driven retry, flagged to `config.query_flags`; nightly LLM review proposes `config.resolution_fixes` for recurring gaps, human-approved via the dashboard, applied at query time via a pattern-match gate before the first retrieval call
+- [x] Provider-specific routine suspension — `task_detect_provider_gaps` links a provider's own unavailability to just the routines they serve (`event_participant.role='provider'` × `personal.routine_gap`), independent of institution-wide holiday suppression
+- [x] Suspend-not-delete collision resolution — generated placeholders suppressed by a holiday or provider gap are marked `status='suspended'` with a reason and back-link, never deleted; reinstated automatically once the gap no longer applies
+- [x] Tentative calendar routing — suspended occurrences route to a per-account `tentative_calendar_id` (falls back to primary if unconfigured) via the existing move-never-copy reroute logic, so they stay visible instead of disappearing
 - [ ] Routine synonym auto-discovery — maintenance task that scans documents linked to a routine and proposes new synonyms via LLM, closing the loop that currently requires manual seeding
 - [ ] Retrieval synonym matching — wa-agent Cypher lookups for a routine currently match on name only, not yet on `synonyms`
 - [ ] Email → Asset matcher — match inbound emails to assets via contact_email / provider_domain / AGE traversal

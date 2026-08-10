@@ -38,6 +38,50 @@ const INGEST_PREFIXES = ['note:', 'save:', 'remember:', 'log:', 'ingest:'];
 
 let currentQR = null;
 let isReady   = false;
+let SELF_JID  = null;   // the connected account's own phone-number-based WhatsApp ID — set once on 'ready'
+let SELF_LID  = null;   // the connected account's own LID-based WhatsApp ID — resolved once on 'ready'
+
+// Text of messages this bot itself is about to send (replies + /send pushes).
+// In a self-chat, every outgoing message re-arrives through 'message_create'
+// looking exactly like a fresh incoming message (fromMe=true, same self JID on
+// both sides) — so without this, the bot's own reply gets treated as a new
+// query, its reply to that gets treated as a new query, forever.
+//
+// Two earlier guards were tried and both failed in live testing (confirmed by
+// the flood this was built to fix):
+//   1. msg.hasQuotedMsg — doesn't reliably reflect a self-chat reply's quote.
+//   2. Tracking client.sendMessage()'s returned message ID — the ID on the
+//      'message_create' echo did not match the ID returned by the send call
+//      (temp client-side ID vs. server-assigned ID, or an event-ordering race;
+//      unconfirmed which, but the mismatch was reproducible either way).
+// Tracking by exact text, registered *before* the send call resolves, sidesteps
+// both problems: the pending entry exists before 'message_create' could
+// possibly fire for it, and matching is on content instead of an ID that isn't
+// stable across the send/echo round trip. FIFO array (not a Set) so two
+// legitimate sends with identical text (e.g. two "✅ Saved." in a row) each
+// consume their own entry instead of colliding.
+const _pendingSelfText = [];
+const _PENDING_MAX = 200;
+
+function _markPending(text) {
+  if (!text) return;
+  _pendingSelfText.push(text);
+  if (_pendingSelfText.length > _PENDING_MAX) _pendingSelfText.shift();
+}
+
+function _consumePending(text) {
+  const idx = _pendingSelfText.indexOf(text);
+  if (idx === -1) return false;
+  _pendingSelfText.splice(idx, 1);
+  return true;
+}
+
+// Wraps msg.reply() so every outgoing reply is tracked without repeating the
+// bookkeeping at each of the several call sites below.
+async function replyTracked(msg, text) {
+  _markPending(text);
+  return msg.reply(text);
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -45,6 +89,30 @@ function isIngestIntent(text) {
   const lower = text.toLowerCase();
   if (lower.startsWith('!')) return true;
   return INGEST_PREFIXES.some(p => lower.startsWith(p));
+}
+
+function idCore(jid) {
+  // Strip the @c.us / @lid / @s.whatsapp.net suffix so two representations of
+  // the same account (which can differ by suffix depending on WhatsApp's
+  // addressing scheme for a given chat) still compare equal on the number.
+  return (jid || '').split('@')[0];
+}
+
+function isSelfChat(msg) {
+  if (!SELF_JID) return false;   // not ready yet — never process before we know who "self" is
+  if (msg.to === SELF_JID && msg.from === SELF_JID) return true;
+
+  // "from" is always the phone-number JID for messages we sent ourselves
+  // (fromMe is already checked by the caller), so it's compared against
+  // SELF_JID directly. "to", however, can come back addressed via WhatsApp's
+  // separate LID namespace for self-chat — a different identifier, not just
+  // a different suffix on the same number — so it must be checked against
+  // the resolved SELF_LID, not derived from SELF_JID by string manipulation.
+  const toIsSelf = idCore(msg.to) === idCore(SELF_JID) ||
+    (SELF_LID && idCore(msg.to) === idCore(SELF_LID));
+  const fromIsSelf = idCore(msg.from) === idCore(SELF_JID) ||
+    (SELF_LID && idCore(msg.from) === idCore(SELF_LID));
+  return toIsSelf && fromIsSelf;
 }
 
 function stripIngestPrefix(text) {
@@ -101,9 +169,19 @@ client.on('authenticated', () => {
   currentQR = null;
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
   console.log('[whatsapp] Client ready');
   isReady = true;
+  SELF_JID = client.info?.wid?._serialized || null;
+  console.log(`[whatsapp] Self JID: ${SELF_JID}`);
+
+  try {
+    const [{ lid }] = await client.getContactLidAndPhone([SELF_JID]);
+    SELF_LID = lid || null;
+    console.log(`[whatsapp] Self LID: ${SELF_LID}`);
+  } catch (err) {
+    console.error('[whatsapp] Failed to resolve self LID:', err.message);
+  }
 });
 
 
@@ -117,12 +195,26 @@ client.on('message_create', async (msg) => {
   if (msg.from?.includes('@g.us') || msg.to?.includes('@g.us')) return;
   if (msg.isGroupMsg) return;
 
-  // Only process Saved Messages (user messaging themselves)
-  if (msg.fromMe) {
-    console.log(`[debug] fromMe: from=${msg.from} to=${msg.to} type=${msg.type}`);
-  }
+  // Only process the self-chat ("Message Yourself") thread — from and to
+  // must both resolve to the connected account's own identity. The previous
+  // check (msg.to.endsWith('@lid')) stopped being a reliable self-chat signal
+  // once WhatsApp rolled out LID-based addressing more broadly — regular
+  // contacts can show @lid too now, not just self-chat — which combined with
+  // fromMe (true for ANY message the account sends, to anyone) meant the bot
+  // ended up replying in every conversation, not just the intended self-chat.
   if (!msg.fromMe) return;
-  if (!msg.to?.endsWith('@lid')) return;
+  if (!isSelfChat(msg)) {
+    console.log(`[whatsapp] Ignored non-self-chat message: from=${msg.from} to=${msg.to} self=${SELF_JID}`);
+    return;
+  }
+
+  // Our own outgoing replies/pushes loop back through this same event in a
+  // self-chat — catch and drop them here, after confirming this really is the
+  // self-chat thread (so an unrelated message to/from another contact with
+  // coincidentally matching text is never at risk of being swallowed by this
+  // check). See _pendingSelfText above for why this matches on content
+  // rather than ID.
+  if (_consumePending(msg.body)) return;
   if (msg.hasQuotedMsg) return;
 
   const sender = msg.from.replace('@c.us', '');
@@ -140,7 +232,7 @@ client.on('message_create', async (msg) => {
 
       const media = await msg.downloadMedia();
       if (!media?.data) {
-        await msg.reply('⚠️ Could not download voice note.');
+        await replyTracked(msg, '⚠️ Could not download voice note.');
         return;
       }
 
@@ -150,7 +242,7 @@ client.on('message_create', async (msg) => {
         mimetype: media.mimetype,  // e.g. audio/ogg; codecs=opus
       }, 180000);
 
-      await msg.reply(data.response || '✅ Voice note saved to knowledge base.');
+      await replyTracked(msg, data.response || '✅ Voice note saved to knowledge base.');
       return;
     }
 
@@ -164,7 +256,7 @@ client.on('message_create', async (msg) => {
         body: caption,
       });
 
-      await msg.reply(data.response || '✅ Saved.');
+      await replyTracked(msg, data.response || '✅ Saved.');
       return;
     }
 
@@ -178,7 +270,7 @@ client.on('message_create', async (msg) => {
       // Explicit save intent
       const content = stripIngestPrefix(body);
       if (!content) {
-        await msg.reply('Nothing to save — add some text after the prefix.');
+        await replyTracked(msg, 'Nothing to save — add some text after the prefix.');
         return;
       }
 
@@ -187,7 +279,7 @@ client.on('message_create', async (msg) => {
         body: content,
       });
 
-      await msg.reply(data.response || '✅ Saved.');
+      await replyTracked(msg, data.response || '✅ Saved.');
     } else {
       // Knowledge query
       const data = await callAgent('/query', {
@@ -196,12 +288,12 @@ client.on('message_create', async (msg) => {
         timestamp: Math.floor(Date.now() / 1000),
       });
 
-      if (data.response) await msg.reply(data.response);
+      if (data.response) await replyTracked(msg, data.response);
     }
 
   } catch (err) {
     console.error(`[whatsapp] Error handling message from ${sender}:`, err.message);
-    await msg.reply('⚠️ Something went wrong. Try again shortly.');
+    await replyTracked(msg, '⚠️ Something went wrong. Try again shortly.');
   }
 });
 
@@ -240,6 +332,13 @@ app.post('/send', async (req, res) => {
   if (!isReady)        return res.status(503).json({ error: 'WhatsApp not connected' });
   try {
     const chatId = to.includes('@') ? to : `${to}@c.us`;
+    // Only self-chat sends can loop back through message_create the way
+    // replies do (see _pendingSelfText above) — only mark pending for those,
+    // so a push to some other contact never risks swallowing an unrelated
+    // message elsewhere that happens to share the same text.
+    if (idCore(chatId) === idCore(SELF_JID) || (SELF_LID && idCore(chatId) === idCore(SELF_LID))) {
+      _markPending(message);
+    }
     await client.sendMessage(chatId, message);
     res.json({ ok: true });
   } catch (err) {

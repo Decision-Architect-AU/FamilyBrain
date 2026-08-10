@@ -49,6 +49,10 @@ Every edge in `personal_graph` carries `confidence INT` (0–100, backfilled per
 
 `postgres/init/32_graph_indexes.sql` — btree on vertex `name` + GIN on vertex `properties`, one label at a time, for `personal_graph`/`decision_graph`/`property_graph`. There is **no index that helps an unlabeled or undirected Cypher `MATCH`** — AGE stores each vertex/edge label as its own physical table, so a labeled, directed `MATCH (a:Asset {ref: '...'})-[r]->(n)` only ever scans that one small table, while an unlabeled `MATCH (n {ref: '...'})` or an undirected `-[r]-` scans every label table in the graph. On a graph with hundreds of thousands of edges this is the difference between milliseconds and multi-hour hangs — always label and direct Cypher queries used in a hot path (anything run per-row in a maintenance loop).
 
+## Maintenance task throttling
+
+`config.maintenance_throttle` (`postgres/init/41_maintenance_throttle.sql`) tracks per-task last-run timestamps for wa-agent's maintenance cycle. This replaced a `/tmp`-file-based throttle: the container filesystem resets on every restart, so a task throttled to "once per day" would silently run on every restart instead — during a session with frequent rebuilds this let the `dedup`/`prune` task run unthrottled and hold Postgres backends in lock contention for minutes at a time, blocking live queries. A Postgres-backed throttle survives restarts by construction, since it lives in the same durable store the rest of the state does.
+
 ## Initialisation
 
 `postgres/init/` contains ordered SQL scripts that run on first container start. To re-run a migration manually:

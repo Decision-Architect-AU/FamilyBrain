@@ -30,10 +30,45 @@ import psycopg2.extras
 from datetime import datetime, date, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 
-from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, GRAPHS
+from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, _esc, GRAPHS
 from src.routine_context_pack import assemble_all_packs
 
 DB_URL     = os.environ.get("DATABASE_URL")
+
+
+def _pg_throttle_due(task_name: str, interval_secs: int) -> bool:
+    """
+    Postgres-backed throttle check — survives container restarts, unlike the
+    /tmp flag files the older throttled tasks use (see
+    postgres/init/41_maintenance_throttle.sql for why that distinction
+    matters: /tmp is container-local, so a restart resets it to "never run"
+    and the task fires on the very next 5-minute cron tick instead of
+    respecting its daily interval — confirmed live this session).
+    """
+    conn = psycopg2.connect(DB_URL)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_run_at FROM config.maintenance_throttle WHERE task_name = %s", (task_name,))
+            row = cur.fetchone()
+        if not row:
+            return True
+        return (datetime.now(timezone.utc) - row[0]).total_seconds() >= interval_secs
+    finally:
+        conn.close()
+
+
+def _pg_throttle_mark(task_name: str) -> None:
+    conn = psycopg2.connect(DB_URL)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO config.maintenance_throttle (task_name, last_run_at) VALUES (%s, now()) "
+                "ON CONFLICT (task_name) DO UPDATE SET last_run_at = now()",
+                (task_name,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
 
 # Tables that should have embeddings
@@ -86,6 +121,30 @@ def task_audit_concepts() -> dict:
     cost here in a way it isn't for live queries.
     """
     return audit_concepts()
+
+
+def task_review_query_flags() -> dict:
+    """
+    family-brain-whatsapp-query-fallback-spec.md P0-5. Reviews /query
+    fallback activations (config.query_flags) with the 35B-class reasoning
+    model — same cost profile as task_audit_concepts, same reason it belongs
+    here and not the live chat path. Classifies each into alias_miss /
+    pattern_gap / data_gap and stages fixes for human approval (P0-6); never
+    writes the graph directly.
+    """
+    from src.query_flags_review import review_flags
+    return review_flags()
+
+
+def task_query_flags_report() -> dict:
+    """
+    family-brain-whatsapp-query-fallback-spec.md P0-7. Compiles yesterday's
+    data-gap flags and the pending-approval count into a short WhatsApp
+    message to the owner. Never messages the person who originally asked —
+    owner-only, always.
+    """
+    from src.query_flags_report import send_morning_report
+    return send_morning_report()
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +322,21 @@ def task_dedup(graph: str, conn) -> int:
             # Redirect all edges from duplicate to canonical, then delete duplicate
             canonical = seen[key]
             rel_type = "RELATED_TO"
+            safe_name      = _esc(name)
+            safe_canonical = _esc(canonical)
             _cypher(conn, graph,
-                f"MATCH (dup:Concept {{name: '{name}'}})-[r]->(b) "
-                f"MATCH (can:Concept {{name: '{canonical}'}}) "
+                f"MATCH (dup:Concept {{name: '{safe_name}'}})-[r]->(b) "
+                f"MATCH (can:Concept {{name: '{safe_canonical}'}}) "
                 f"MERGE (can)-[:{rel_type}]->(b) DELETE r",
             )
+            # AGE's Cypher parser rejects a bare pattern as a boolean predicate
+            # (`WHERE NOT (dup)--()`) — confirmed live, syntax error on every
+            # single call regardless of the concept name, so dedup never
+            # actually deleted anything since this task existed. AGE requires
+            # the explicit EXISTS() wrapping other openCypher engines treat
+            # as implicit.
             _cypher(conn, graph,
-                f"MATCH (dup:Concept {{name: '{name}'}}) WHERE NOT (dup)--() DELETE dup",
+                f"MATCH (dup:Concept {{name: '{safe_name}'}}) WHERE NOT EXISTS((dup)--()) DELETE dup",
             )
             dupes += 1
         else:
@@ -534,8 +601,19 @@ def _horizon_date(rule: dict, asset_facts: dict, now: date) -> date:
     return horizon
 
 
-def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool:
-    """Return True if a context event covers target_date and should gate generation of this rule.
+_INSTITUTIONAL_SUPPRESS_TYPES = {"SCHOOL_HOLIDAY", "PUBLIC_HOLIDAY"}
+
+
+def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> dict | None:
+    """
+    Return the covering event (id, title) if one gates generation of this rule
+    on target_date, else None. Restricted by the caller to institutional types
+    (SCHOOL_HOLIDAY/PUBLIC_HOLIDAY) — these are legitimately global (a school
+    holiday suppresses every school-day routine regardless of provider), unlike
+    person-specific types (HOLIDAY/LEAVE) which now route through
+    _find_routine_gap instead (see task_generate_events) since matching those
+    without checking whose holiday it actually is was confirmed live to
+    misattribute unrelated family members' time off to routines they don't affect.
 
     Handles three cases:
     - Individual day events: effective_date = target_date (our manual holiday expansion)
@@ -543,10 +621,10 @@ def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool
     - All-day events with no ends_at: starts_at::date (AEST) = target_date
     """
     if not suppress_on:
-        return False
+        return None
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT 1 FROM personal.event
+            SELECT id, title FROM personal.event
             WHERE status = ANY(%s)
               AND event_type = ANY(%s)
               AND (
@@ -565,16 +643,65 @@ def _has_suppress_event(conn, target_date: date, suppress_on: list[str]) -> bool
               )
             LIMIT 1
         """, (list(_LIVE_STATUSES), suppress_on, target_date, target_date, target_date))
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 
-def _delete_generated_event(conn, asset_id: int, rule_id: str, occurrence_date: date) -> None:
-    """Remove a generated placeholder — called when a suppress event is found for its date."""
+def _find_routine_gap(conn, asset_id: int, target_date: date) -> dict | None:
+    """
+    Provider-specific collision check (family-brain-weekly-digest-spec.md P0-1),
+    replacing a blind "does any holiday-shaped event exist on this date"
+    match — confirmed live that the old check has zero person-awareness, so an
+    unrelated family member's holiday could suppress any routine sharing the
+    date. personal.routine_gap already correctly ties a gap to a specific
+    routine via event_participant + asset_availability (task_detect_provider_gaps);
+    this reads that instead of re-deriving the same fact ad hoc.
+
+    calendar_availability_hint bridges back to the originating calendar event
+    (routine_gap only stores availability_id, not an event id directly) —
+    needed for suspended_by_event_id.
+    """
     with conn.cursor() as cur:
         cur.execute("""
-            DELETE FROM personal.event
+            SELECT rg.provider_display, rg.gap_start, rg.gap_end, cah.event_id AS source_event_id
+            FROM personal.routine_gap rg
+            LEFT JOIN personal.calendar_availability_hint cah ON cah.availability_id = rg.availability_id
+            WHERE rg.routine_asset_id = %s
+              AND rg.resolved_at IS NULL
+              AND rg.gap_start <= %s AND rg.gap_end >= %s
+            ORDER BY rg.detected_at DESC
+            LIMIT 1
+        """, (asset_id, target_date, target_date))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def _suspend_generated_event(conn, asset_id: int, rule_id: str, occurrence_date: date,
+                              reason: str, suspended_by_event_id: int | None) -> None:
+    """Mark an occurrence suspended instead of deleting it — the row (and
+    whatever it would have said) survives, queryable by the digest and
+    routine_context_pack, instead of vanishing without a trace."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE personal.event
+            SET status = 'suspended', suspended_reason = %s, suspended_by_event_id = %s,
+                updated_at = now()
             WHERE gen_asset_id = %s AND gen_rule_id = %s AND occurrence_date = %s
-              AND provenance = 'rule' AND status = 'generated'
+              AND provenance = 'rule'
+        """, (reason, suspended_by_event_id, asset_id, rule_id, occurrence_date))
+
+
+def _reinstate_if_suspended(conn, asset_id: int, rule_id: str, occurrence_date: date) -> None:
+    """Auto-reinstatement: the gap that suspended this occurrence no longer
+    applies (holiday ended, or the sweep no longer finds an overlap) — clear
+    the suspension so the normal _insert_event upsert takes over again."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE personal.event
+            SET status = 'generated', suspended_reason = NULL, suspended_by_event_id = NULL,
+                updated_at = now()
+            WHERE gen_asset_id = %s AND gen_rule_id = %s AND occurrence_date = %s
+              AND provenance = 'rule' AND status = 'suspended'
         """, (asset_id, rule_id, occurrence_date))
 
 
@@ -731,7 +858,7 @@ def task_generate_events() -> dict:
     """
     conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     total_created = 0
-    total_skipped = 0
+    total_suspended = 0
     assets_processed = 0
     now = date.today()
 
@@ -789,16 +916,38 @@ def task_generate_events() -> dict:
 
                 horizon      = _horizon_date(rule, facts, now)
                 suppress_on  = _get_suppress_on(rule)
+                institutional_suppress_on = [s for s in suppress_on if s in _INSTITUTIONAL_SUPPRESS_TYPES]
                 holiday_immune = rule.get("holiday_immune", False)
                 rule_id      = rule.get("name", rule.get("event_type", "TASK"))
 
                 for target_date in _generate_dates(rule, anchor, horizon, now):
-                    # Stage 1 suppress gate
-                    if not holiday_immune and suppress_on and _has_suppress_event(conn, target_date, suppress_on):
-                        _delete_generated_event(conn, asset_id, rule_id, target_date)
-                        total_skipped += 1
+                    suspend_reason = None
+                    suspend_source_id = None
+
+                    if not holiday_immune:
+                        # Institutional gate — global, no provider check needed
+                        # (a school holiday suppresses every school-day routine).
+                        institutional = (_has_suppress_event(conn, target_date, institutional_suppress_on)
+                                          if institutional_suppress_on else None)
+                        if institutional:
+                            suspend_reason = f"Suppressed: {institutional['title']}"
+                            suspend_source_id = institutional["id"]
+                        else:
+                            # Provider-specific gate — only suppress if THIS
+                            # routine's actual provider is the one who's away.
+                            gap = _find_routine_gap(conn, asset_id, target_date)
+                            if gap:
+                                suspend_reason = f"Provider away: {gap['provider_display']}"
+                                suspend_source_id = gap.get("source_event_id")
+
+                    if suspend_reason:
+                        _insert_event(conn, asset_id, person_id, rule, target_date, facts)
+                        _suspend_generated_event(conn, asset_id, rule_id, target_date,
+                                                  suspend_reason, suspend_source_id)
+                        total_suspended += 1
                         continue
 
+                    _reinstate_if_suspended(conn, asset_id, rule_id, target_date)
                     _insert_event(conn, asset_id, person_id, rule, target_date, facts)
                     asset_created += 1
                     total_created += 1
@@ -823,7 +972,7 @@ def task_generate_events() -> dict:
     finally:
         conn.close()
 
-    return {"assets_processed": assets_processed, "events_created": total_created, "collisions_skipped": total_skipped}
+    return {"assets_processed": assets_processed, "events_created": total_created, "collisions_suspended": total_suspended}
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1475,7 @@ def _sync_calendar_hints_to_availability(conn) -> int:
         re.I,
     )
     full_name_to_person = {p["name"].lower(): p["id"] for p in providers}
+    pid_to_name = {p["id"]: p["name"] for p in providers}
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -1371,19 +1521,45 @@ def _sync_calendar_hints_to_availability(conn) -> int:
 
         for pid in matched_ids:
             with conn.cursor() as cur:
-                # Upsert asset_availability
+                # Upsert asset_availability — ON CONFLICT targets the
+                # COALESCE(...,-1) unique index (idx_asset_availability_dedup)
+                # added specifically because the previous bare "ON CONFLICT DO
+                # NOTHING" had no constraint to actually conflict against, so
+                # every run created a fresh duplicate row rather than
+                # deduplicating — confirmed live: running this task twice
+                # against the same still-open holiday produced two rows, not
+                # one. DO UPDATE (not DO NOTHING) so `id` is always returned,
+                # even when the row already existed, since the hint upsert
+                # below needs it.
                 cur.execute("""
                     INSERT INTO personal.asset_availability
                         (person_id, availability_type, start_date, end_date,
                          confidence, source, notes)
                     VALUES (%s, 'unavailable', %s, %s, 70, 'calendar', %s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (COALESCE(person_id, -1), COALESCE(asset_id, -1), start_date, end_date, source)
+                    DO UPDATE SET notes = EXCLUDED.notes
                     RETURNING id
                 """, (pid, ev["start_date"], ev["end_date"],
                       f"calendar event: {ev['title']}"))
                 row = cur.fetchone()
+                availability_id = row["id"] if row else None
                 if row:
                     created += 1
+
+                # Bridge back to the source event — personal.calendar_availability_hint
+                # exists for exactly this (routine_gap joins through it to find
+                # which event caused a gap, e.g. for suspended_by_event_id in
+                # task_generate_events) but was never actually written to by
+                # this function despite the schema being built for it.
+                if availability_id:
+                    display_name = pid_to_name.get(pid, str(pid))
+                    cur.execute("""
+                        INSERT INTO personal.calendar_availability_hint
+                            (event_id, person_id, display_name, hint_start, hint_end, availability_id, processed_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, now())
+                        ON CONFLICT (event_id, COALESCE(person_id, -1)) DO UPDATE
+                            SET availability_id = EXCLUDED.availability_id, processed_at = now()
+                    """, (ev["id"], pid, display_name, ev["start_date"], ev["end_date"], availability_id))
 
     return created
 
@@ -1770,11 +1946,17 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         "rederive_facts",
         "re_embed", "link", "audit_concepts", "dedup", "prune",
         "check_data_expectations", "review_data_expectations",
-        "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested",
+        # detect_provider_gaps before generate_events (not its original position)
+        # — family-brain-weekly-digest-spec.md P0-1's provider-aware suspension
+        # in generate_events reads personal.routine_gap, which only
+        # detect_provider_gaps populates. Running generate_events first would
+        # mean it always sees last cycle's gap data, a full cycle stale.
+        "detect_provider_gaps", "generate_events", "detect_conflicts", "reconcile_ingested",
         "refresh_asset_notes", "asset_graph_sync",
         "monitor", "tune_weights", "appointment_digest",
         "routine_context_pack", "notify_provider_conflicts",
         "asset_summary",
+        "review_query_flags", "query_flags_report",
     ]
     results   = {}
     t0        = time.time()
@@ -1841,22 +2023,40 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
             print(f"[maintenance] review_data_expectations skipped (throttled, next in {int(_REVIEW_INTERVAL - (_time.time() - _last))}s)")
 
     if "dedup" in all_tasks or "prune" in all_tasks:
-        conn = _conn()
-        try:
-            dedup_total = prune_total = 0
-            for graph in GRAPHS:
+        # Throttled — confirmed live this was never gated, so a new run
+        # started every 5-minute cron tick regardless of whether the last one
+        # had finished. Each task_dedup() call holds one uncommitted
+        # transaction for its *entire* loop over every Concept, not per-node,
+        # so overlapping runs pile up waiting on locks for the same
+        # frequently-duplicated names ('interest', 'principal', ...) — 13
+        # backends were found stuck 2-20 minutes deep in exactly this queue,
+        # actively blocking live /query traffic, and had to be
+        # pg_terminate_backend'd to restore service. Throttling to ~daily
+        # (same Postgres-backed pattern as review_query_flags) means only one
+        # instance ever runs at a time, which is what actually prevents the
+        # pileup — the earlier EXISTS() syntax fix alone doesn't touch this.
+        _DEDUP_INTERVAL = int(os.environ.get("DEDUP_INTERVAL_SECS", "86400"))
+        if _pg_throttle_due("dedup_prune", _DEDUP_INTERVAL):
+            conn = _conn()
+            try:
+                dedup_total = prune_total = 0
+                for graph in GRAPHS:
+                    if "dedup" in all_tasks:
+                        dedup_total += task_dedup(graph, conn)
+                    if "prune" in all_tasks:
+                        prune_total += task_prune(graph, conn)
                 if "dedup" in all_tasks:
-                    dedup_total += task_dedup(graph, conn)
+                    results["dedup"] = {"merged": dedup_total}
+                    print(f"[maintenance] dedup done: {dedup_total} merged")
                 if "prune" in all_tasks:
-                    prune_total += task_prune(graph, conn)
-            if "dedup" in all_tasks:
-                results["dedup"] = {"merged": dedup_total}
-                print(f"[maintenance] dedup done: {dedup_total} merged")
-            if "prune" in all_tasks:
-                results["prune"] = {"removed": prune_total}
-                print(f"[maintenance] prune done: {prune_total} removed")
-        finally:
-            conn.close()
+                    results["prune"] = {"removed": prune_total}
+                    print(f"[maintenance] prune done: {prune_total} removed")
+            finally:
+                conn.close()
+            _pg_throttle_mark("dedup_prune")
+        else:
+            results["dedup"] = results["prune"] = {"skipped": "throttled"}
+            print("[maintenance] dedup/prune skipped (throttled)")
 
     if "generate_events" in all_tasks:
         results["generate_events"] = task_generate_events()
@@ -1914,6 +2114,33 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     if "asset_summary" in all_tasks:
         results["asset_summary"] = task_asset_summary()
         print(f"[maintenance] asset_summary done: {results['asset_summary']}")
+
+    if "review_query_flags" in all_tasks:
+        # 35B-class reasoning model, same cost profile as audit_concepts —
+        # throttled independently, default once per day. Postgres-backed
+        # (see _pg_throttle_due), not a /tmp flag file.
+        _RQF_INTERVAL = int(os.environ.get("QUERY_FLAGS_REVIEW_INTERVAL_SECS", "86400"))
+        if _pg_throttle_due("review_query_flags", _RQF_INTERVAL):
+            results["review_query_flags"] = task_review_query_flags()
+            _pg_throttle_mark("review_query_flags")
+            print(f"[maintenance] review_query_flags done: {results['review_query_flags']}")
+        else:
+            results["review_query_flags"] = {"skipped": "throttled"}
+            print("[maintenance] review_query_flags skipped (throttled)")
+
+    if "query_flags_report" in all_tasks:
+        # Runs right after the review pass so the report reflects today's
+        # results, not yesterday's — same throttle window, deliberately not
+        # the same throttle key (a manual re-run of just the review shouldn't
+        # also imply a report was sent).
+        _QFR_INTERVAL = int(os.environ.get("QUERY_FLAGS_REPORT_INTERVAL_SECS", "86400"))
+        if _pg_throttle_due("query_flags_report", _QFR_INTERVAL):
+            results["query_flags_report"] = task_query_flags_report()
+            _pg_throttle_mark("query_flags_report")
+            print(f"[maintenance] query_flags_report done: {results['query_flags_report']}")
+        else:
+            results["query_flags_report"] = {"skipped": "throttled"}
+            print("[maintenance] query_flags_report skipped (throttled)")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")

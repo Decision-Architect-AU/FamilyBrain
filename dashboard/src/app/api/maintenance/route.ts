@@ -17,6 +17,16 @@ const TASK_META: Record<string, { label: string; description: string; frequency:
     description: 'Derive named fact_* properties (current practitioner, last invoice, next appointment) with provenance, plus a one-line fact_summary drawn only from those facts.',
     frequency: 'Every 5 min',
   },
+  review_query_flags: {
+    label: 'Review query flags',
+    description: 'Nightly self-healing pass over /query fallback activations — classifies each as an alias miss, pattern gap, or genuine data gap using the 35B reasoning model, staging alias/pattern fixes for approval.',
+    frequency: 'Throttled to ~daily',
+  },
+  query_flags_report: {
+    label: 'Query flags report',
+    description: 'Sends a WhatsApp summary of unresolved data gaps and pending fix approvals to the owner. Never messages whoever originally asked the question.',
+    frequency: 'Throttled to ~daily',
+  },
   re_embed: {
     label: 'Re-embed',
     description: 'Find notes and themes missing vector embeddings and embed them via Ollama.',

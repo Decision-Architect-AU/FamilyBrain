@@ -845,7 +845,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 SELECT id, title, event_type, starts_at, ends_at, effective_date,
                        calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
-                       updated_at
+                       updated_at, status, suspended_reason
                 FROM personal.event
                 WHERE (
                     gcal_event_id IS NULL
@@ -924,7 +924,21 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 partner_acct is not None
                 and ev_source.startswith(f"gmail:{partner_acct['email_address']}")
             )
-            route    = classify_event(title, notes, source_is_partner=source_is_partner)
+            if ev.get("status") == "suspended":
+                # family-brain-weekly-digest-spec.md P0-1/P0-1b — a suspended
+                # occurrence goes to Tentative regardless of what it would
+                # otherwise classify as, reason folded into the description so
+                # it's visible from the calendar entry itself. The existing
+                # reroute-on-change branch below (stored_cal != cal_id) already
+                # implements "move, never copy" — no new logic needed for a
+                # suspended event that was already on its natural calendar
+                # before this cycle, or one that's later reinstated.
+                route = "tentative"
+                reason = ev.get("suspended_reason")
+                if reason and reason not in notes:
+                    notes = f"[{reason}]\n{notes}" if notes else f"[{reason}]"
+            else:
+                route = classify_event(title, notes, source_is_partner=source_is_partner)
             cal_id   = target_calendar_id(ac, route)
             tag, color_id = tag_family_event(title, notes) if route == "family" else (None, None)
 

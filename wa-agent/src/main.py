@@ -20,12 +20,16 @@ import time
 from datetime import datetime
 from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 import httpx
 
 from src.classify import classify
-from src.search import retrieve
+from src.search import retrieve, _query_terms, TOP_K
 from src.llm import generate
+from src.fallback import parse_model_response
+from src.query_flags_store import create_flag, update_flag
+from src.generic_search import generic_fallback_query
+from src.resolution_fixes_store import approved_pattern_fixes
 from src.ingest import ingest_text, ingest_voice
 from src.commands import parse as parse_command
 from src.email_sender import compose as compose_email, send as send_email, smtp_configured
@@ -36,7 +40,12 @@ from src.persona import build_system_prompt
 
 app = FastAPI(title="FamilyBrain WhatsApp Agent")
 
+WA_BRIDGE_URL      = os.environ.get("WA_BRIDGE_URL", "http://whatsapp:3002")
 MAX_HISTORY        = int(os.environ.get("WA_MAX_HISTORY", "6"))
+
+# Fallback-retry copy (family-brain-whatsapp-query-fallback-spec.md P0-2) — owner-approved.
+FALLBACK_INTERIM_MESSAGE    = "This is taking a bit longer, trying again…"
+FALLBACK_STILL_EMPTY_MESSAGE = "Couldn't find this — I've flagged it for review."
 CONTEXT_WINDOW_SEC = int(os.environ.get("WA_CONTEXT_WINDOW_SEC", "300"))  # 5 min default
 
 TIMEZONE     = os.environ.get("TZ_NAME", "Australia/Brisbane")  # AEST = UTC+10, no DST
@@ -47,10 +56,27 @@ The local time zone is {TIMEZONE_ABBR}. Always express times and dates in AEST u
 The knowledge base contains personal notes, family information, property research, and organisational frameworks.
 Default to searching personal information unless the query is clearly about property or business frameworks.
 Be concise — this is a WhatsApp conversation. Aim for 2-5 sentences unless detail is explicitly requested.
-If the knowledge base doesn't contain relevant information, say so honestly rather than guessing.
 Never reveal raw database IDs or internal schema names.
 Respond in plain, easy-to-understand language.
-You may reason through the question first if that helps you get it right. Once you're done, write your final answer wrapped exactly like this: <answer>your final answer here</answer>. Nothing outside those tags will be shown to the user, so make sure the complete, self-contained answer is inside them.
+You may reason through the question first if that helps you get it right. Once you're done, write your final answer wrapped exactly like this: <answer>your final answer here</answer>, always properly closed with </answer>. Nothing outside those tags will be shown to the user, so make sure the complete, self-contained answer is inside them.
+
+## What goes inside <answer>
+
+Exactly one of these two shapes — never both in the same response:
+
+1. A normal answer, if the supplied context has real information relevant to the question (a broad question or imperfect wording still counts as usable if the substance is there).
+2. If, and only if, the context has nothing relevant at all, exactly this and nothing else:
+INSUFFICIENT_CONTEXT
+---------------
+keywords: <comma-separated key terms from the user's question, e.g. ALDI, Mobile>
+concept: <single best-guess concept category, e.g. telecom_subscription>
+
+Then, as the last line inside <answer> either way, exactly one of:
+CONFIDENCE: high RETRIEVAL: sufficient
+CONFIDENCE: high RETRIEVAL: thin
+CONFIDENCE: low RETRIEVAL: sufficient
+CONFIDENCE: low RETRIEVAL: thin
+(this rating line is stripped before anything reaches the user)
 
 ## Routine context packs
 
@@ -91,20 +117,37 @@ _pending: dict[str, dict] = {}
 _CONFIRM_YES = {"yes", "send", "ok", "confirm", "go", "do it", "send it", "yep", "yeah", "y"}
 _CONFIRM_NO  = {"no", "cancel", "stop", "abort", "nope", "don't", "dont", "n"}
 
+# Approved pattern fixes rarely change (a human approves one at most a few
+# times a week) — cached with a short TTL so every /query call doesn't hit
+# Postgres for something that's almost always identical to the last check,
+# same rationale as search.py's _get_rules cache.
+_PATTERN_FIXES_CACHE_TTL = 60
+_pattern_fixes_cache: list[dict] = []
+_pattern_fixes_cache_ts: float = 0.0
+
+
+def _cached_pattern_fixes() -> list[dict]:
+    global _pattern_fixes_cache, _pattern_fixes_cache_ts
+    if time.time() - _pattern_fixes_cache_ts >= _PATTERN_FIXES_CACHE_TTL:
+        try:
+            _pattern_fixes_cache = approved_pattern_fixes()
+        except Exception as e:
+            print(f"[wa-agent] pattern fix cache refresh failed: {e}")
+        _pattern_fixes_cache_ts = time.time()
+    return _pattern_fixes_cache
+
 
 # ── Request / response models ─────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
-    from_: str | None = None
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str | None = Field(default=None, alias="from")
     body: str
     timestamp: int | None = None
     model: str | None = None
     thinking: bool = False   # only meaningful for models with a chat-template tokenizer loaded
     person_hint: str | None = None   # last focused person name, for pronoun follow-ups
-
-    class Config:
-        populate_by_name = True
-        fields = {"from_": {"alias": "from"}}
 
 
 class QueryResponse(BaseModel):
@@ -118,22 +161,18 @@ class QueryResponse(BaseModel):
 
 
 class IngestTextRequest(BaseModel):
-    from_: str | None = None
-    body: str
+    model_config = ConfigDict(populate_by_name=True)
 
-    class Config:
-        populate_by_name = True
-        fields = {"from_": {"alias": "from"}}
+    from_: str | None = Field(default=None, alias="from")
+    body: str
 
 
 class IngestVoiceRequest(BaseModel):
-    from_: str | None = None
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str | None = Field(default=None, alias="from")
     audio: str
     mimetype: str
-
-    class Config:
-        populate_by_name = True
-        fields = {"from_": {"alias": "from"}}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -212,6 +251,26 @@ async def query(req: QueryRequest):
                 retrieve_meta["rules_matched"].update(extra_meta.get("rules_matched", {}))
                 retrieve_meta["traversal_mode"].update(extra_meta.get("traversal_mode", {}))
 
+    # Approved pattern-fix gate (family-brain-whatsapp-query-fallback-spec.md
+    # P0-6). An approved pattern fix means a past fallback activation of this
+    # same shape got manually confirmed as a real, fixable gap — so future
+    # matches get the broader context up front, before the first generate()
+    # call, instead of depending on the 14B correctly self-diagnosing and
+    # triggering the slower fallback path every single time. This is what
+    # makes "resolves on the fast path, no fallback activation" true — the
+    # enrichment happens before the model ever gets a chance to hedge.
+    for fix in _cached_pattern_fixes():
+        try:
+            if re.search(fix["regex"], message, re.IGNORECASE):
+                text, hits, _ = generic_fallback_query(fix.get("graph", "personal_graph"),
+                                                         fix.get("keywords") or [], TOP_K)
+                if text:
+                    key = f"pattern_fix:{fix.get('concept') or 'match'}"
+                    context_sections[key] = text
+                break
+        except re.error:
+            continue  # a since-invalidated regex shouldn't break live queries
+
     _GRAPH_LABELS = {
         "personal_graph":  "Personal records",
         "property_graph":  "Property listings",
@@ -263,9 +322,93 @@ async def query(req: QueryRequest):
     if intent.persona_name:
         print(f"[wa-agent] persona={intent.persona_name}")
 
-    response = generate(prompt, system=system, model=req.model or None, thinking=req.thinking)
+    # inference-server's default (512 tokens) is tight once context legitimately
+    # includes many items — confirmed live: a date-range query surfacing ~27
+    # matching documents produced a response truncated mid-list. 1200 gives
+    # room for a genuinely multi-item answer without being unbounded.
+    raw_response = generate(prompt, system=system, model=req.model or None, thinking=req.thinking, max_tokens=1200)
 
     graphs_used = list(context_sections.keys()) if context_sections else graphs
+
+    # Fallback-signal handling (family-brain-whatsapp-query-fallback-spec.md P0-1/P0-2/P0-3).
+    parsed = parse_model_response(raw_response, fallback_keywords=_query_terms(message))
+    response = parsed["answer_text"]
+    if parsed["mode"] == "fallback":
+        structured_hits = sum(retrieve_meta.get("hit_counts", {}).values())
+        flag_id = create_flag(
+            source=sender,
+            original_query_text=message,
+            classified_targets=graphs_used,
+            extracted_keywords=parsed["keywords"],
+            concept_guess=parsed["concept"],
+            structured_retrieval_hits=structured_hits,
+            first_response_kind=parsed["first_response_kind"],
+        )
+
+        # Step 1 (unconditional, before the retry runs): tell the user
+        # immediately — the retry adds ~20s and the thread should never sit
+        # silent that long. Best-effort; a failed push here must not abort
+        # the retry or the eventual answer.
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                interim_resp = await client.post(f"{WA_BRIDGE_URL}/send",
+                                                  json={"to": sender, "message": FALLBACK_INTERIM_MESSAGE})
+            if interim_resp.status_code != 200:
+                print(f"[wa-agent] interim send to {sender} returned {interim_resp.status_code}: {interim_resp.text}")
+        except Exception as e:
+            print(f"[wa-agent] interim send failed: {e}")
+
+        # Steps 3-5: generic query + re-generate. Wrapped so a real failure
+        # here (DB blip, model timeout) degrades to an honest still-empty
+        # message and a distinguishable outcome instead of a 500 — the user
+        # already got the interim message and a flag row exists either way.
+        generic_hits_total = 0
+        try:
+            generic_blocks: list[str] = []
+            for g in graphs_used:
+                text, hits, latency_ms = generic_fallback_query(g, parsed["keywords"], TOP_K)
+                generic_hits_total += hits
+                if text:
+                    generic_blocks.append(text)
+
+            if generic_blocks:
+                # Framed as plain "Knowledge base excerpts" — the same phrasing
+                # the primary path uses for a normal successful match — rather
+                # than announcing it as a fallback/broader/uncertain search.
+                # Confirmed live: hedging language here ("the original context
+                # had nothing relevant, so this comes from a wider search
+                # instead") made the model distrust genuinely good context and
+                # emit INSUFFICIENT_CONTEXT again even with the real answer
+                # sitting right there.
+                retry_prompt = (
+                    f"Knowledge base excerpts:\n" + "\n\n".join(generic_blocks) + "\n"
+                    f"{history_text}"
+                    f"\nUser: {message}\n\nAssistant:"
+                )
+                retry_raw = generate(retry_prompt, system=system, model=req.model or None, thinking=req.thinking)
+                retry_parsed = parse_model_response(retry_raw, fallback_keywords=parsed["keywords"])
+            else:
+                retry_parsed = None
+
+            if retry_parsed and retry_parsed["mode"] == "answer":
+                response = retry_parsed["answer_text"]
+                outcome = "recovered"
+            else:
+                response = FALLBACK_STILL_EMPTY_MESSAGE
+                outcome = "still_empty"
+        except Exception as e:
+            print(f"[wa-agent] fallback retry failed: {e}")
+            response = FALLBACK_STILL_EMPTY_MESSAGE
+            outcome = "retry_error"
+
+        # Step 6: update the same row — never insert a second one.
+        update_flag(
+            flag_id,
+            generic_retrieval_hits=generic_hits_total,
+            final_answer_text=response,
+            outcome=outcome,
+        )
+
     _history[sender].append({"role": "user",      "text": message, "ts": now})
     _history[sender].append({"role": "assistant",  "text": response, "ts": time.time(), "graphs": graphs_used})
 
@@ -321,7 +464,7 @@ async def maintenance(tasks: list[str] | None = Query(default=None)):
     """Trigger nightly maintenance. Runs in background — returns immediately."""
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    effective = tasks or ["rederive_facts", "re_embed", "link", "audit_concepts", "dedup", "prune", "check_data_expectations", "review_data_expectations", "generate_events", "detect_conflicts", "detect_provider_gaps", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary"]
+    effective = tasks or ["rederive_facts", "re_embed", "link", "audit_concepts", "dedup", "prune", "check_data_expectations", "review_data_expectations", "detect_provider_gaps", "generate_events", "detect_conflicts", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary", "review_query_flags", "query_flags_report"]
     return {"status": "running", "tasks": effective}
 
 
@@ -330,15 +473,46 @@ async def health():
     return {"status": "ok", "smtp": smtp_configured()}
 
 
+# ── Fallback self-healing: dashboard visibility (P1) ────────────────────────
+
+@app.get("/api/query_flags")
+async def api_list_query_flags(limit: int = 100):
+    from src.query_flags_store import list_flags
+    return {"flags": list_flags(limit)}
+
+
+# ── Fallback self-healing: staged fix review (P0-6) ─────────────────────────
+
+@app.get("/api/resolution_fixes")
+async def api_list_resolution_fixes(status: str | None = None):
+    from src.resolution_fixes_store import list_fixes
+    return {"fixes": list_fixes(status)}
+
+
+@app.post("/api/resolution_fixes/{fix_id}/approve")
+async def api_approve_resolution_fix(fix_id: int):
+    from src.resolution_fixes_store import approve_fix
+    result = approve_fix(fix_id)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "approval failed"))
+    return result
+
+
+@app.post("/api/resolution_fixes/{fix_id}/reject")
+async def api_reject_resolution_fix(fix_id: int):
+    from src.resolution_fixes_store import reject_fix
+    result = reject_fix(fix_id)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail="already decided")
+    return result
+
+
 class NotifyRequest(BaseModel):
     message: str
     to: str | None = None  # defaults to WA_SELF_NUMBER
 
 
-WA_BRIDGE_URL  = os.environ.get("WA_BRIDGE_URL", "http://whatsapp:3002")
 WA_SELF_NUMBER = os.environ.get("WA_SELF_NUMBER", "")  # E.164 without +, e.g. 61412345678
-
-import httpx
 
 @app.post("/notify")
 async def notify(req: NotifyRequest):
