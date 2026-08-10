@@ -1,1 +1,0 @@
-{"kind":"FETCH","data":{"headers":{"access-control-allow-origin":"*","connection":"keep-alive","content-type":"application/json","date":"Fri, 19 Jun 2026 13:03:29 GMT","keep-alive":"timeout=5","transfer-encoding":"chunked"},"body":"eyJzdGF0dXMiOiJvayIsImRiIjoiY29ubmVjdGVkIn0=","status":200,"url":"http://audit-logger:4000/health"},"revalidate":31536000,"tags":[]}
