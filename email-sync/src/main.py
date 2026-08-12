@@ -24,11 +24,19 @@ from . import financial_processor as fin_mod
 from . import bill_calendar as billcal_mod
 from . import email_decomposer as decompose_mod
 from . import appointment_updater as appt_mod
+from . import item_review as review_mod
 
 INGESTOR_URL            = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
 EMAIL_POLL_INTERVAL     = int(os.environ.get("EMAIL_POLL_INTERVAL_SECS", "300"))    # 5 min
 CALENDAR_POLL_INTERVAL  = int(os.environ.get("CALENDAR_POLL_INTERVAL_SECS", "900")) # 15 min
 FINANCIAL_POLL_INTERVAL = int(os.environ.get("FINANCIAL_POLL_INTERVAL_SECS", "300")) # 5 min
+REVIEW_POLL_INTERVAL    = int(os.environ.get("REVIEW_POLL_INTERVAL_SECS", "90"))    # item_flag queue poll
+# Note: a single run_review() can involve multiple live LLM extraction calls
+# (one per candidate source email tried) — confirmed live TWICE: a 15s interval
+# (60s watchdog threshold) force-restarted mid-review, and even 60s (240s
+# threshold) still got force-restarted just 3 seconds over, mid-progress, on a
+# multi-candidate flag. 90s (360s/6min threshold) gives real headroom instead
+# of a razor-thin margin.
 
 
 # ── Watchdog ──────────────────────────────────────────────────────────────────
@@ -59,6 +67,7 @@ _LOOP_INTERVALS = {
     "email":     EMAIL_POLL_INTERVAL,
     "calendar":  CALENDAR_POLL_INTERVAL,
     "financial": FINANCIAL_POLL_INTERVAL,
+    "review":    REVIEW_POLL_INTERVAL,
 }
 _WATCHDOG_MISSED_CYCLES = 4   # allow this many missed cycles before treating a loop as hung
 _WATCHDOG_CHECK_SECS    = 60
@@ -205,8 +214,36 @@ def financial_loop() -> None:
         time.sleep(FINANCIAL_POLL_INTERVAL)
 
 
+def run_item_review() -> None:
+    # One flag per tick, not a batch — run_review can involve live LLM calls
+    # (candidate extraction) that legitimately take well over one poll interval;
+    # touching the heartbeat between flags (not just once per full loop
+    # iteration) keeps a slow single review from starving the watchdog.
+    accounts = get_enabled_accounts()
+    flags = review_mod.claim_pending_flags(limit=1)
+    for flag in flags:
+        try:
+            review_mod.run_review(flag, accounts)
+        except Exception as e:
+            print(f"[item-review] flag {flag['id']} failed: {e}")
+        _touch_heartbeat("review")
+
+
+def review_loop() -> None:
+    # personal.item_flag is the queue itself — dashboard/wa-agent just INSERT
+    # into it, no new service-to-service coupling needed for the trigger path.
+    while True:
+        try:
+            run_item_review()
+        except Exception as e:
+            print(f"[item-review] loop error: {e}")
+        _touch_heartbeat("review")
+        time.sleep(REVIEW_POLL_INTERVAL)
+
+
 if __name__ == "__main__":
-    print(f"[email-sync] Starting — email every {EMAIL_POLL_INTERVAL}s, calendar every {CALENDAR_POLL_INTERVAL}s, financial every {FINANCIAL_POLL_INTERVAL}s")
+    print(f"[email-sync] Starting — email every {EMAIL_POLL_INTERVAL}s, calendar every {CALENDAR_POLL_INTERVAL}s, "
+          f"financial every {FINANCIAL_POLL_INTERVAL}s, item-review every {REVIEW_POLL_INTERVAL}s")
     print(f"[email-sync] Ingestor: {INGESTOR_URL}")
 
     # Watchdog starts FIRST, before any blocking call — including the initial
@@ -231,12 +268,14 @@ if __name__ == "__main__":
         print(f"[email-sync] Initial calendar sync error: {e}")
 
     # Start background loops
-    t_email = threading.Thread(target=email_loop,     daemon=True, name="email-loop")
-    t_cal   = threading.Thread(target=calendar_loop,  daemon=True, name="calendar-loop")
-    t_fin   = threading.Thread(target=financial_loop, daemon=True, name="financial-loop")
+    t_email  = threading.Thread(target=email_loop,     daemon=True, name="email-loop")
+    t_cal    = threading.Thread(target=calendar_loop,  daemon=True, name="calendar-loop")
+    t_fin    = threading.Thread(target=financial_loop, daemon=True, name="financial-loop")
+    t_review = threading.Thread(target=review_loop,    daemon=True, name="review-loop")
     t_email.start()
     t_cal.start()
     t_fin.start()
+    t_review.start()
 
     # Keep main thread alive
     try:

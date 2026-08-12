@@ -635,7 +635,8 @@ def _entity_focused_search(conn, entity: dict) -> list[dict]:
 
 
 _APPOINTMENT_KW = re.compile(
-    r'\b(appointment|appointments|session|sessions|schedule|scheduled|booking|bookings|meeting|meetings|'
+    r'\b(appointment|appointments|session|sessions|schedule|scheduled|book|books|booking|bookings|booked|'
+    r'ticket|tickets|meeting|meetings|'
     r'medical|speech|therapy|physio|ot\b|psycholog|dentist|gp|doctor|specialist|'
     r'referral|clinic|hospital|class|lesson|training|event|events|carnival|excursion|assembly)\b',
     re.I,

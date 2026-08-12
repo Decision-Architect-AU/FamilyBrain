@@ -89,6 +89,20 @@ def _calendar_service(account: dict):
     return _cached_service(account, "calendar", "v3")
 
 
+def search_messages(account: dict, query: str, max_results: int = 20) -> list[dict]:
+    """
+    Raw Gmail search, deliberately bypassing sync_email's normal category
+    exclusions (-category:promotions etc.) — used by item_review to find mail
+    that the routine sync silently dropped (e.g. a real booking confirmation
+    Gmail auto-filed under Updates). Returns full message resources (format=full),
+    not just ids, since callers need headers/body immediately.
+    """
+    svc = _gmail_service(account)
+    resp = svc.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
+    ids = [m["id"] for m in resp.get("messages", [])]
+    return [svc.users().messages().get(userId="me", id=mid, format="full").execute() for mid in ids]
+
+
 # ── Email ──────────────────────────────────────────────────────────────────────
 
 def _extract_body(payload: dict) -> str:

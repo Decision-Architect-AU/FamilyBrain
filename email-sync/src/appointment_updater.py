@@ -246,6 +246,32 @@ def _cal_service(gmail_account: dict):
     return _calendar_service(gmail_account)
 
 
+def _resolve_native_gmail_event(ev: dict, gmail_acct: dict, partner_acct: dict | None,
+                                 cal_svc, partner_cal_svc, ac, partner_routing):
+    """
+    For an event whose calendar_source is 'gmail:{account}:...', recover the
+    real Google-assigned event id (embedded verbatim in calendar_event_id,
+    which gmail.py's sync_calendar sets to f"gmail:{account_email}:{provider_id}"
+    where provider_id IS the real GCal event id — see sync_calendar's cal_key)
+    plus which account's calendar service/default calendar owns it.
+
+    Returns (real_gcal_id, calendar_service, calendar_id) or (None, None, None)
+    if it can't be resolved (unexpected format, or the owning account isn't
+    one of the connected accounts this run has credentials for).
+    """
+    calendar_event_id = ev.get("calendar_event_id") or ""
+    parts = calendar_event_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != "gmail":
+        return None, None, None
+    account_email, real_gcal_id = parts[1], parts[2]
+
+    if partner_acct and account_email == partner_acct["email_address"] and partner_cal_svc and partner_routing:
+        return real_gcal_id, partner_cal_svc, partner_routing.default_cal_id
+    if account_email == gmail_acct["email_address"]:
+        return real_gcal_id, cal_svc, ac.default_cal_id
+    return None, None, None
+
+
 def _patch_outlook_source(ev_id: int, title: str, notes: str, outlook_accounts: list[dict]) -> bool:
     """
     Patch the original Outlook calendar event with the enriched title + description.
@@ -845,7 +871,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 SELECT id, title, event_type, starts_at, ends_at, effective_date,
                        calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
-                       updated_at, status, suspended_reason
+                       updated_at, status, suspended_reason, source_email_id, calendar_event_id
                 FROM personal.event
                 WHERE (
                     gcal_event_id IS NULL
@@ -853,7 +879,16 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
                 AND status NOT IN ('cancelled', 'superseded', 'ingested')
-                AND calendar_source NOT LIKE 'gmail:%%'    -- skip events already in GCal source
+                -- Ordinarily gmail-sourced events came from Google's own "Events from
+                -- Gmail" auto-detection and are skipped entirely (Google already put
+                -- them on the calendar, writing again would duplicate). The exception:
+                -- source_email_id set means our own recovery pipeline (item_review)
+                -- has since enriched this placeholder with real data that Google's
+                -- bare version never had — those become eligible so the enrichment
+                -- actually reaches the calendar. See the native-gmail-patch branch
+                -- below, which patches Google's existing entry in place rather than
+                -- inserting a new one.
+                AND (calendar_source NOT LIKE 'gmail:%%' OR source_email_id IS NOT NULL)
                 AND starts_at >= now() - INTERVAL '1 hour'  -- skip past events
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
@@ -872,7 +907,12 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 WHERE gcal_event_id IS NOT NULL
                   AND (
                     status IN ('cancelled', 'superseded')
-                    OR calendar_source LIKE 'gmail:%'
+                    -- gmail-sourced + gcal_event_id normally only happens from the old
+                    -- bug this sweep was built to catch. source_email_id set means it's
+                    -- the new, legitimate native-gmail-patch path instead — must NOT be
+                    -- deleted, or every enrichment this run just patched into Google's
+                    -- own calendar entry gets immediately wiped out again.
+                    OR (calendar_source LIKE 'gmail:%' AND source_email_id IS NULL)
                   )
             """)
             to_delete = list(cur.fetchall())
@@ -924,6 +964,35 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 partner_acct is not None
                 and ev_source.startswith(f"gmail:{partner_acct['email_address']}")
             )
+
+            # Native Google-auto-detected event our own recovery pipeline has since
+            # enriched (source_email_id set) — Google's "fromGmail" event type
+            # silently discards content patches (confirmed live via etag/updated
+            # staying identical after a 200 OK patch response — location patches
+            # even hard-error with a bare 400). The only way to get real data onto
+            # it is to delete Google's placeholder and let this event fall through
+            # to the normal write path below, which creates a proper new tracked
+            # entry the same way every other event does — same routing (Family/
+            # Bills/etc via cal_svc, not the original personal gmail calendar),
+            # same tagging, same idempotency. Deliberately does NOT `continue` —
+            # gcal_id stays None below, landing in the existing "New event" branch.
+            if ev_source.startswith("gmail:") and ev.get("source_email_id") and not ev.get("gcal_event_id"):
+                real_id, target_svc, target_cal = _resolve_native_gmail_event(
+                    ev, gmail_acct, partner_acct, cal_svc, partner_cal_svc, ac, partner_routing
+                )
+                if real_id and target_svc and target_cal:
+                    try:
+                        target_svc.events().delete(calendarId=target_cal, eventId=real_id).execute()
+                        print(f"[appt] removed native gmail placeholder for '{title}' — "
+                              f"replacing with a fully-tracked event")
+                    except Exception as e:
+                        status = getattr(getattr(e, "resp", None), "status", None)
+                        if status not in (404, 410, "404", "410"):
+                            print(f"[appt] failed to remove native gmail placeholder for '{title}': {e}")
+                else:
+                    print(f"[appt] couldn't resolve native gmail event for '{title}' "
+                          f"(calendar_event_id={ev.get('calendar_event_id')!r}) — writing fresh anyway")
+
             if ev.get("status") == "suspended":
                 # family-brain-weekly-digest-spec.md P0-1/P0-1b — a suspended
                 # occurrence goes to Tentative regardless of what it would

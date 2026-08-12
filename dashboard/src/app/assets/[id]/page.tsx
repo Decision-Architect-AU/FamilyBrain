@@ -153,6 +153,14 @@ export default function AssetDossierPage({ params }: { params: { id: string } })
     mutate();
   }
 
+  async function flagEvent(eventId: number) {
+    await fetch('/api/item-flags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_type: 'event', entity_id: eventId }),
+    });
+  }
+
   if (isLoading) {
     return <div className="max-w-4xl mx-auto px-4 py-12 text-center text-gray-500 text-sm">Loading dossier…</div>;
   }
@@ -244,7 +252,16 @@ export default function AssetDossierPage({ params }: { params: { id: string } })
             {events.map(e => (
               <div key={e.id} className="flex items-center justify-between text-sm rounded-lg border border-gray-700/30 bg-gray-900/20 px-3 py-2">
                 <span className="text-gray-200 truncate">{e.title}</span>
-                <span className="text-xs text-gray-500 shrink-0 ml-2">{fmtDate(e.starts_at)} · {e.status}</span>
+                <span className="flex items-center gap-2 shrink-0 ml-2">
+                  <span className="text-xs text-gray-500">{fmtDate(e.starts_at)} · {e.status}</span>
+                  <button
+                    onClick={() => flagEvent(e.id)}
+                    title="Flag for review — force a re-check against source data"
+                    className="text-xs text-gray-600 hover:text-sky-400 transition-colors"
+                  >
+                    🚩
+                  </button>
+                </span>
               </div>
             ))}
           </div>

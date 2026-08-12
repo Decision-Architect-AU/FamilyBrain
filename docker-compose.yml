@@ -402,6 +402,10 @@ services:
       # Ingestor webhook endpoint (internal Docker network)
       INGESTOR_URL: http://ingestor:4001
 
+      # wa-agent notify endpoint — used by item_review to ask the user for a
+      # source email when a force-review flag can't find one automatically
+      WA_AGENT_URL: http://wa-agent:4002
+
       # Calendar mirror routing — set real addresses in .env, never commit them
       CALENDAR_MIRROR_PRIMARY_EMAIL:   ${CALENDAR_MIRROR_PRIMARY_EMAIL:-}
       CALENDAR_MIRROR_SECONDARY_EMAIL: ${CALENDAR_MIRROR_SECONDARY_EMAIL:-}
@@ -421,6 +425,7 @@ services:
       # Poll intervals in seconds (override in .env if needed)
       EMAIL_POLL_INTERVAL_SECS:    ${EMAIL_POLL_INTERVAL_SECS:-300}
       CALENDAR_POLL_INTERVAL_SECS: ${CALENDAR_POLL_INTERVAL_SECS:-900}
+      REVIEW_POLL_INTERVAL_SECS:   ${REVIEW_POLL_INTERVAL_SECS:-90}
 
       # Financial document filing
       FINANCIALS_DIR: /financials

@@ -65,6 +65,12 @@ _ADD_EVENT_PATTERNS = [
     re.compile(r"remind\s+me\s+(?:to\s+|about\s+)?(.+?)\s+(?:on|at)\s+(.+)", re.I),
 ]
 
+# "flag my kooza booking", "favourite the northstar hotel", "flag <x> for review"
+_FLAG_ITEM_PATTERNS = re.compile(
+    r"^(?:flag|favourite|favorite)\s+(?:my\s+)?(.+?)(?:\s+for\s+review)?$",
+    re.I,
+)
+
 _DAYS_PATTERNS = re.compile(
     r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"this (week|month)|next (week|month))\b",
@@ -83,7 +89,14 @@ def parse(message: str) -> dict | None:
       { "type": "notifications" }
       { "type": "assets" }
       { "type": "add_event",        "description": str, "when": str | None }
+      { "type": "flag_item",        "description": str }
     """
+    # Flag / favourite — checked early since "flag" is a specific enough verb
+    # that it shouldn't be shadowed by looser patterns below
+    m = _FLAG_ITEM_PATTERNS.match(message.strip())
+    if m:
+        return {"type": "flag_item", "description": m.group(1).strip()}
+
     # Email
     for pattern in _EMAIL_PATTERNS:
         m = pattern.search(message)

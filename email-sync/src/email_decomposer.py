@@ -613,6 +613,146 @@ def _store_note_body(email_id: int, body: str) -> int:
     return note_id
 
 
+def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) -> list[int]:
+    """
+    Decompose a single already-fetched email row (as returned by the SELECT in
+    decompose_emails / decompose_email_by_id) into notes/events. Returns the ids
+    of any personal.event rows created (via calendar_event items) — empty list
+    if nothing was created or the email failed to process.
+
+    Never raises — mirrors decompose_emails' original per-email try/except so
+    one bad email doesn't take down a batch run.
+    """
+    email_id     = email["id"]
+    subject      = email["subject"] or ""
+    body         = email["note_body"] or ""
+    received_at  = str(email["received_at"] or "")
+    account_id   = email["account_id"]
+    provider_id  = email["provider_msg_id"] or ""
+    acct         = next((a for a in accounts if a["id"] == account_id), None)
+    email_meta   = {
+        "account_email": acct["email_address"] if acct else None,
+        "from_address":  email.get("from_address") or email.get("from_name"),
+        "received_at":   email["received_at"],
+    }
+
+    # If no body text and email has no note, try extracting text from attachments (any provider)
+    if not body.strip() and not email["note_id"] and provider_id:
+        acct = next((a for a in accounts if a["id"] == account_id), None)
+        if acct:
+            att_text = _fetch_attachment_text_for_email(acct, provider_id)
+            att_text = att_text.replace("\x00", "")  # Postgres rejects NUL bytes
+            if att_text.strip():
+                print(f"[decompose] extracted {len(att_text)} chars from attachments for email {email_id}")
+                _store_note_body(email_id, att_text)
+                body = att_text
+
+    title_to_event_id: dict = {}
+    try:
+        # Pre-extract meeting URL from raw body before truncation — used as fallback
+        # if the LLM misses it or the link is buried below the 3000-char prompt window.
+        pre_meeting_url = _extract_meeting_url(body)
+
+        items = _extract_items(subject, body, received_at)
+
+        if items:
+            print(f"[decompose] '{subject[:60]}': {len(items)} item(s)")
+            if pre_meeting_url:
+                print(f"[decompose] pre-extracted meeting URL: {pre_meeting_url[:80]}")
+
+        # Process each item in its own transaction so wconn locks release between
+        # items — prevents self-deadlock when upsert_event (second connection) dedup-
+        # checks a row that wconn already holds a lock on from a previous item.
+        for item in items:
+            itype = item.get("type")
+            title = item.get("title", "")
+            detail = item.get("detail", "")
+
+            with psycopg2.connect(DB_URL) as wconn:
+                with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
+                    if itype == "calendar_event":
+                        _create_calendar_event(wcur, item, calendar_source,
+                                                email_id, INGESTOR_URL,
+                                                received_date=received_at,
+                                                title_to_event_id=title_to_event_id,
+                                                pre_extracted_meeting_url=pre_meeting_url,
+                                                email_meta=email_meta)
+
+                    elif itype == "payment":
+                        _create_payment_note(wcur, item, email_id, received_at)
+
+                    elif itype in ("observation", "task"):
+                        tags = ["task"] if itype == "task" else []
+                        priority = item.get("priority", "normal")
+                        if itype == "task" and priority == "high":
+                            tags.append("urgent")
+                        _create_note(wcur, email_id, title, detail, itype, tags, received_at)
+                wconn.commit()
+
+        with psycopg2.connect(DB_URL) as wconn:
+            with wconn.cursor() as wcur:
+                wcur.execute(
+                    "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
+                    (email_id,),
+                )
+            wconn.commit()
+
+        return list(title_to_event_id.values())
+
+    except Exception as e:
+        err_str = str(e).lower()
+        # Network/API errors — leave email_decomposed = false so it retries next cycle
+        is_transient = any(x in err_str for x in (
+            "name or service not known", "unable to find the server",
+            "nameresolutionerror", "connectionerror", "connection reset",
+            "timeout", "timed out", "max retries",
+        ))
+        print(f"[decompose] {'transient failure, will retry' if is_transient else 'failed'} "
+              f"for email {email_id} '{subject[:40]}': {e!r}")
+        traceback.print_exc()
+        if not is_transient:
+            # Only mark done for non-network failures (parse errors, malformed content)
+            try:
+                with psycopg2.connect(DB_URL) as ec:
+                    with ec.cursor() as ecur:
+                        ecur.execute(
+                            "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
+                            (email_id,),
+                        )
+                    ec.commit()
+            except Exception:
+                pass
+        return list(title_to_event_id.values())
+
+
+def decompose_email_by_id(email_id: int, accounts: list[dict]) -> list[int]:
+    """
+    Targeted decompose for item_review — processes exactly one email regardless
+    of its received_at/category/backlog position, so a just-recovered (possibly
+    months-old) email is handled immediately instead of waiting behind the
+    normal batch ordering. Returns ids of any personal.event rows created.
+    """
+    calendar_source = "email:decompose"
+    with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT em.id, em.subject, em.from_address, em.received_at,
+                       em.account_id, em.provider_msg_id, em.note_id,
+                       n.body AS note_body
+                FROM   personal.email_message em
+                LEFT   JOIN personal.note n ON n.id = em.note_id
+                WHERE  em.id = %s
+                """,
+                (email_id,),
+            )
+            email = cur.fetchone()
+
+    if not email:
+        return []
+    return _process_one_email(email, accounts, calendar_source)
+
+
 def decompose_emails(accounts: list[dict]) -> int:
     """
     Process a batch of ingested emails that haven't been decomposed yet.
@@ -663,104 +803,7 @@ def decompose_emails(accounts: list[dict]) -> int:
     processed = 0
 
     for email in emails:
-        email_id     = email["id"]
-        subject      = email["subject"] or ""
-        body         = email["note_body"] or ""
-        received_at  = str(email["received_at"] or "")
-        account_id   = email["account_id"]
-        provider_id  = email["provider_msg_id"] or ""
-        acct         = next((a for a in accounts if a["id"] == account_id), None)
-        email_meta   = {
-            "account_email": acct["email_address"] if acct else None,
-            "from_address":  email.get("from_address") or email.get("from_name"),
-            "received_at":   email["received_at"],
-        }
-
-        # If no body text and email has no note, try extracting text from attachments (any provider)
-        if not body.strip() and not email["note_id"] and provider_id:
-            acct = next((a for a in accounts if a["id"] == account_id), None)
-            if acct:
-                att_text = _fetch_attachment_text_for_email(acct, provider_id)
-                att_text = att_text.replace("\x00", "")  # Postgres rejects NUL bytes
-                if att_text.strip():
-                    print(f"[decompose] extracted {len(att_text)} chars from attachments for email {email_id}")
-                    _store_note_body(email_id, att_text)
-                    body = att_text
-
-        try:
-            # Pre-extract meeting URL from raw body before truncation — used as fallback
-            # if the LLM misses it or the link is buried below the 3000-char prompt window.
-            pre_meeting_url = _extract_meeting_url(body)
-
-            items = _extract_items(subject, body, received_at)
-
-            if items:
-                print(f"[decompose] '{subject[:60]}': {len(items)} item(s)")
-                if pre_meeting_url:
-                    print(f"[decompose] pre-extracted meeting URL: {pre_meeting_url[:80]}")
-
-            # Process each item in its own transaction so wconn locks release between
-            # items — prevents self-deadlock when upsert_event (second connection) dedup-
-            # checks a row that wconn already holds a lock on from a previous item.
-            title_to_event_id: dict = {}
-            for item in items:
-                itype = item.get("type")
-                title = item.get("title", "")
-                detail = item.get("detail", "")
-
-                with psycopg2.connect(DB_URL) as wconn:
-                    with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
-                        if itype == "calendar_event":
-                            _create_calendar_event(wcur, item, calendar_source,
-                                                    email_id, INGESTOR_URL,
-                                                    received_date=received_at,
-                                                    title_to_event_id=title_to_event_id,
-                                                    pre_extracted_meeting_url=pre_meeting_url,
-                                                    email_meta=email_meta)
-
-                        elif itype == "payment":
-                            _create_payment_note(wcur, item, email_id, received_at)
-
-                        elif itype in ("observation", "task"):
-                            tags = ["task"] if itype == "task" else []
-                            priority = item.get("priority", "normal")
-                            if itype == "task" and priority == "high":
-                                tags.append("urgent")
-                            _create_note(wcur, email_id, title, detail, itype, tags, received_at)
-                    wconn.commit()
-
-            with psycopg2.connect(DB_URL) as wconn:
-                with wconn.cursor() as wcur:
-                    wcur.execute(
-                        "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
-                        (email_id,),
-                    )
-                wconn.commit()
-
-            processed += 1
-
-        except Exception as e:
-            err_str = str(e).lower()
-            # Network/API errors — leave email_decomposed = false so it retries next cycle
-            is_transient = any(x in err_str for x in (
-                "name or service not known", "unable to find the server",
-                "nameresolutionerror", "connectionerror", "connection reset",
-                "timeout", "timed out", "max retries",
-            ))
-            print(f"[decompose] {'transient failure, will retry' if is_transient else 'failed'} "
-                  f"for email {email_id} '{subject[:40]}': {e!r}")
-            traceback.print_exc()
-            if not is_transient:
-                # Only mark done for non-network failures (parse errors, malformed content)
-                try:
-                    with psycopg2.connect(DB_URL) as ec:
-                        with ec.cursor() as ecur:
-                            ecur.execute(
-                                "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
-                                (email_id,),
-                            )
-                        ec.commit()
-                except Exception:
-                    pass
+        _process_one_email(email, accounts, calendar_source)
+        processed += 1
 
     return processed

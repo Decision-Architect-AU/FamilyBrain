@@ -560,8 +560,40 @@ async def _handle_command(sender: str, cmd: dict, t0: float) -> QueryResponse:
         return await _handle_assets(t0)
     if cmd["type"] == "add_event":
         return await _handle_add_event(sender, cmd["description"], cmd.get("when"), t0)
+    if cmd["type"] == "flag_item":
+        return await _handle_flag_item(sender, cmd["description"], t0)
     elapsed = int((time.time() - t0) * 1000)
     return QueryResponse(response="Unknown command.", graphs_used=[], elapsed_ms=elapsed)
+
+
+async def _handle_flag_item(sender: str, description: str, t0: float) -> QueryResponse:
+    """
+    Resolve a free-text description to an event and force a review — searches
+    connected mailboxes directly for a richer source instead of waiting for the
+    nightly maintenance sweep. email-sync's review_loop polls personal.item_flag
+    and does the actual recovery work; this just enqueues it.
+    """
+    from src.item_flag_store import resolve_event_by_title, create_flag
+
+    match = resolve_event_by_title(description)
+    elapsed = int((time.time() - t0) * 1000)
+    if not match:
+        return QueryResponse(
+            response=f"Couldn't find an event matching \"{description}\".",
+            graphs_used=[], elapsed_ms=elapsed,
+        )
+
+    flag_id = create_flag("event", match["id"], reason=None, source="whatsapp", requested_by=sender)
+    if not flag_id:
+        return QueryResponse(
+            response=f"\"{match['title']}\" is already flagged for review.",
+            graphs_used=[], elapsed_ms=elapsed,
+        )
+
+    return QueryResponse(
+        response=f"🚩 Flagged \"{match['title']}\" for review — I'll check for a richer source and follow up.",
+        graphs_used=[], elapsed_ms=elapsed,
+    )
 
 
 async def _handle_upcoming_events(window: str, t0: float) -> QueryResponse:
