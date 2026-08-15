@@ -15,6 +15,7 @@ No hardcoded accounts — add rows to personal.email_account to connect inboxes.
 import os
 import time
 import threading
+import psycopg2
 from datetime import datetime, timezone
 
 from .db import get_enabled_accounts
@@ -25,12 +26,15 @@ from . import bill_calendar as billcal_mod
 from . import email_decomposer as decompose_mod
 from . import appointment_updater as appt_mod
 from . import item_review as review_mod
+from . import weekly_digest as digest_mod
 
+DB_URL                  = os.environ["DATABASE_URL"]
 INGESTOR_URL            = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
 EMAIL_POLL_INTERVAL     = int(os.environ.get("EMAIL_POLL_INTERVAL_SECS", "300"))    # 5 min
 CALENDAR_POLL_INTERVAL  = int(os.environ.get("CALENDAR_POLL_INTERVAL_SECS", "900")) # 15 min
 FINANCIAL_POLL_INTERVAL = int(os.environ.get("FINANCIAL_POLL_INTERVAL_SECS", "300")) # 5 min
 REVIEW_POLL_INTERVAL    = int(os.environ.get("REVIEW_POLL_INTERVAL_SECS", "90"))    # item_flag queue poll
+DIGEST_CHECK_INTERVAL   = int(os.environ.get("DIGEST_CHECK_INTERVAL_SECS", "3600")) # hourly check, weekly fire
 # Note: a single run_review() can involve multiple live LLM extraction calls
 # (one per candidate source email tried) — confirmed live TWICE: a 15s interval
 # (60s watchdog threshold) force-restarted mid-review, and even 60s (240s
@@ -68,6 +72,7 @@ _LOOP_INTERVALS = {
     "calendar":  CALENDAR_POLL_INTERVAL,
     "financial": FINANCIAL_POLL_INTERVAL,
     "review":    REVIEW_POLL_INTERVAL,
+    "digest":    DIGEST_CHECK_INTERVAL,
 }
 _WATCHDOG_MISSED_CYCLES = 4   # allow this many missed cycles before treating a loop as hung
 _WATCHDOG_CHECK_SECS    = 60
@@ -241,9 +246,62 @@ def review_loop() -> None:
         time.sleep(REVIEW_POLL_INTERVAL)
 
 
+def _digest_due() -> bool:
+    """Fires on Mondays only, at most once per day — so a restart mid-Monday
+    doesn't skip the week, but the hourly check doesn't re-fire all day."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() != 0:  # Monday
+        return False
+    with psycopg2.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_run_at FROM config.maintenance_throttle WHERE task_name = 'weekly_digest'")
+            row = cur.fetchone()
+    if not row:
+        return True
+    return (now - row[0]).total_seconds() > 20 * 3600
+
+
+def _digest_mark() -> None:
+    with psycopg2.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO config.maintenance_throttle (task_name, last_run_at) VALUES ('weekly_digest', now()) "
+                "ON CONFLICT (task_name) DO UPDATE SET last_run_at = now()"
+            )
+        conn.commit()
+
+
+def run_weekly_digest() -> None:
+    if not _digest_due():
+        return
+    accounts = get_enabled_accounts()
+    gmail_acct = next(
+        (a for a in accounts if a["provider"] == "gmail" and a.get("is_primary_calendar")), None
+    )
+    if not gmail_acct:
+        print("[digest] no primary Gmail account — skipping")
+        return
+    try:
+        digest_mod.send_weekly_digest(gmail_acct)
+        _digest_mark()
+    except Exception as e:
+        print(f"[digest] failed: {e}")
+
+
+def digest_loop() -> None:
+    while True:
+        try:
+            run_weekly_digest()
+        except Exception as e:
+            print(f"[digest] loop error: {e}")
+        _touch_heartbeat("digest")
+        time.sleep(DIGEST_CHECK_INTERVAL)
+
+
 if __name__ == "__main__":
     print(f"[email-sync] Starting — email every {EMAIL_POLL_INTERVAL}s, calendar every {CALENDAR_POLL_INTERVAL}s, "
-          f"financial every {FINANCIAL_POLL_INTERVAL}s, item-review every {REVIEW_POLL_INTERVAL}s")
+          f"financial every {FINANCIAL_POLL_INTERVAL}s, item-review every {REVIEW_POLL_INTERVAL}s, "
+          f"digest check every {DIGEST_CHECK_INTERVAL}s (fires Mondays)")
     print(f"[email-sync] Ingestor: {INGESTOR_URL}")
 
     # Watchdog starts FIRST, before any blocking call — including the initial
@@ -272,10 +330,12 @@ if __name__ == "__main__":
     t_cal    = threading.Thread(target=calendar_loop,  daemon=True, name="calendar-loop")
     t_fin    = threading.Thread(target=financial_loop, daemon=True, name="financial-loop")
     t_review = threading.Thread(target=review_loop,    daemon=True, name="review-loop")
+    t_digest = threading.Thread(target=digest_loop,    daemon=True, name="digest-loop")
     t_email.start()
     t_cal.start()
     t_fin.start()
     t_review.start()
+    t_digest.start()
 
     # Keep main thread alive
     try:

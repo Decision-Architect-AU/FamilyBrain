@@ -46,6 +46,9 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${DASHBOARD_DB_USER:-dashboard_ro}:${DASHBOARD_DB_PASSWORD:?required}@postgres:5432/openclaw
+      COMMENTOS_DATABASE_URL: postgresql://commentos:${COMMENTOS_DB_PASSWORD:?required}@postgres:5432/openclaw
+      OLLAMA_URL: http://172.23.96.1:11434
+      COMMENTOS_MODEL: qwen2.5:14b
       MODE_FILE: /shared/current_mode
       WA_AGENT_URL: http://wa-agent:4002
     volumes:
@@ -245,6 +248,27 @@ services:
         condition: service_healthy
       audit-logger:
         condition: service_started
+    networks:
+      - familybrain-net
+
+  commentos:
+    build:
+      context: ./commentos
+      dockerfile: Dockerfile
+    container_name: familybrain-commentos
+    profiles: [normal]
+    restart: unless-stopped
+    ports:
+      - "4004:4004"
+    environment:
+      DATABASE_URL: postgresql://commentos:${COMMENTOS_DB_PASSWORD:?required}@postgres:5432/openclaw
+      OLLAMA_URL: http://172.23.96.1:11434
+      EMBED_MODEL: nomic-embed-text
+      REASON_MODEL: qwen2.5:3b
+      DRAFT_MODEL: qwen2.5:3b
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - familybrain-net
 

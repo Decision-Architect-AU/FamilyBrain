@@ -103,6 +103,37 @@ def search_messages(account: dict, query: str, max_results: int = 20) -> list[di
     return [svc.users().messages().get(userId="me", id=mid, format="full").execute() for mid in ids]
 
 
+def create_draft(account: dict, to: str, subject: str, body_text: str, body_html: str | None = None) -> str:
+    """
+    Create a Gmail draft in `account`'s own mailbox. Returns the new draft id.
+    Uses the account's own Gmail API credentials — unlike an external Gmail
+    connector/MCP tool that may be authorized against a completely different
+    mailbox than any FamilyBrain-connected account (confirmed live: a draft
+    meant for samthemerchant@gmail.com landed in an unrelated automation
+    mailbox instead, because that tool's OAuth identity wasn't checked first).
+
+    When `body_html` is given, sends a multipart/alternative message (plain
+    text + HTML) so mail clients that render HTML show the styled version
+    (e.g. bold/red for urgent items) while still degrading gracefully.
+    """
+    import base64
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    svc = _gmail_service(account)
+    if body_html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body_text, "plain"))
+        msg.attach(MIMEText(body_html, "html"))
+    else:
+        msg = MIMEText(body_text)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    result = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    return result["id"]
+
+
 # ── Email ──────────────────────────────────────────────────────────────────────
 
 def _extract_body(payload: dict) -> str:
@@ -308,7 +339,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             from datetime import timedelta
             since_days = int(os.environ.get("GMAIL_INITIAL_DAYS", "365"))
             since_date = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y/%m/%d")
-            query = f"in:inbox OR in:sent -category:promotions -category:social -category:updates -is:spam -is:trash after:{since_date}"
+            query = f"in:inbox OR in:sent -category:promotions -category:social -category:updates -is:spam -is:trash -in:draft after:{since_date}"
             # Paginate through all results (Gmail caps each page at 500)
             msg_ids = []
             page_token = None
@@ -345,8 +376,22 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     for h in msg.get("payload", {}).get("headers", [])
                 }
 
-                # Skip Promotions/Spam/Trash — but allow-list overrides Gmail's auto-categorisation
                 msg_labels = set(msg.get("labelIds", []))
+
+                # Drafts are messages too, and the incremental history feed doesn't
+                # distinguish them from real mail. Confirmed live: creating a Gmail
+                # draft for weekly_digest surfaced through this same sync loop as a
+                # "messageAdded" event, got fully decomposed, and its own summary
+                # text — which literally names real routine activities like "cello
+                # class" — was extracted as a higher-precedence email-provenance
+                # event that silently superseded the real routine placeholder for
+                # that week. Unconditional skip — no allow-list override, a draft
+                # should never be treated as correspondence regardless of sender.
+                if "DRAFT" in msg_labels:
+                    skipped += 1
+                    continue
+
+                # Skip Promotions/Spam/Trash — but allow-list overrides Gmail's auto-categorisation
                 if msg_labels & {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"}:
                     from src.filters import _filters, _domain_of
                     f = _filters()

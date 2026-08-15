@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CommentOS</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --text: #e6e8ee;
+    --muted: #8b90a0; --accent: #4f8cff; --ok: #3ecf8e; --warn: #f5a524;
+    --trust: #4f8cff; --impact: #f5a524; --maturity: #3ecf8e; --scope: #c678dd;
+    --edf: #4f8cff; --aio: #f5a524; --llw: #3ecf8e;
+    --border: #262b3a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 20px 16px 80px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+  h1 { font-size: 21px; margin: 0; }
+  h1 span { color: var(--accent); }
+  .tagline { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .chrome-pill { display: flex; align-items: center; gap: 7px; font-size: 13px;
+                 background: var(--panel); border: 1px solid var(--border);
+                 border-radius: 16px; padding: 5px 13px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #666; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .dot.off { background: #e5484d; }
+  .brand-bar { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .brand-pill { padding: 5px 14px; border-radius: 16px; background: var(--panel);
+                border: 1px solid transparent; color: var(--muted); cursor: pointer;
+                font-size: 13px; font-weight: 600; }
+  .brand-pill.active { color: var(--text); border-color: var(--accent); background: #1c2740; }
+  .brand-pill .bdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .stats { display: flex; gap: 18px; margin-bottom: 14px; flex-wrap: wrap; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 8px 18px; text-align: center; }
+  .stat b { font-size: 19px; display: block; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { padding: 6px 14px; border-radius: 8px; background: var(--panel);
+         border: 1px solid transparent; color: var(--muted); cursor: pointer; font-size: 14px; }
+  .tab.active { color: var(--text); border-color: var(--accent); }
+  .tab .n { background: var(--panel2); border-radius: 10px; padding: 0 7px; margin-left: 5px; font-size: 12px; }
+  textarea { width: 100%; min-height: 88px; background: var(--panel2); color: var(--text);
+             border: 1px solid var(--border); border-radius: 10px; padding: 12px; font: inherit; resize: vertical; }
+  textarea:focus, input:focus { outline: none; border-color: var(--accent); }
+  input[type=text] { background: var(--panel2); color: var(--text);
+             border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+           padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: var(--panel2); color: var(--text); font-weight: 500; }
+  button.ok { background: var(--ok); color: #06281a; }
+  button.danger { background: #3a2024; color: #ff8a8f; }
+  button.sm { padding: 5px 12px; font-size: 13px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+          padding: 15px; margin-bottom: 12px; }
+  .card.brand-edf { border-left: 3px solid var(--edf); }
+  .card.brand-aio { border-left: 3px solid var(--aio); }
+  .card.brand-llw { border-left: 3px solid var(--llw); }
+  .lens { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px;
+          font-weight: 600; margin-right: 6px; text-transform: capitalize; color: #0c0e14; }
+  .lens.trust { background: var(--trust); } .lens.impact { background: var(--impact); }
+  .lens.maturity { background: var(--maturity); } .lens.scope { background: var(--scope); }
+  .label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+           color: var(--muted); margin: 12px 0 6px; }
+  .concept { display: flex; justify-content: space-between; gap: 10px; padding: 6px 10px;
+             background: var(--panel2); border-radius: 8px; margin-bottom: 5px; font-size: 13px; }
+  .concept .score { color: var(--muted); white-space: nowrap; }
+  .bridge { padding: 6px 10px; background: #23202e; border: 1px dashed #4a3f6b;
+            border-radius: 8px; margin-bottom: 5px; font-size: 13px; }
+  .bridge b { color: #c678dd; }
+  .quote { border-left: 3px solid var(--accent); padding: 4px 12px; color: var(--muted);
+           margin: 0 0 10px; font-style: italic; white-space: pre-wrap; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .err { color: #ff6b6b; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .pill { font-size: 11px; padding: 2px 10px; border-radius: 10px; background: var(--panel2); color: var(--muted); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { padding: 4px 12px; border-radius: 16px; background: var(--panel2); color: var(--muted);
+          border: 1px solid transparent; cursor: pointer; font-size: 13px; }
+  .chip.active { color: var(--text); border-color: var(--accent); background: #1c2740; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  a { color: var(--accent); }
+  .divider { text-align: center; color: var(--muted); font-size: 12px; margin: 18px 0 10px;
+             text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/assets/react.production.min.js"></script>
+<script src="/assets/react-dom.production.min.js"></script>
+<script src="/assets/htm.js"></script>
+<script>
+const { useState, useEffect, useCallback } = React;
+const html = htm.bind(React.createElement);
+const BRIDGE = "http://localhost:8765";
+
+const api = async (path, opts) => {
+  const r = await fetch(path, opts ? { headers: {"Content-Type": "application/json"}, ...opts } : undefined);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+};
+const bridge = async (path, opts) => {
+  const r = await fetch(BRIDGE + path, opts ? { headers: {"Content-Type": "application/json"}, ...opts } : undefined);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+
+const CHANNEL_ICON = { linkedin: "in", x: "𝕏", facebook: "f" };
+const BRAND_SHORT = {};
+const brandClass = id => BRAND_SHORT[id] ? "brand-" + BRAND_SHORT[id].toLowerCase() : "";
+
+const Lenses = ({ lenses }) => html`<span>
+  ${(lenses || []).map(l => html`<span key=${l} class="lens ${l}">${l}</span>`)}
+</span>`;
+
+const BrandBar = ({ brands, value, onChange }) => html`<div class="brand-bar">
+  <div class="brand-pill ${!value ? "active" : ""}" onClick=${() => onChange(null)}>All brands</div>
+  ${brands.map(b => html`<div key=${b.id} class="brand-pill ${value === b.id ? "active" : ""}"
+    onClick=${() => onChange(b.id)}>
+    <span class="bdot" style=${{background: b.color}}></span>${b.short}</div>`)}
+</div>`;
+
+const CampaignChips = ({ campaigns, value, onChange }) => html`<div class="chips">
+  ${campaigns.map(c => html`<div key=${c.id} class="chip ${value === c.id ? "active" : ""}"
+    onClick=${() => onChange(c.id)}>${c.name}</div>`)}
+</div>`;
+
+function ChromePill() {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const check = useCallback(() => {
+    bridge("/chrome-status").then(setStatus).catch(() => setStatus({ bridge_down: true }));
+  }, []);
+  useEffect(() => { check(); const t = setInterval(check, 15000); return () => clearInterval(t); }, [check]);
+
+  const launch = async () => {
+    setBusy(true);
+    try { await bridge("/chrome-start", { method: "POST", body: "{}" }); } catch (e) {}
+    setTimeout(check, 4000); setBusy(false);
+  };
+
+  if (!status) return html`<div class="chrome-pill"><span class="dot"></span>Chrome…</div>`;
+  if (status.bridge_down) return html`<div class="chrome-pill" title="Start the native bridge: START.bat in the Comment OS project">
+    <span class="dot off"></span>Bridge offline</div>`;
+  const running = status.chrome === "running";
+  const ok = running && status.linkedin === "logged_in";
+  return html`<div class="chrome-pill">
+    <span class="dot ${ok ? "on" : "off"}"></span>
+    ${ok ? "Chrome ready" : (running ? "Chrome: open LinkedIn & log in" : "Chrome off")}
+    ${!running && html`<button class="sm ghost" onClick=${launch} disabled=${busy}>Launch</button>`}
+  </div>`;
+}
+
+function ScrapeButton({ onDone }) {
+  const [st, setSt] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const check = useCallback(() => {
+    bridge("/scrape-status").then(s => {
+      setSt(prev => {
+        if (prev && prev.running && !s.running) onDone();  // run just finished
+        return s;
+      });
+    }).catch(() => setSt(null));
+  }, [onDone]);
+  useEffect(() => { check(); const t = setInterval(check, 20000); return () => clearInterval(t); }, [check]);
+
+  const run = async () => {
+    setBusy(true);
+    try { await bridge("/scrape", { method: "POST", body: "{}" }); check(); } catch (e) {}
+    setBusy(false);
+  };
+
+  if (!st) return null;
+  const last = st.last_run && st.last_run.run_at ? st.last_run.run_at.slice(0, 16).replace("T", " ") : null;
+  return html`<div class="chrome-pill">
+    ${st.running
+      ? html`<span class="dot on"></span>Scraping ${st.brand}…`
+      : html`<button class="sm ghost" onClick=${run} disabled=${busy}>↻ Scrape now</button>
+             ${last && html`<span title="Last scrape run">${last}</span>`}`}
+  </div>`;
+}
+
+function AnalysisView({ result }) {
+  if (!result) return null;
+  return html`<div>
+    <p class="quote">${result.hypothesis}</p>
+    <${Lenses} lenses=${result.lenses} />
+    <div class="grid2">
+      <div>
+        <div class="label">Grounded in ED concepts</div>
+        ${(result.matches || []).slice(0, 5).map(m => html`<div key=${m.graph_node_id} class="concept">
+          <span><b>${m.name}</b></span><span class="score">${m.score}</span></div>`)}
+      </div>
+      <div>
+        <div class="label">Vocabulary bridges</div>
+        ${(result.synonyms || []).length
+          ? result.synonyms.map(s => html`<div key=${s.term} class="bridge">
+              "${s.term}" <span class="hint">(${s.domain})</span> ≈ <b>${s.ed_concept || "—"}</b></div>`)
+          : html`<p class="hint">None matched — grow the Knowledge tab.</p>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Inbox: pending candidates -> draft -> approve/reject ─────────────────────
+function Inbox({ brands, campaigns, brand, onQueued, refresh }) {
+  const [items, setItems] = useState([]);
+  const [drafts, setDrafts] = useState({});     // inbound_id -> {busy, result, reply, campaign}
+  const [err, setErr] = useState(null);
+
+  const load = useCallback(() => {
+    api("/api/inbound?status=pending" + (brand ? `&brand_id=${brand}` : ""))
+      .then(setItems).catch(e => setErr(e.message));
+  }, [brand]);
+  useEffect(load, [load, refresh]);
+  // auto-retrieve: keep the inbox fresh while scrapes run in the background
+  useEffect(() => { const t = setInterval(load, 45000); return () => clearInterval(t); }, [load]);
+
+  const setD = (id, patch) => setDrafts(d => ({ ...d, [id]: { ...(d[id] || { campaign: "rapport" }), ...patch } }));
+
+  const draft = async (item) => {
+    const st = drafts[item.id] || { campaign: "rapport" };
+    setD(item.id, { busy: true });
+    try {
+      const r = await api(`/api/inbound/${item.id}/draft`, { method: "POST",
+        body: JSON.stringify({ campaign_id: st.campaign }) });
+      setD(item.id, { busy: false, result: r, reply: (r.restatement + " " + r.insight).trim() });
+    } catch (e) { setD(item.id, { busy: false }); setErr(e.message); }
+  };
+
+  const approve = async (item) => {
+    const st = drafts[item.id];
+    if (!st || !st.reply) return;
+    setD(item.id, { busy: true });
+    try {
+      await api(`/api/inbound/${item.id}/approve`, { method: "POST",
+        body: JSON.stringify({ reply_text: st.reply }) });
+      load(); onQueued();
+    } catch (e) { setErr(e.message); }
+    setD(item.id, { busy: false });
+  };
+
+  const reject = async (item) => {
+    await api(`/api/inbound/${item.id}/reject`, { method: "POST", body: "{}" });
+    load();
+  };
+
+  if (err) return html`<p class="err">${err}</p>`;
+  if (!items.length) return html`<p class="hint">Inbox is clear — no pending candidates.
+    Import scraped posts via the scraper (SCRAPE.bat) or POST /api/inbound.</p>`;
+
+  return html`<div>${items.map(item => {
+    const st = drafts[item.id] || { campaign: "rapport" };
+    return html`<div key=${item.id} class="card ${brandClass(item.brand_id)}">
+      <div class="row" style=${{marginTop: 0, justifyContent: "space-between"}}>
+        <span class="pill">${BRAND_SHORT[item.brand_id] || "—"} · ${CHANNEL_ICON[item.channel_id] || ""} ${item.channel_id}
+          ${item.keyword ? ` · "${item.keyword}"` : ""}</span>
+        <span class="pill">${item.source_author || "unknown author"}</span>
+      </div>
+      <p class="quote" style=${{marginTop: "10px"}}>${item.source_text}</p>
+      ${item.source_url && html`<a href=${item.source_url} target="_blank" rel="noopener" class="hint">View post ↗</a>`}
+      ${!st.result && html`<div class="row">
+        <${CampaignChips} campaigns=${campaigns} value=${st.campaign}
+          onChange=${v => setD(item.id, { campaign: v })} />
+        <button class="sm" onClick=${() => draft(item)} disabled=${st.busy}>
+          ${st.busy ? "Drafting…" : "Draft with ED"}</button>
+        <button class="sm danger" onClick=${() => reject(item)}>Reject</button>
+      </div>`}
+      ${st.result && html`<div>
+        <${AnalysisView} result=${st.result} />
+        <div class="label">Reply draft (edit before approving)</div>
+        <textarea value=${st.reply} onInput=${e => setD(item.id, { reply: e.target.value })}></textarea>
+        <div class="row">
+          <button class="sm ok" onClick=${() => approve(item)} disabled=${st.busy || !st.reply}>Approve → Queue</button>
+          <button class="sm ghost" onClick=${() => draft(item)} disabled=${st.busy}>Redraft</button>
+          <button class="sm danger" onClick=${() => reject(item)}>Reject</button>
+        </div>
+      </div>`}
+    </div>`;
+  })}</div>`;
+}
+
+// ── Analyze: paste any comment ───────────────────────────────────────────────
+function Analyzer({ brands, channels, campaigns, brand, onQueued }) {
+  const [comment, setComment] = useState("");
+  const [url, setUrl] = useState("");
+  const [channel, setChannel] = useState("linkedin");
+  const [campaign, setCampaign] = useState("rapport");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+  const [reply, setReply] = useState("");
+
+  const run = async () => {
+    setBusy(true); setErr(null); setResult(null);
+    try {
+      const r = await api("/api/analyze", { method: "POST",
+        body: JSON.stringify({ comment, source_url: url || null, channel_id: channel,
+                               campaign_id: campaign, brand_id: brand }) });
+      setResult(r); setReply((r.restatement + " " + r.insight).trim());
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const queueIt = async () => {
+    setBusy(true);
+    try {
+      await api("/api/queue", { method: "POST",
+        body: JSON.stringify({ analysis_id: result.id, reply_text: reply,
+                               target_url: url || null, channel_id: channel }) });
+      setResult(null); setComment(""); setUrl(""); setReply(""); onQueued();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const camp = campaigns.find(c => c.id === campaign);
+  return html`<div>
+    <div class="card">
+      <div class="label">Channel</div>
+      <div class="chips">${channels.map(c => html`<div key=${c.id}
+        class="chip ${channel === c.id ? "active" : ""}" onClick=${() => setChannel(c.id)}>
+        ${CHANNEL_ICON[c.id] || ""} ${c.name}</div>`)}</div>
+      <div class="label">Campaign</div>
+      <${CampaignChips} campaigns=${campaigns} value=${campaign} onChange=${setCampaign} />
+      ${camp && html`<p class="hint" style=${{marginTop: "5px"}}>${camp.tone}</p>`}
+      <div class="label">Comment to reframe ${brand ? `· as ${BRAND_SHORT[brand]}` : ""}</div>
+      <textarea value=${comment} onInput=${e => setComment(e.target.value)}
+        placeholder="Paste a comment…"></textarea>
+      <div class="row">
+        <input type="text" style=${{flex: 1, minWidth: "200px"}} value=${url}
+          onInput=${e => setUrl(e.target.value)} placeholder="Link to the post (enables one-click publish)" />
+        <button onClick=${run} disabled=${busy || !comment.trim()}>${busy ? "Analyzing…" : "Analyze"}</button>
+      </div>
+      ${err && html`<p class="err">${err}</p>`}
+    </div>
+    ${result && html`<div class="card">
+      <${AnalysisView} result=${result} />
+      <div class="label">Draft reply (edit before queueing)</div>
+      <textarea style=${{minHeight: "110px"}} value=${reply} onInput=${e => setReply(e.target.value)}></textarea>
+      <div class="row">
+        <button class="ok" onClick=${queueIt} disabled=${busy || !reply.trim()}>Queue for publish</button>
+        <button class="ghost" onClick=${run} disabled=${busy}>Redraft</button>
+      </div>
+    </div>`}
+  </div>`;
+}
+
+// ── Queue: approved -> post via Chrome bridge -> published ───────────────────
+function Queue({ brands, brand, refreshKey }) {
+  const [items, setItems] = useState([]);
+  const [posted, setPosted] = useState([]);
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState({});
+  const [copied, setCopied] = useState(null);
+
+  const load = useCallback(() => {
+    api("/api/queue?status=approved").then(r => setItems(brand ? r.filter(q => q.brand_id === brand) : r));
+    api("/api/queue?status=published").then(r => setPosted((brand ? r.filter(q => q.brand_id === brand) : r).slice(0, 10)));
+  }, [brand]);
+  useEffect(load, [load, refreshKey]);
+
+  const setStatus = async (id, status) => {
+    await api(`/api/queue/${id}/status`, { method: "POST", body: JSON.stringify({ status }) });
+    load();
+  };
+  const copy = async (q) => {
+    await navigator.clipboard.writeText(q.reply_text);
+    setCopied(q.id); setTimeout(() => setCopied(null), 1500);
+  };
+  const postViaChrome = async (q) => {
+    setBusyId(q.id); setMsg(m => ({ ...m, [q.id]: null }));
+    try {
+      await bridge("/post-direct", { method: "POST",
+        body: JSON.stringify({ url: q.target_url, text: q.reply_text }) });
+      await setStatus(q.id, "published");
+      setMsg(m => ({ ...m, [q.id]: "✓ Posted" }));
+    } catch (e) { setMsg(m => ({ ...m, [q.id]: "✗ " + e.message })); }
+    setBusyId(null);
+  };
+
+  const renderCard = (q, isPosted) => html`<div key=${q.id}
+      class="card ${brandClass(q.brand_id)}" style=${isPosted ? {opacity: .55} : {}}>
+    <div class="row" style=${{marginTop: 0, justifyContent: "space-between"}}>
+      <span class="pill">${BRAND_SHORT[q.brand_id] || "—"} · ${CHANNEL_ICON[q.channel_id] || ""} ${q.channel_id || ""}</span>
+      <span class="pill">${isPosted ? "published" : "queued"} ${q.approved_at.slice(0, 16)}</span>
+    </div>
+    ${q.comment_text && html`<p class="quote" style=${{marginTop: "10px"}}>${q.comment_text.slice(0, 300)}</p>`}
+    <${Lenses} lenses=${q.lenses} />
+    <p style=${{whiteSpace: "pre-wrap"}}>${q.reply_text}</p>
+    ${!isPosted && html`<div class="row">
+      ${q.target_url && q.channel_id === "linkedin" &&
+        html`<button class="sm" onClick=${() => postViaChrome(q)} disabled=${busyId === q.id}>
+          ${busyId === q.id ? "Posting…" : "Post to LinkedIn"}</button>`}
+      <button class="sm ghost" onClick=${() => copy(q)}>${copied === q.id ? "Copied ✓" : "Copy"}</button>
+      ${q.target_url && html`<a href=${q.target_url} target="_blank" rel="noopener">Open ↗</a>`}
+      <span style=${{flex: 1}}></span>
+      <button class="sm ok" onClick=${() => setStatus(q.id, "published")}>✓ Done</button>
+      <button class="sm ghost" onClick=${() => setStatus(q.id, "skipped")}>Skip</button>
+    </div>`}
+    ${msg[q.id] && html`<p class=${msg[q.id].startsWith("✗") ? "err" : "hint"}>${msg[q.id]}</p>`}
+  </div>`;
+
+  return html`<div>
+    ${!items.length && html`<p class="hint">Queue is empty — approve something from the Inbox or Analyze tab.</p>`}
+    ${items.map(q => renderCard(q, false))}
+    ${posted.length > 0 && html`<div class="divider">Published (${posted.length})</div>`}
+    ${posted.map(q => renderCard(q, true))}
+  </div>`;
+}
+
+function Knowledge() {
+  const [domain, setDomain] = useState("change management");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [last, setLast] = useState(null);
+  const [rows, setRows] = useState([]);
+  const load = useCallback(() => { api("/api/knowledge").then(setRows).catch(() => {}); }, []);
+  useEffect(load, [load]);
+
+  const run = async () => {
+    setBusy(true); setErr(null); setLast(null);
+    try {
+      const r = await api("/api/ingest", { method: "POST",
+        body: JSON.stringify({ domain, text, source: "dashboard paste" }) });
+      setLast(r); setText(""); load();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const domains = [...new Set(rows.map(r => r.domain))];
+  return html`<div>
+    <div class="card">
+      <div class="label">Ingest framework material → map to the ED graph</div>
+      <p class="hint">Paste material about another framework (six sigma, change management, decision
+        architecture…). Terms are extracted, embedded, crosswalked to their nearest ED concepts, and
+        used as vocabulary bridges when drafting.</p>
+      <div class="row"><input type="text" value=${domain} onInput=${e => setDomain(e.target.value)}
+        placeholder="Framework name" style=${{width: "260px"}} /></div>
+      <div style=${{marginTop: "10px"}}>
+        <textarea style=${{minHeight: "130px"}} value=${text} onInput=${e => setText(e.target.value)}
+          placeholder="Paste the material here…"></textarea></div>
+      <div class="row"><button onClick=${run} disabled=${busy || !text.trim() || !domain.trim()}>
+        ${busy ? "Extracting & mapping…" : "Ingest"}</button></div>
+      ${err && html`<p class="err">${err}</p>`}
+      ${last && html`<p class="hint">Stored ${last.stored.length} terms for “${last.domain}”.</p>`}
+    </div>
+    ${domains.map(d => html`<div key=${d} class="card">
+      <div class="label">${d} · ${rows.filter(r => r.domain === d).length} terms</div>
+      ${rows.filter(r => r.domain === d).map(r => html`<div key=${r.id} class="bridge">
+        <b>${r.term}</b>${r.description ? html` <span class="hint">— ${r.description}</span>` : ""}
+        <div class="hint" style=${{marginTop: "2px"}}>
+          → ${(r.mappings || []).map(m => `${m.ed_concept} (${m.score})`).join(" · ") || "no mapping"}</div>
+      </div>`)}
+    </div>`)}
+  </div>`;
+}
+
+function History({ brand }) {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    api("/api/analyses?limit=40").then(r =>
+      setItems(brand ? r.filter(a => a.brand_id === brand) : r)).catch(() => {});
+  }, [brand]);
+  if (!items.length) return html`<p class="hint">No analyses yet.</p>`;
+  return html`<div>${items.map(a => html`<div key=${a.id} class="card ${brandClass(a.brand_id)}">
+    <div class="row" style=${{marginTop: 0, justifyContent: "space-between"}}>
+      <span class="pill">${BRAND_SHORT[a.brand_id] || "—"} · ${CHANNEL_ICON[a.channel_id] || ""} ${a.channel_id || "—"} · ${a.campaign_id || "no campaign"}</span>
+      <span class="pill">${a.status}</span>
+    </div>
+    <p class="quote" style=${{marginTop: "10px"}}>${(a.comment_text || "").slice(0, 280)}</p>
+    <${Lenses} lenses=${a.lenses} />
+    ${a.insight && html`<p class="hint" style=${{marginTop: "8px"}}>${a.insight}</p>`}
+  </div>`)}</div>`;
+}
+
+function App() {
+  const [tab, setTab] = useState("inbox");
+  const [brand, setBrand] = useState(null);
+  const [brands, setBrands] = useState([]);
+  const [channels, setChannels] = useState([]);
+  const [campaigns, setCampaigns] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [queueRefresh, setQueueRefresh] = useState(0);
+  const [inboxRefresh, setInboxRefresh] = useState(0);
+
+  const loadCounts = useCallback(() => {
+    Promise.all([
+      api("/api/inbound?status=pending"), api("/api/queue?status=approved"),
+      api("/api/queue?status=published"),
+    ]).then(([inb, q, p]) => setCounts({ inbox: inb.length, queue: q.length, posted: p.length }))
+     .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api("/api/brands").then(b => { b.forEach(x => BRAND_SHORT[x.id] = x.short); setBrands(b); });
+    api("/api/channels").then(setChannels);
+    api("/api/campaigns").then(setCampaigns);
+    loadCounts();
+    const t = setInterval(loadCounts, 45000);
+    return () => clearInterval(t);
+  }, [loadCounts]);
+
+  const onQueued = () => { setQueueRefresh(x => x + 1); loadCounts(); setTab("queue"); };
+
+  return html`<div class="wrap">
+    <header>
+      <h1>Comment<span>OS</span></h1>
+      <span class="tagline">identify → ground → publish</span>
+      <span class="spacer"></span>
+      <${ScrapeButton} onDone=${() => { setInboxRefresh(x => x + 1); loadCounts(); }} />
+      <${ChromePill} />
+    </header>
+    <${BrandBar} brands=${brands} value=${brand} onChange=${setBrand} />
+    <div class="stats">
+      <div class="stat"><b>${counts.inbox ?? "—"}</b><span>Inbox</span></div>
+      <div class="stat"><b>${counts.queue ?? "—"}</b><span>Queued</span></div>
+      <div class="stat"><b>${counts.posted ?? "—"}</b><span>Published</span></div>
+    </div>
+    <div class="tabs">
+      ${[["inbox", "Inbox", counts.inbox], ["analyze", "Analyze", null], ["queue", "Queue", counts.queue],
+         ["knowledge", "Knowledge", null], ["history", "History", null]]
+        .map(([t, label, n]) => html`<div key=${t} class="tab ${tab === t ? "active" : ""}"
+          onClick=${() => setTab(t)}>${label}${n ? html`<span class="n">${n}</span>` : ""}</div>`)}
+    </div>
+    ${tab === "inbox" && html`<${Inbox} brands=${brands} campaigns=${campaigns} brand=${brand}
+        onQueued=${onQueued} refresh=${inboxRefresh} />`}
+    ${tab === "analyze" && html`<${Analyzer} brands=${brands} channels=${channels}
+        campaigns=${campaigns} brand=${brand} onQueued=${onQueued} />`}
+    ${tab === "queue" && html`<${Queue} brands=${brands} brand=${brand} refreshKey=${queueRefresh} />`}
+    ${tab === "knowledge" && html`<${Knowledge} />`}
+    ${tab === "history" && html`<${History} brand=${brand} />`}
+  </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);
+</script>
+</body>
+</html>

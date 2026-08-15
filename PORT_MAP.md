@@ -12,6 +12,7 @@
 | 4002 | WhatsApp Agent | normal | Knowledge graph query API — `/query`, `/health` |
 | 5678 | n8n | normal | Workflow orchestration |
 | 4003 | Graph API | normal | Family Brain Graph API — `/graph/*`, `/ingest/*`, `/quality/*`, `/templates/*`, `/schemas/*`; docs at `/docs` |
+| 4004 | CommentOS | normal | ED-framework comment dashboard — analyze/reframe comments, campaigns, channels, publish queue, knowledge crosswalk; React UI at `/`, API at `/api/*` |
 | 5173 | Graph Explorer | normal | Family Brain Graph Explorer (React/Vite) — graph canvas, ingestor, quality lab, templates |
 | 8888 | AGE Viewer | normal | Legacy graph viewer — connect: host=`postgres` db=`familybrain` user=`geoff` flavor=`Apache AGE` |
 | 9000 | Whisper (STT) | podcast | OpenAI-compatible ASR: `POST /asr` |

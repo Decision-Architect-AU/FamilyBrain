@@ -8,8 +8,13 @@ const DEDUP_CRON   = process.env.DEDUP_CRON   ?? '*/15 * * * *'; // every 15min
 
 console.log(`[scraper] Starting — scrape: ${SCRAPE_CRON}, dedup: ${DEDUP_CRON}`);
 
-// Run dedup on startup (clear any backlog from previous run)
-processUnprocessed().then(n => console.log(`[dedup] startup pass: ${n} promoted`));
+// Run dedup on startup (clear any backlog from previous run).
+// Never let a startup race with Postgres (57P03) become an unhandled
+// rejection — that crashes the process. Log and continue; the scheduled
+// dedup pass (DEDUP_CRON) clears the backlog once the DB is ready.
+processUnprocessed()
+  .then(n => console.log(`[dedup] startup pass: ${n} promoted`))
+  .catch(err => console.error(`[dedup] startup pass skipped: ${err.message}`));
 
 cron.schedule(SCRAPE_CRON, async () => {
   console.log('[scraper] Running scheduled domain.com.au scrape');
