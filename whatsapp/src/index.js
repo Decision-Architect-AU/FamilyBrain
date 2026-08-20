@@ -124,22 +124,56 @@ function stripIngestPrefix(text) {
   return text;
 }
 
+// Thrown by callAgent() specifically when wa-agent itself couldn't be
+// reached (connection refused, DNS failure, timeout) — as opposed to
+// wa-agent being reachable but erroring internally. The message_create
+// handler checks for this to reply with a specific "can't connect" message
+// instead of a generic "something went wrong", so a backend outage is
+// distinguishable from any other failure without digging through logs.
+class AgentUnreachableError extends Error {}
+
 async function callAgent(path, body, timeoutMs = 300000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(`${WA_AGENT_URL}${path}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-      signal:  controller.signal,
-    });
+    let resp;
+    try {
+      resp = await fetch(`${WA_AGENT_URL}${path}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+        signal:  controller.signal,
+      });
+    } catch (err) {
+      // fetch() throws for connection-level failures (refused, DNS, abort/
+      // timeout) rather than returning a response — that's the "can't reach
+      // wa-agent at all" case, distinct from wa-agent responding with an
+      // error status.
+      throw new AgentUnreachableError(`could not reach wa-agent at ${WA_AGENT_URL}: ${err.message}`);
+    }
     if (!resp.ok) throw new Error(`wa-agent ${path} returned ${resp.status}`);
     return resp.json();
   } finally {
     clearTimeout(timer);
   }
 }
+
+// Log the full crash reason before the process goes down — confirmed live:
+// this container previously died with nothing but "[whatsapp] Removed stale
+// lock" on the next boot, no trace of what actually killed it. Puppeteer/
+// whatsapp-web.js frequently throws unhandled rejections on page crashes or
+// disconnects, and recent Node terminates the process on those by default —
+// same as an uncaught exception — so both are logged with full detail here.
+// Still exits (Docker's restart policy brings it back up) since process
+// state after either is not trustworthy to keep running on.
+process.on('unhandledRejection', (reason) => {
+  console.error('[whatsapp] FATAL unhandledRejection:', reason?.stack || reason);
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[whatsapp] FATAL uncaughtException:', err.stack || err.message);
+  process.exit(1);
+});
 
 // ── WhatsApp client ───────────────────────────────────────────────────────────
 
@@ -186,8 +220,17 @@ client.on('ready', async () => {
 
 
 client.on('disconnected', (reason) => {
-  console.log('[whatsapp] Disconnected:', reason);
+  console.error('[whatsapp] Disconnected:', reason);
   isReady = false;
+  // whatsapp-web.js does not auto-reconnect after 'disconnected' — without
+  // this, a disconnect that doesn't also crash the node process (so the
+  // fatal handlers above never fire and Docker never restarts the
+  // container) leaves the bot silently dead until someone notices and
+  // restarts it by hand, same as the incident this goal was raised from.
+  console.log('[whatsapp] Attempting to reconnect...');
+  client.initialize().catch((err) => {
+    console.error('[whatsapp] Reconnect attempt failed:', err.stack || err.message);
+  });
 });
 
 client.on('message_create', async (msg) => {
@@ -292,8 +335,18 @@ client.on('message_create', async (msg) => {
     }
 
   } catch (err) {
-    console.error(`[whatsapp] Error handling message from ${sender}:`, err.message);
-    await replyTracked(msg, '⚠️ Something went wrong. Try again shortly.');
+    console.error(`[whatsapp] Error handling message from ${sender}:`, err.stack || err.message);
+    const reply = err instanceof AgentUnreachableError
+      ? "⚠️ Can't connect to FamilyBrain right now — it may be restarting. Try again shortly."
+      : '⚠️ Something went wrong. Try again shortly.';
+    try {
+      await replyTracked(msg, reply);
+    } catch (replyErr) {
+      // The chat itself may be unreachable (e.g. mid-reconnect) — log it
+      // rather than letting a failed error-reply throw past this handler
+      // and get silently swallowed by whatsapp-web.js's own event emitter.
+      console.error(`[whatsapp] Also failed to send error reply to ${sender}:`, replyErr.message);
+    }
   }
 });
 

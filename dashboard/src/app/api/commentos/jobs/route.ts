@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { q } from '@/lib/commentos/db';
-import { triageComment, extractSignals, clusterSignals, scoreSeeds, upsertPeople, computeIQ } from '@/lib/commentos/pipeline';
+import { triageComment, extractSignals, clusterSignals, scoreSeeds, upsertPeople, computeIQ, peopleGraph, computeImpact } from '@/lib/commentos/pipeline';
 
 // POST {steps?: string[], limit?: number} — run the pipeline (triage → extract →
 // cluster → score → people → iq). Called from the UI and by the nightly cron.
 export async function POST(req: NextRequest) {
   const b = await req.json().catch(() => ({}));
-  const steps: string[] = b.steps || ['triage', 'extract', 'cluster', 'score', 'people', 'iq'];
+  const steps: string[] = b.steps || ['triage', 'extract', 'cluster', 'score', 'impact', 'people', 'iq'];
   const limit = b.limit || 10;
   const report: Record<string, any> = {};
 
@@ -31,7 +31,15 @@ export async function POST(req: NextRequest) {
     catch (e: any) { report.cluster = { error: e.message }; }
   }
   if (steps.includes('score')) { await scoreSeeds(); report.score = 'ok'; }
-  if (steps.includes('people')) { await upsertPeople(); report.people = 'ok'; }
+  if (steps.includes('impact')) {
+    try { await computeImpact(); report.impact = 'ok'; }
+    catch (e: any) { report.impact = `error: ${e.message}`; }
+  }
+  if (steps.includes('people')) {
+    await upsertPeople();
+    try { await peopleGraph(); report.people = 'ok+graph'; }
+    catch (e: any) { report.people = `graph error: ${e.message}`; }
+  }
   if (steps.includes('iq')) { report.iq = await computeIQ(); }
 
   return NextResponse.json(report);

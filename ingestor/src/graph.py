@@ -204,7 +204,9 @@ def _merge_edge(graph: str, match_a: str, match_b: str, edge: str, confidence: i
     sql = (f"SELECT * FROM cypher('{graph}', $$"
            f" {match_a} {match_b}"
            f" MERGE (a)-[r:{edge}]->(b)"
-           f" ON CREATE SET r.confidence = {conf}"
+           # AGE has no ON CREATE SET — coalesce keeps any existing confidence
+           # (incl. suppression zeros) and stamps the default only on new edges
+           f" SET r.confidence = coalesce(r.confidence, {conf})"
            f" RETURN count(*)"
            f"$$) AS (r agtype)")
     conn = _conn()
@@ -220,9 +222,10 @@ def _merge_edge(graph: str, match_a: str, match_b: str, edge: str, confidence: i
 
 
 def _merge_edge_with_confidence(graph: str, edge_type: str) -> str:
-    """Return the ON CREATE SET fragment for an inline MERGE Cypher string."""
+    """Confidence fragment for an inline MERGE Cypher string. AGE has no
+    ON CREATE SET — coalesce preserves existing confidence (incl. zeros)."""
     conf = DEFAULT_EDGE_CONFIDENCE.get(edge_type, _DEFAULT_EDGE_CONFIDENCE_FALLBACK)
-    return f"ON CREATE SET r.confidence = {conf}"
+    return f"SET r.confidence = coalesce(r.confidence, {conf})"
 
 
 # ── Node facts + hydration handle ────────────────────────────────────────────
@@ -240,13 +243,23 @@ def set_node_facts(
     facts: dict,
     factsrc: dict,
     ref: str | None = None,
+    epistemic: str = "known",
 ) -> None:
     """SET fact_* and factsrc_* properties on an existing node matched by `match`.
     Keys in `facts` are automatically prefixed with fact_ if not already.
     `factsrc` must have one entry per fact (list of source refs, e.g.
     ["gmail:1852ab...", "personal.asset:2"]) — every fact_* written must be
     traceable back to the edges/nodes that support it, or suppression can't
-    re-derive it later. Idempotent — safe to call on re-ingest.
+    re-derive it later.
+
+    Conflict discipline (Interrogation Layer 1.2): if a fact_{key} already has a
+    different non-null value, it is NEVER overwritten — the existing value stays,
+    the new value + both sources are recorded in personal.fact_conflict, and
+    epistemic_{key} is set to 'conflict' instead of `epistemic`. Per-fact, not a
+    single node-level marker — this fact model is already per-key (fact_{k}/
+    factsrc_{k} pairs), so a node-level conflict flag would falsely mark every
+    other unrelated fact on the node as unreliable too. Otherwise idempotent —
+    safe to call on re-ingest, same as before.
     """
     missing = [k for k in facts if k.replace("fact_", "", 1) not in factsrc
                and k not in factsrc]
@@ -256,29 +269,76 @@ def set_node_facts(
             f"(label={label}, match={match})"
         )
 
+    match_pred = build_props(match)
+    node_ref = ref or f"{label}:{match_pred}"
+
+    existing_props: dict = {}
+    try:
+        rows = _cypher_fetch(graph, f"MATCH (n:{label} {{{match_pred}}}) RETURN n", "n")
+        if rows:
+            vertex = _parse_vertex(rows[0]["n"])
+            if vertex:
+                existing_props = vertex.get("properties", {})
+    except Exception as e:
+        print(f"[graph] set_node_facts existing-value read failed ({label} {match}): {e}")
+
     sets: dict = {}
+    conflicts: list[dict] = []
     for k, v in facts.items():
         bare = k.replace("fact_", "", 1) if k.startswith("fact_") else k
-        sets[f"fact_{bare}"] = v
         src = factsrc.get(bare, factsrc.get(k, []))
+        existing_val = existing_props.get(f"fact_{bare}")
+        if existing_val is not None and str(existing_val) != str(v):
+            conflicts.append({
+                "fact_key": bare,
+                "existing_value": existing_val,
+                "existing_source": existing_props.get(f"factsrc_{bare}"),
+                "new_value": v,
+                "new_source": list(src) if src else [],
+            })
+            sets[f"epistemic_{bare}"] = "conflict"
+            continue
+        sets[f"fact_{bare}"] = v
         sets[f"factsrc_{bare}"] = list(src) if src else []
+        sets[f"epistemic_{bare}"] = epistemic
     if ref:
         sets["ref"] = ref
     sets["facts_updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     set_clause = _build_set("n", sets)
-    if not set_clause:
-        return
+    if set_clause:
+        try:
+            _cypher1(graph,
+                f"MATCH (n:{label} {{{match_pred}}}) "
+                f"SET {set_clause} "
+                f"RETURN n"
+            )
+        except Exception as e:
+            print(f"[graph] set_node_facts error ({label} {match}): {e}")
 
-    match_pred = build_props(match)
-    try:
-        _cypher1(graph,
-            f"MATCH (n:{label} {{{match_pred}}}) "
-            f"SET {set_clause} "
-            f"RETURN n"
-        )
-    except Exception as e:
-        print(f"[graph] set_node_facts error ({label} {match}): {e}")
+    if conflicts:
+        try:
+            conn = psycopg2.connect(DB_URL)
+            with conn.cursor() as cur:
+                for c in conflicts:
+                    cur.execute(
+                        "INSERT INTO personal.fact_conflict "
+                        "(node_ref, fact_key, existing_value, existing_source, new_value, new_source) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        # existing_source comes back from the graph property already
+                        # JSON-encoded (AGE stores list properties as JSON strings via
+                        # _cypher_val) — store as-is. new_source is a plain Python list
+                        # at this point (not yet stringified), so it still needs one
+                        # json.dumps() pass. Encoding both the same way here would
+                        # double-encode whichever one was already a string.
+                        (node_ref, c["fact_key"], str(c["existing_value"]),
+                         c["existing_source"] or None,
+                         str(c["new_value"]), json.dumps(c["new_source"]) if c["new_source"] else None),
+                    )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[graph] fact_conflict insert failed ({label} {match}): {e}")
 
 
 def delete_node_fact(graph: str, label: str, match: dict, fact_name: str) -> None:

@@ -1096,29 +1096,94 @@ def task_rederive_facts() -> dict:
 # Asset summary enrichment
 # ---------------------------------------------------------------------------
 
-def _set_node_facts_wa(graph_conn, graph: str, ref: str, facts: dict, factsrc: dict) -> None:
+def _strip_agtype_suffix(s: str) -> str:
+    return re.sub(r"::(vertex|edge|path|agtype)$", "", s.strip())
+
+
+def _parse_vertex_wa(raw) -> dict | None:
+    """wa-agent's copy of ingestor's graph.py _parse_vertex — parses a raw agtype
+    vertex value returned from a RETURN n query."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(_strip_agtype_suffix(str(raw)))
+    except Exception:
+        return None
+
+
+def _set_node_facts_wa(graph_conn, graph: str, ref: str, facts: dict, factsrc: dict,
+                       epistemic: str = "known") -> None:
     """
     wa-agent's own copy of ingestor's set_node_facts() — separate containers
     can't share a Python module, so the idempotent fact_*/factsrc_* SET pattern
     (and the provenance requirement) is duplicated here rather than imported.
     Raises if any fact has no corresponding factsrc entry.
+
+    Conflict discipline (Interrogation Layer 1.2), duplicated from ingestor's
+    set_node_facts — see that function's docstring for the full rationale. Per-
+    fact, not per-node: a disagreeing fact_{k} is never overwritten, the new
+    value + both sources go to personal.fact_conflict, and epistemic_{k} is set
+    to 'conflict' instead of `epistemic`. Runs on the caller's shared
+    `graph_conn` (task_asset_summary commits once at the end of its loop, not
+    per-asset), unlike ingestor's version which opens/commits its own
+    connection — matches this function's existing calling convention.
     """
     missing = [k for k in facts if k not in factsrc]
     if missing:
         raise ValueError(f"_set_node_facts_wa called without factsrc for: {missing} (ref={ref})")
 
+    existing_props: dict = {}
+    try:
+        rows = _cypher(graph_conn, graph, f"MATCH (n {{ref: '{ref}'}}) RETURN n")
+        if rows:
+            vertex = _parse_vertex_wa(rows[0].get("r"))
+            if vertex:
+                existing_props = vertex.get("properties", {})
+    except Exception as e:
+        print(f"[maintenance] _set_node_facts_wa existing-value read failed (ref={ref}): {e}")
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sets = [f"n.facts_updated_at = '{now}'"]
+    conflicts: list[dict] = []
     for k, v in facts.items():
+        existing_val = existing_props.get(f"fact_{k}")
+        if existing_val is not None and str(existing_val) != str(v):
+            conflicts.append({
+                "fact_key": k,
+                "existing_value": existing_val,
+                "existing_source": existing_props.get(f"factsrc_{k}"),
+                "new_value": v,
+                "new_source": factsrc.get(k, []),
+            })
+            sets.append(f"n.epistemic_{k} = 'conflict'")
+            continue
         val = str(v).replace("'", "\\'")
         sets.append(f"n.fact_{k} = '{val}'")
         src_json = json.dumps(factsrc.get(k, [])).replace("'", "\\'")
         sets.append(f"n.factsrc_{k} = '{src_json}'")
+        sets.append(f"n.epistemic_{k} = '{epistemic}'")
 
     _cypher(
         graph_conn, graph,
         f"MATCH (n {{ref: '{ref}'}}) SET {', '.join(sets)} RETURN n",
     )
+
+    if conflicts:
+        try:
+            with graph_conn.cursor() as cur:
+                for c in conflicts:
+                    cur.execute(
+                        "INSERT INTO personal.fact_conflict "
+                        "(node_ref, fact_key, existing_value, existing_source, new_value, new_source) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (ref, c["fact_key"], str(c["existing_value"]),
+                         c["existing_source"] or None,
+                         str(c["new_value"]), json.dumps(c["new_source"]) if c["new_source"] else None),
+                    )
+        except Exception as e:
+            print(f"[maintenance] fact_conflict insert failed (ref={ref}): {e}")
 
 
 def task_asset_summary() -> dict:

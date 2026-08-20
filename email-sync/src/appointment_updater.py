@@ -874,8 +874,20 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                        updated_at, status, suspended_reason, source_email_id, calendar_event_id
                 FROM personal.event
                 WHERE (
-                    gcal_event_id IS NULL
-                    OR updated_at > calendar_written_at
+                    -- Obligations must NEVER take the bare "gcal_event_id IS NULL /
+                    -- updated_at > calendar_written_at" immediate-push path — that
+                    -- would push a dated obligation to calendar on the very next
+                    -- poll cycle regardless of its lead time, and would push a
+                    -- dateless one (starts_at IS NULL, deriving its deadline only
+                    -- from a REQUIRED_FOR parent at query time) with no real date
+                    -- to show at all. Obligations are only ever eligible via the
+                    -- explicit next_update_at scheduled by wa-agent's channel-
+                    -- routing (see wa-agent/src/obligations.py's emit_obligation,
+                    -- wa-agent/src/channel_resolver.py) — which is only ever set
+                    -- for obligations that were given an explicit due date in the
+                    -- first place, so a dateless obligation's next_update_at stays
+                    -- NULL forever and this branch never fires for it either.
+                    (event_type <> 'obligation' AND (gcal_event_id IS NULL OR updated_at > calendar_written_at))
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
                 AND status NOT IN ('cancelled', 'superseded', 'ingested')
@@ -889,7 +901,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 -- below, which patches Google's existing entry in place rather than
                 -- inserting a new one.
                 AND (calendar_source NOT LIKE 'gmail:%%' OR source_email_id IS NOT NULL)
-                AND starts_at >= now() - INTERVAL '1 hour'  -- skip past events
+                AND starts_at >= now() - INTERVAL '1 hour'  -- skip past events; NULL (dateless obligations) excluded automatically
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
                 """,

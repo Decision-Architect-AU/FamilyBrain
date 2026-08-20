@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const b = await req.json();
   const [cm] = await q(`
-    SELECT cm.*, cap.post_title, cap.post_body FROM decision_os.co_comment cm
+    SELECT cm.*, cap.post_title, cap.post_body, cap.platform FROM decision_os.co_comment cm
     JOIN decision_os.co_capture cap ON cap.id=cm.capture_id WHERE cm.id=$1`, [b.comment_id]);
   if (!cm) return NextResponse.json({ error: 'comment not found' }, { status: 404 });
 
@@ -51,7 +51,18 @@ export async function POST(req: NextRequest) {
   const signals = await q(`
     SELECT s.id, s.signal_type, s.canonical_text FROM decision_os.co_signal s
     JOIN decision_os.co_signal_source ss ON ss.signal_id=s.id WHERE ss.comment_id=$1`, [b.comment_id]);
-  const grounding = { concepts, signals };
+  const grounding: any = { concepts, signals };
+
+  // Layer 1: try the typed ED path — an argument beats a concept list.
+  let edPath: any = null;
+  if (brand !== 'decision-architect') {
+    try {
+      const pr = await fetch('http://localhost:3000/api/commentos/edpath', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: cm.body }) }).then((x) => x.json());
+      if (pr.claim) { edPath = pr; grounding.ed_path = pr; }
+    } catch { /* path layer optional */ }
+  }
 
   let campaign: any = null;
   if (b.campaign_id) {
@@ -86,13 +97,20 @@ A LinkedIn user named "${author}" wrote the latest comment${cm.is_reply ? " (it 
 You are writing GLENN'S reply TO ${author}. Address them directly as "you" — never use their name or refer to them in the third person, and never address, thank, or refer to Glenn (Glenn is the writer). Do not open with thanks or praise ("Thank you for...", "Great point...") — go straight to substance. NEVER open by naming a framework or chart ("Given the Effective Decision framework...", "The maturity-trust chart shows...") — the concepts ground your thinking, but the reply speaks plainly, like a sharp practitioner talking, and only names a framework if it genuinely earns a mention mid-thought.
 ${campaign ? `Campaign tone (${campaign.name}): ${campaign.tone}` : ''}
 Strategy: ${strategy}
-Ground ONLY in these ED concepts (do not invent framework claims):
-${conceptLines}
+${edPath ? `THE ARGUMENT (a confirmed ED reasoning path — render THIS, in order, adding nothing to it):
+1. What they described: "${edPath.path.symptom}"
+2. What that usually is: ${edPath.path.failure_mode.name} — ${edPath.path.failure_mode.description}
+3. Why it persists / what ED does about it: ${edPath.path.concept.name} — ${edPath.path.concept.definition}
+${campaign?.id === 'seed' && edPath.path.evidence ? `4. Where this comes from (soft mention): ${edPath.path.evidence.title}` : ''}
+Do NOT state the outcome measure — that is deliberately withheld in comments.
+Supporting concepts (context only): ${conceptLines.split('
+').slice(0,2).join('; ')}` : `Ground ONLY in these ED concepts (do not invent framework claims):
+${conceptLines}`}
 ${b.steering ? `
 MOST IMPORTANT — GLENN'S OWN ANGLE. The reply's central point must be this idea, expressed naturally in the reply's own words as part of the conversation. It is an instruction TO you, not text for the reply — never quote, repeat, or paraphrase the instruction itself:
 "${b.steering}"
 ` : ''}
-Reply ONLY JSON: {"text": "the reply, 1-4 sentences, under 700 chars, no hashtags"}`, 350);
+Reply ONLY JSON: {"text": "the reply, ${cm.platform === 'x' ? '1-2 sentences, STRICTLY under 260 characters' : '1-4 sentences, under 700 chars'}, no hashtags"}`, 350);
       const text = extractJson(raw).text;
       if (!text) continue;
       const [row] = await q(`

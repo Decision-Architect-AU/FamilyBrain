@@ -130,6 +130,122 @@ export async function upsertPeople(): Promise<void> {
     ON CONFLICT (platform, handle) DO UPDATE SET last_seen = EXCLUDED.last_seen, name = coalesce(EXCLUDED.name, co_person.name)`);
 }
 
+// ── People 2.0: sync handles, warmth, stages, merge suggestions ──────────────
+export async function peopleGraph(): Promise<void> {
+  // new handles since last run → singleton identities
+  await q(`
+    INSERT INTO decision_os.co_handle (platform, handle, display_name, comments_captured)
+    SELECT cap.platform, coalesce(cm.author_handle, cm.author_name), max(cm.author_name), count(*)
+    FROM decision_os.co_comment cm JOIN decision_os.co_capture cap ON cap.id=cm.capture_id
+    WHERE coalesce(cm.author_handle, cm.author_name) IS NOT NULL AND NOT cm.is_own
+    GROUP BY 1,2
+    ON CONFLICT (platform, handle) DO UPDATE SET comments_captured=EXCLUDED.comments_captured`);
+  const unlinked = await q(`SELECT id, coalesce(display_name, handle) AS name FROM decision_os.co_handle WHERE identity_id IS NULL`);
+  for (const h of unlinked) {
+    const [ident] = await q(`INSERT INTO decision_os.co_identity (display_name, first_seen_at, last_seen_at)
+      VALUES ($1, now(), now()) RETURNING id`, [h.name]);
+    await q(`UPDATE decision_os.co_handle SET identity_id=$1 WHERE id=$2`, [ident.id, h.id]);
+  }
+  // interactions with Glenn: replies-to-own OR own-reply-after-them in same capture
+  await q(`
+    UPDATE decision_os.co_identity i SET
+      interactions_with_glenn = sub.n,
+      last_seen_at = sub.last_seen,
+      relationship_stage = CASE
+        WHEN i.relationship_stage = 'known' THEN 'known'
+        WHEN sub.n >= 3 THEN 'recurring'
+        WHEN sub.n >= 1 THEN 'engaged'
+        ELSE i.relationship_stage END
+    FROM (
+      SELECT h.identity_id, count(DISTINCT cm.id) FILTER (WHERE cm.is_reply OR EXISTS (
+               SELECT 1 FROM decision_os.co_comment own
+               WHERE own.capture_id=cm.capture_id AND own.is_own)) AS n,
+             max(cm.created_at) AS last_seen
+      FROM decision_os.co_comment cm
+      JOIN decision_os.co_capture cap ON cap.id=cm.capture_id
+      JOIN decision_os.co_handle h ON h.platform=cap.platform
+        AND h.handle=coalesce(cm.author_handle, cm.author_name)
+      GROUP BY h.identity_id) sub
+    WHERE sub.identity_id = i.id`);
+  // warmth: reciprocity 0.4, signal quality 0.25, recency 0.2, consistency 0.15
+  await q(`
+    UPDATE decision_os.co_identity i SET warmth = round((
+      0.4 * LEAST(1.0, i.interactions_with_glenn / 3.0) +
+      0.25 * coalesce(sub.sig_quality, 0) / 5.0 +
+      0.2 * GREATEST(0, 1.0 - EXTRACT(epoch FROM now() - coalesce(i.last_seen_at, now())) / (90*86400.0)) +
+      0.15 * LEAST(1.0, coalesce(sub.months_active, 0) / 4.0)
+    )::numeric, 3)
+    FROM (
+      SELECT h.identity_id,
+             avg(s.significance) AS sig_quality,
+             count(DISTINCT date_trunc('month', cm.created_at)) AS months_active
+      FROM decision_os.co_handle h
+      JOIN decision_os.co_capture cap ON cap.platform=h.platform
+      JOIN decision_os.co_comment cm ON cm.capture_id=cap.id
+        AND coalesce(cm.author_handle, cm.author_name)=h.handle
+      LEFT JOIN decision_os.co_signal_source ss ON ss.comment_id=cm.id
+      LEFT JOIN decision_os.co_signal s ON s.id=ss.signal_id
+      GROUP BY h.identity_id) sub
+    WHERE sub.identity_id = i.id`);
+  // merge suggestions: cross-platform name similarity (never auto-merge)
+  await q(`
+    INSERT INTO decision_os.co_identity_merge_suggestion (handle_a, handle_b, confidence, evidence)
+    SELECT a.id, b.id,
+           round(ag_catalog.similarity(lower(coalesce(a.display_name,a.handle)), lower(coalesce(b.display_name,b.handle)))::numeric, 2),
+           jsonb_build_object('name_similarity', round(ag_catalog.similarity(lower(coalesce(a.display_name,a.handle)), lower(coalesce(b.display_name,b.handle)))::numeric,2))
+    FROM decision_os.co_handle a
+    JOIN decision_os.co_handle b ON a.id < b.id AND a.platform != b.platform
+      AND a.identity_id != b.identity_id
+      AND ag_catalog.similarity(lower(coalesce(a.display_name,a.handle)), lower(coalesce(b.display_name,b.handle))) >= 0.55
+    ON CONFLICT (handle_a, handle_b) DO NOTHING`);
+}
+
+// ── Impact: rank threads/comments by reach × engagement × signal quality ─────
+// impact = 40%·reach (log-scaled followers|views) + 30%·engagement (log-scaled
+// likes+2×replies+3×reposts) + 30%·signal quality (best significance found).
+// Transparent 0–10 scale; shown with its parts in the UI.
+export async function computeImpact(): Promise<void> {
+  await q(`
+    UPDATE decision_os.co_capture c SET impact = round((
+      0.4 * LEAST(10, log(10, GREATEST(2,
+          coalesce((c.engagement->>'followers')::numeric, 0) +
+          coalesce((c.engagement->>'views')::numeric, 0))) * 1.66) +
+      0.3 * LEAST(10, log(10, GREATEST(2,
+          coalesce((c.engagement->>'likes')::numeric, 0) +
+          2 * coalesce((c.engagement->>'replies')::numeric, coalesce((c.engagement->>'comments')::numeric, 0)) +
+          3 * coalesce((c.engagement->>'reposts')::numeric, 0))) * 2.5) +
+      0.3 * coalesce(sub.best_sig, 0) * 2
+    )::numeric, 2)
+    FROM (
+      SELECT cm.capture_id, max(s.significance) AS best_sig
+      FROM decision_os.co_comment cm
+      LEFT JOIN decision_os.co_signal_source ss ON ss.comment_id = cm.id
+      LEFT JOIN decision_os.co_signal s ON s.id = ss.signal_id AND NOT s.archived
+      GROUP BY cm.capture_id
+    ) sub WHERE sub.capture_id = c.id OR (sub.capture_id IS NULL AND false)`);
+  // captures with no comments at all still get reach+engagement components
+  await q(`
+    UPDATE decision_os.co_capture c SET impact = round((
+      0.4 * LEAST(10, log(10, GREATEST(2,
+          coalesce((c.engagement->>'followers')::numeric, 0) +
+          coalesce((c.engagement->>'views')::numeric, 0))) * 1.66) +
+      0.3 * LEAST(10, log(10, GREATEST(2,
+          coalesce((c.engagement->>'likes')::numeric, 0) +
+          2 * coalesce((c.engagement->>'replies')::numeric, coalesce((c.engagement->>'comments')::numeric, 0)) +
+          3 * coalesce((c.engagement->>'reposts')::numeric, 0))) * 2.5)
+    )::numeric, 2)
+    WHERE NOT EXISTS (SELECT 1 FROM decision_os.co_comment cm WHERE cm.capture_id = c.id)`);
+  // comment impact inherits its thread's reach, weighted by its own signals
+  await q(`
+    UPDATE decision_os.co_comment cm SET impact = round((
+      0.5 * c.impact + 0.5 * coalesce((
+        SELECT max(s.significance) FROM decision_os.co_signal_source ss
+        JOIN decision_os.co_signal s ON s.id = ss.signal_id AND NOT s.archived
+        WHERE ss.comment_id = cm.id), 0) * 2
+    )::numeric, 2)
+    FROM decision_os.co_capture c WHERE c.id = cm.capture_id`);
+}
+
 // ── IQ: composite score ──────────────────────────────────────────────────────
 export async function computeIQ(): Promise<{ score: number; breakdown: any }> {
   const [w] = await q(`SELECT value FROM decision_os.co_setting WHERE key='iq_weights'`);

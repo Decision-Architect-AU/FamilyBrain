@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from src.routers import graph, ingest, quality, templates, schemas
+from src.routers import graph, ingest, quality, templates, schemas, interrogate
 
 app = FastAPI(title="Family Brain Graph API", version="1.0.0")
 
@@ -20,6 +20,7 @@ app.include_router(ingest.router)
 app.include_router(quality.router)
 app.include_router(templates.router)
 app.include_router(schemas.router)
+app.include_router(interrogate.router)
 
 
 @app.get("/health")

@@ -91,6 +91,9 @@ export default function Home() {
           <Link href="/family-brain" className="text-xs text-purple-400 hover:text-purple-300 transition-colors">
             Family Brain →
           </Link>
+          <Link href="/commentos" className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors font-medium">
+            CommentOS →
+          </Link>
           <a
             href="http://localhost:8888"
             target="_blank"

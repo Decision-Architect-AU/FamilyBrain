@@ -5,7 +5,11 @@ import { fetcher, SignalTypeBadge, timeAgo } from '@/components/commentos/ui';
 
 const BRIDGE = 'http://localhost:8765';
 
-function ReplyPane({ comment, postUrl, onClose }: { comment: any; postUrl: string; onClose: () => void }) {
+function ReplyPane({ comment, postUrl, brand, platform, onClose }: { comment: any; postUrl: string; brand?: string; platform?: string; onClose: () => void }) {
+  const isX = platform === 'x';
+  // X has no page-identity switcher; DA identity applies to LinkedIn only
+  const identity = !isX && brand === 'decision-architect' ? 'Decision Architect' : undefined;
+  const limit = isX ? 280 : 700;
   const [angle, setAngle] = useState('');
   const [campaign, setCampaign] = useState('rapport');
   const { data: campaigns } = useSWR('/api/commentos/campaigns', fetcher);
@@ -38,7 +42,7 @@ function ReplyPane({ comment, postUrl, onClose }: { comment: any; postUrl: strin
     try {
       const r = await fetch(`${BRIDGE}/post-direct`, { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: postUrl, text }) }).then((x) => x.json());
+        body: JSON.stringify({ url: postUrl, text, identity }) }).then((x) => x.json());
       if (r.error) { setMsg('✗ ' + r.error); setPosting(false); return; }
       fetch(`${BRIDGE}/like-comment`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: postUrl, snippet: comment.body?.slice(0, 60) }) }).catch(() => {});
@@ -74,9 +78,11 @@ function ReplyPane({ comment, postUrl, onClose }: { comment: any; postUrl: strin
         <>
           <textarea value={text} onChange={(e) => setText(e.target.value)}
             className="w-full bg-gray-950 border border-gray-700 rounded p-2 text-sm min-h-[140px]" />
-          <button onClick={postReply} disabled={posting}
+          <div className={`text-xs text-right ${text.length > limit ? 'text-red-400 font-bold' : 'text-gray-600'}`}>
+            {text.length}/{limit}{isX && text.length > limit ? ' — too long for X' : ''}</div>
+          <button onClick={postReply} disabled={posting || (isX && text.length > limit)}
             className="w-full mt-2 py-2 bg-green-700 hover:bg-green-600 rounded text-sm font-medium disabled:opacity-50">
-            {posting ? 'Posting…' : 'Post reply (likes their comment too)'}
+            {posting ? 'Posting…' : isX ? 'Post reply on 𝕏 (likes it too)' : `Post as ${identity || 'you'} (likes their comment too)`}
           </button>
           <div className="grid grid-cols-3 gap-2 mt-2">
             <button onClick={copy} className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs">Copy</button>
@@ -85,7 +91,14 @@ function ReplyPane({ comment, postUrl, onClose }: { comment: any; postUrl: strin
             <button onClick={manualPosted} title="Only if you pasted it yourself"
               className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs">I posted it manually</button>
           </div>
-          {(draft.grounding?.concepts || []).length > 0 && (
+          {draft.grounding?.ed_path ? (
+            <div className="mt-3 text-xs">
+              <span className={draft.grounding.ed_path.band === 'unconfirmed' ? 'text-amber-400' : 'text-green-400'}>
+                {draft.grounding.ed_path.band === 'unconfirmed' ? '⚠ unconfirmed grounding' : '✓ ED path'}
+              </span>
+              <span className="text-gray-500"> · {draft.grounding.ed_path.path.failure_mode.name} → {draft.grounding.ed_path.path.concept.name}</span>
+            </div>
+          ) : (draft.grounding?.concepts || []).length > 0 && (
             <div className="mt-3 text-xs text-gray-500">
               grounded in: {(draft.grounding.concepts.slice(0, 3)).map((c: any) => c.name).join(' · ')}
             </div>
@@ -93,6 +106,48 @@ function ReplyPane({ comment, postUrl, onClose }: { comment: any; postUrl: strin
         </>
       )}
       {msg && <p className="text-xs text-cyan-300 mt-2">{msg}</p>}
+    </div>
+  );
+}
+
+function ImpactChip({ n }: { n: number }) {
+  if (!n) return null;
+  const hot = n >= 6, warm = n >= 3.5;
+  return <span title={`impact ${n}/10 — reach × engagement × signal quality`}
+    className={`px-1.5 py-0.5 rounded font-bold text-xs ${hot ? 'bg-red-500/25 text-red-300' : warm ? 'bg-amber-500/20 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>
+    {Number(n).toFixed(1)}</span>;
+}
+
+function reachLabel(e: any): string {
+  if (!e) return '';
+  const parts = [];
+  if (e.followers) parts.push(`${e.followers >= 1000 ? (e.followers/1000).toFixed(0)+'k' : e.followers} followers`);
+  if (e.views) parts.push(`${e.views >= 1000 ? (e.views/1000).toFixed(0)+'k' : e.views} views`);
+  if (e.likes) parts.push(`${e.likes} likes`);
+  return parts.slice(0, 2).join(' · ');
+}
+
+function FocusStrip({ onOpen }: { onOpen: (captureId: number, comment: any) => void }) {
+  const { data } = useSWR('/api/commentos/captures?view=focus', fetcher, { refreshInterval: 30000 });
+  if (!data?.length) return null;
+  return (
+    <div className="mb-4">
+      <div className="text-xs text-gray-500 uppercase mb-2">🎯 Highest-impact opportunities — answer these first</div>
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {data.map((f: any) => (
+          <button key={f.comment_id} onClick={() => onOpen(f.capture_id, { id: f.comment_id, body: f.body, author_name: f.author_name })}
+            className="min-w-[240px] max-w-[280px] text-left border border-gray-700 rounded-lg p-2.5 bg-gray-900/70 hover:border-cyan-500">
+            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+              <ImpactChip n={f.impact} />
+              {f.is_reply && <span className="text-amber-400">↩ reply</span>}
+              <span className="truncate">{f.author_name || f.post_author}</span>
+              <span className="ml-auto">{f.platform === 'x' ? '𝕏' : 'in'}</span>
+            </div>
+            <p className="text-xs text-gray-300 line-clamp-2">{f.body?.slice(0, 110)}</p>
+            <div className="text-[10px] text-gray-600 mt-1">{reachLabel(f.engagement)}</div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -117,7 +172,8 @@ export default function RadarPage() {
       fetch('/api/commentos/comments', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'mark-liked', id: c.id }) });
       fetch(`${BRIDGE}/like-comment`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: detail.post_url, snippet: c.body?.slice(0, 60) }) }).catch(() => {});
+        body: JSON.stringify({ url: detail.post_url, snippet: c.body?.slice(0, 60),
+          identity: detail.brand === 'decision-architect' ? 'Decision Architect' : undefined }) }).catch(() => {});
     }
   }, [detail]);
 
@@ -135,8 +191,14 @@ export default function RadarPage() {
   const shown = captures.filter((c: any) => !channel || c.platform === channel);
   const platforms = ['linkedin', 'x', 'facebook', 'blog'];
 
+  const openFocus = (captureId: number, comment: any) => {
+    setSel(captureId);
+    setTimeout(() => setReplyTo(comment), 400);
+  };
+
   return (
     <div>
+      <FocusStrip onOpen={openFocus} />
       <div className="flex gap-2 mb-3">
         <button onClick={() => setChannel(null)}
           className={`px-3 py-1 rounded-full text-xs border ${!channel ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>All channels</button>
@@ -153,7 +215,8 @@ export default function RadarPage() {
           <button key={c.id} onClick={() => setSel(c.id)}
             className={`w-full text-left p-3 rounded-lg border ${sel === c.id ? 'border-cyan-500 bg-gray-900' : 'border-gray-800 bg-gray-900/50 hover:border-gray-600'}`}>
             <div className="flex justify-between items-center text-xs text-gray-500 mb-1">
-              <span>{c.brand === 'decision-architect' ? 'DA' : 'personal'} · {c.platform === 'x' ? '𝕏' : c.platform}</span>
+              <span>{c.brand === 'decision-architect' ? 'DA' : 'personal'} · {c.platform === 'x' ? '𝕏' : c.platform}
+                {c.run_id && <span className="text-amber-400" title={`from scrape run #${c.run_id}`}> ⚡run</span>}</span>
               <span className="flex items-center gap-2">{timeAgo(c.captured_at)}
                 <span role="button" title="Delete thread" onClick={async (e) => {
                   e.stopPropagation();
@@ -165,7 +228,11 @@ export default function RadarPage() {
                 }} className="text-gray-600 hover:text-red-400 px-1">✕</span></span>
             </div>
             <div className="text-sm font-medium truncate">{c.post_author || 'Unknown'} — {c.post_title || (c.post_body || '').slice(0, 60)}</div>
-            <div className="text-xs text-gray-500 mt-1">{c.n_comments} comments · {c.n_signals} signals</div>
+            <div className="text-xs text-gray-500 mt-1 flex items-center gap-2">
+              <ImpactChip n={c.impact} />
+              <span>{c.n_comments} comments · {c.n_signals} signals</span>
+            </div>
+            {reachLabel(c.engagement) && <div className="text-[10px] text-gray-600 mt-0.5">{reachLabel(c.engagement)}</div>}
           </button>
         ))}
       </div>
@@ -177,9 +244,14 @@ export default function RadarPage() {
             <div className="border border-gray-800 rounded-lg p-4 mb-4 bg-gray-900/60">
               <div className="flex justify-between">
                 <div className="font-bold">{detail.post_author}</div>
-                {detail.post_url && <a href={detail.post_url} target="_blank" rel="noopener" className="text-cyan-400 text-sm">Open thread ↗</a>}
+                <span className="flex items-center gap-2 text-xs text-gray-500">
+                  <ImpactChip n={detail.impact} />
+                  <span>{reachLabel(detail.engagement)}</span>
+                  {detail.post_url && <a href={detail.post_url} target="_blank" rel="noopener" className="text-cyan-400 text-sm">Open thread ↗</a>}
+                </span>
               </div>
-              <div className="text-sm text-gray-300 mt-1 whitespace-pre-wrap">{detail.post_title || detail.post_body}</div>
+              <div className="text-sm text-gray-300 mt-1 whitespace-pre-wrap max-h-72 overflow-y-auto pr-2">
+                {detail.post_body || detail.post_title}</div>
             </div>
             <div className="space-y-2">
               {comments.map((cm: any) => (
@@ -224,7 +296,7 @@ export default function RadarPage() {
       {/* reply pane */}
       {replyTo && detail && (
         <div className="max-h-[calc(100vh-120px)] overflow-y-auto">
-          <ReplyPane comment={replyTo} postUrl={detail.post_url} onClose={() => setReplyTo(null)} />
+          <ReplyPane comment={replyTo} postUrl={detail.post_url} brand={detail.brand} platform={detail.platform} onClose={() => setReplyTo(null)} />
         </div>
       )}
     </div>

@@ -66,7 +66,10 @@ export function CaptureHealthDot() {
 }
 
 export const NAV = [
+  ['/commentos/playbook', 'Playbook'],
   ['/commentos/radar', 'Radar'],
+  ['/commentos/market', 'Market'],
+  ['/commentos/channels', 'Channels'],
   ['/commentos/signals', 'Signals'],
   ['/commentos/seeds', 'Seeds'],
   ['/commentos/studio', 'Studio'],
