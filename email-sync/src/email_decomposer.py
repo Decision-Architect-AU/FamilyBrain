@@ -40,6 +40,7 @@ DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 INGESTOR_URL = os.environ.get("INGESTOR_URL", "")
+GRAPH_API_URL = os.environ.get("GRAPH_API_URL", "http://graph-api:4003")
 
 _BATCH = 20   # emails per run
 
@@ -48,6 +49,106 @@ def _extract_meeting_url(body: str) -> str | None:
     """Pull the first meeting join URL from the raw body before any truncation."""
     m = _MEETING_URL_RE.search(body)
     return m.group(0).rstrip(")>\"'.,") if m else None
+
+
+_FORWARD_MARKER_RE = re.compile(
+    r'-{2,}\s*forwarded message\s*-{2,}|'
+    r'-{2,}\s*original message\s*-{2,}|'
+    r'^begin forwarded message:|'
+    r'^on .+ wrote:',
+    re.I | re.M,
+)
+_ANNOTATION_DATE_RE = re.compile(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b')
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+     'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])}
+# "28 October 2026" / "28th Oct" / "October 28, 2026" — year optional
+_ANNOTATION_WORD_DATE_RE = re.compile(
+    r'\b(?:(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,9})|([a-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?)'
+    r',?\s*(\d{4})?\b', re.I)
+
+
+def _annotation_with_date(body: str, received_iso: str | None = None) -> tuple[str, str] | None:
+    """
+    Return (annotation_text, iso_date) if the text above a forwarded/quoted
+    marker (or the first ~200 chars, if there's no marker) contains a date —
+    DD/MM/YYYY-style or written out ("28 October 2026"). A written date with
+    no year resolves to its next occurrence on/after the email's received
+    date (so "vacate by 28 October" in a September email means this year).
+
+    Ground-truth safety net: a date in a short human annotation on a forward
+    (e.g. "Loganholme to vacate on 28/10/2026") is easy for the LLM to bury
+    under a vague dateless summary of the forwarded boilerplate below it.
+    """
+    m = _FORWARD_MARKER_RE.search(body)
+    annotation = body[:m.start()].strip() if m else body[:200].strip()
+    if not annotation:
+        return None
+    dm = _ANNOTATION_DATE_RE.search(annotation)
+    if dm:
+        day, month, year = dm.groups()
+        if len(year) == 2:
+            year = f"20{year}"
+        try:
+            return annotation, date(int(year), int(month), int(day)).isoformat()
+        except ValueError:
+            return None
+    for wm in _ANNOTATION_WORD_DATE_RE.finditer(annotation):
+        d1, mon1, mon2, d2, year = wm.groups()
+        mon_word, day = (mon1, d1) if mon1 else (mon2, d2)
+        month = _MONTHS.get((mon_word or '')[:3].lower())
+        if not month:
+            continue
+        try:
+            if year:
+                return annotation, date(int(year), month, int(day)).isoformat()
+            if received_iso:
+                anchor = date.fromisoformat(received_iso[:10])
+                cand = date(anchor.year, month, int(day))
+                if cand < anchor:
+                    cand = date(anchor.year + 1, month, int(day))
+                return annotation, cand.isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _ensure_annotation_date_captured(items: list, subject: str, body: str,
+                                     received_date: str | None = None) -> list:
+    """
+    If a forwarded-message annotation has a real date and none of the LLM's
+    extracted CALENDAR items already carries that date, append a
+    calendar_event for it directly — belt-and-braces against the LLM
+    classifying the whole email as a dateless "task" and dropping the actual
+    deadline.
+
+    Only calendar_event items count as "captured": tasks/observations become
+    notes, not personal.event + Google Calendar rows, so an LLM "task" that
+    happens to carry the date would otherwise suppress this net while the
+    date still never reaches the calendar (the vacate-notice failure mode).
+    """
+    found = _annotation_with_date(body, received_date)
+    if not found:
+        return items
+    annotation, iso_date = found
+    already_captured = any(
+        isinstance(it, dict) and it.get("type") == "calendar_event"
+        and it.get("date") == iso_date for it in items
+    )
+    if already_captured:
+        return items
+    print(f"[decompose] annotation date safety net: adding calendar_event for {iso_date}")
+    items.append({
+        "type": "calendar_event",
+        "title": subject[:80] or "Dated item from forwarded email",
+        "detail": annotation[:500],
+        "date": iso_date,
+        "time": None,
+        "relative_to": None,
+        "relative_offset_days": None,
+        "relative_anchor": None,
+    })
+    return items
 
 
 def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
@@ -95,6 +196,13 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         "  (e.g. 'please sign and return', 'action required: renew by Friday'). "
         "  Do NOT create tasks for birthday greetings, passive reminders, or general information.\n\n"
         "General rules:\n"
+        "- Pay close attention to the first 1-2 lines of the body — often a short "
+        "human-written note added above forwarded/quoted content (e.g. \"Loganholme to "
+        "vacate on 28/10/2026\"). That note is frequently the single most important fact "
+        "in the email and must produce a calendar_event with its exact date, even if the "
+        "forwarded content below it reads as a generic legal notice or document. "
+        "A 'Notice to Leave' / vacate notice with a vacate-by date is a calendar_event for "
+        "that date — not a vague task like 'review notice'.\n"
         "- Only extract real items — skip marketing, unsubscribe footers, auto-replies\n"
         "- A payment reminder and a meeting invite in the same email = two separate items\n"
         "- A therapy script or medical plan with multiple dated steps = one calendar_event per step\n"
@@ -126,20 +234,23 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
 
     try:
         items = _call_llm()
-        if isinstance(items, list):
-            return items
+        if not isinstance(items, list):
+            items = []
     except json.JSONDecodeError:
         # Response was cut off — retry with more tokens
         try:
             print(f"[decompose] JSON truncated, retrying with more tokens")
             items = _call_llm(extra_tokens=2048)
-            if isinstance(items, list):
-                return items
+            if not isinstance(items, list):
+                items = []
         except Exception as e:
             print(f"[decompose] LLM retry failed: {e}")
+            items = []
     except Exception as e:
         print(f"[decompose] LLM failed: {e}")
-    return []
+        items = []
+
+    return _ensure_annotation_date_captured(items, subject, body, received_date)
 
 
 def _doc_date(received_at):
@@ -164,6 +275,442 @@ def _create_note(cur, email_id: int, title: str, body: str,
     )
     row = cur.fetchone()
     return row["id"] if row else None
+
+
+def _create_task_event(cur, email_id: int, title: str, detail: str,
+                        date_str: str | None, priority: str = "normal") -> int:
+    """
+    Increment 5 — task items become personal.event(event_type='task') rows,
+    not personal.note. Confirmed live before this change: the channel/sync
+    infrastructure this and the Google Tasks channel need
+    (channel_resolver.materialise(), calendar_sync_map) is Event-only in
+    practice — materialise() does a literal `UPDATE personal.event`, nothing
+    for notes, despite its own docstring claiming both. Building task
+    routing against Note would have meant duplicating that whole system a
+    second time. Historical task-notes created before this change are left
+    alone; only new tasks use this path.
+
+    Dateless by default (starts_at/effective_date both NULL) unless the LLM
+    extracted an actual due date — same pattern already proven for
+    obligation/investigation/maintenance_request event types. task_status
+    is a dedicated column, not the shared `status` column (see
+    postgres/init/50_google_tasks.sql — status's CHECK constraint is
+    calendar-lifecycle-specific and shared across every event type).
+    """
+    effective_date = None
+    starts_at = None
+    if date_str:
+        try:
+            effective_date = date.fromisoformat(date_str)
+            starts_at = datetime.combine(effective_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    display_title = f"[URGENT] {title}" if priority == "high" else title
+
+    cur.execute(
+        """
+        INSERT INTO personal.event
+            (title, event_type, status, provenance, calendar_source, notes,
+             task_status, starts_at, effective_date, source_email_id)
+        VALUES (%s, 'task', 'confirmed', 'email', 'email:decompose', %s,
+                'open', %s, %s, %s)
+        RETURNING id
+        """,
+        (display_title, detail[:2000], starts_at, effective_date, email_id),
+    )
+    event_id = cur.fetchone()["id"]
+    # channel_resolver.materialise() opens its own separate connection and
+    # updates by id — the insert above must be visible to it first, or its
+    # UPDATE silently matches zero rows (no error, just a permanently NULL
+    # next_update_at). Confirmed live: this exact ordering bug happened on
+    # the very first test of this function.
+    cur.connection.commit()
+
+    from . import channel_resolver
+    channel_resolver.materialise(event_id, item_type="task", effective_date=effective_date)
+
+    return event_id
+
+
+def _resolve_task_to_product(cur, title: str, detail: str) -> dict | None:
+    """
+    Fuzzy-match a task item's text against existing personal.product names.
+    Products are few per household (a handful of warrantied
+    appliances/fixtures, not hundreds), so direct pg_trgm similarity across
+    the whole table is the simplest correct v1 approach — no need to first
+    infer an asset/property context the way asset_matcher does for asset
+    *events*, since we're matching a much smaller, flatter set.
+    """
+    text = f"{title} {detail}".strip()
+    if not text:
+        return None
+    cur.execute(
+        """
+        SELECT id, asset_id, name, category, install_date, cost,
+               vendor_org_ref, warranty_period_months, warranty_expiry_date,
+               source_doc_ref, similarity(name, %(text)s) AS sim
+        FROM personal.product
+        WHERE similarity(name, %(text)s) > 0.25
+        ORDER BY sim DESC
+        LIMIT 1
+        """,
+        {"text": text},
+    )
+    return cur.fetchone()
+
+
+def _apply_familybrain_label(acct: dict, provider_msg_id: str, value: str) -> None:
+    """
+    Apply a FamilyBrain/<value> tag to a message — reuses the exact existing
+    per-provider label functions (gmail.py/outlook.py), same namespace as
+    every other tag this system applies, rather than a new label-writing
+    path. Used for all three Increment 4 investigation labels
+    (knowledge-identified, investigation-pending, investigation-resolved).
+    Best-effort: a labeling failure shouldn't stop the underlying lifecycle
+    transition from taking effect.
+    """
+    if not acct or not provider_msg_id:
+        return
+    try:
+        if acct.get("provider") == "gmail":
+            from . import gmail as gmail_mod
+            svc = gmail_mod._gmail_service(acct)
+            gmail_mod.apply_ingested_label(acct, svc, provider_msg_id, value)
+        elif acct.get("provider") == "outlook":
+            from . import outlook as outlook_mod
+            outlook_mod.apply_ingested_category(acct, provider_msg_id, value)
+    except Exception as e:
+        print(f"[decompose] FamilyBrain/{value} label failed for {provider_msg_id}: {e}")
+
+
+def _check_product_investigation(cur, email_id: int, acct: dict | None,
+                                   provider_msg_id: str, title: str, detail: str) -> None:
+    """
+    Increment 4, 4b: when a task item resolves to an existing Product, ask
+    graph-api's check_product_completeness primitive (pure lookup, no LLM)
+    whether a matching investigation_rule finds a documented gap (e.g. no
+    warranty_period_months on file). On a gap: create a lightweight
+    'maintenance_request' event for the task (mirrors wa-agent's
+    obligations.py precedent of a direct, non-calendar-facing INSERT — this
+    event never reaches Google Calendar, same invariant as event_type=
+    'obligation'), then an 'investigation' event linked via the existing
+    parent_event_id column (the same Postgres-FK mechanism already used for
+    relative-event linking and obligations — not a new AGE graph edge; the
+    interrogation primitives already query these Postgres columns directly).
+    Tags the source email with FamilyBrain/knowledge-identified immediately,
+    regardless of which follow_up_action the matched rule specifies — that
+    decision belongs to 4c, not here.
+    """
+    product = _resolve_task_to_product(cur, title, detail)
+    if not product:
+        return
+
+    try:
+        resp = req.get(
+            f"{GRAPH_API_URL}/interrogate/check_product_completeness",
+            params={"product_id": product["id"], "trigger_event_type": "maintenance_request"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()["result"]
+    except Exception as e:
+        print(f"[decompose] check_product_completeness failed for product {product['id']}: {e}")
+        return
+
+    if result.get("is_complete", True):
+        return
+
+    rule = result.get("rule_matched") or {}
+    reason = rule.get("reason_template") or f"missing {result.get('missing_field')}"
+
+    cur.execute(
+        """
+        INSERT INTO personal.event
+            (title, event_type, status, provenance, calendar_source, notes, product_id)
+        VALUES (%s, 'maintenance_request', 'confirmed', 'email', 'investigation', %s, %s)
+        RETURNING id
+        """,
+        (title, detail[:500], product["id"]),
+    )
+    maintenance_event_id = cur.fetchone()["id"]
+
+    cur.execute(
+        """
+        INSERT INTO personal.event
+            (title, event_type, status, provenance, calendar_source, notes,
+             product_id, parent_event_id, investigation_status, investigation_status_changed_at)
+        VALUES (%s, 'investigation', 'confirmed', 'rule', 'investigation', %s,
+                %s, %s, 'needs_review', now())
+        RETURNING id
+        """,
+        (f"Investigation: {product['name']}", reason, product["id"], maintenance_event_id),
+    )
+    investigation_event_id = cur.fetchone()["id"]
+
+    print(f"[decompose] product completeness gap on {product['name']!r} (product {product['id']}) — "
+          f"created investigation event {investigation_event_id} (maintenance event {maintenance_event_id}): {reason}")
+
+    _apply_familybrain_label(acct, provider_msg_id, "knowledge-identified")
+
+    # 4c — draft the follow-up per the matched rule's follow_up_action.
+    follow_up_action = rule.get("follow_up_action", "notify_only")
+    _create_followup(cur, investigation_event_id, product, reason, result.get("evidence", {}),
+                      follow_up_action, acct)
+
+
+def _resolve_gmail_draft_account() -> dict | None:
+    """
+    All Increment 4 follow-up drafts go through the household's primary
+    Gmail account regardless of which connected account received the
+    original invoice — same convention weekly_digest.py already uses
+    (main.py: provider == 'gmail' and is_primary_calendar).
+    """
+    from .db import get_enabled_accounts
+    accounts = get_enabled_accounts()
+    return next((a for a in accounts if a["provider"] == "gmail" and a.get("is_primary_calendar")), None)
+
+
+# Language the spec explicitly forbids a follow-up from ever containing —
+# stating a conclusion about coverage rather than asking about it.
+_CONCLUSION_LANGUAGE = ("expired", "has lapsed", "no longer covered", "not covered", "is void", "voided")
+
+
+def _compose_evidence_note(product: dict, reason: str, evidence: dict) -> str:
+    """
+    Evidence-quoting only — states what's documented, asks the specific
+    missing-field question, never concludes a warranty/coverage status
+    (spec 4c: *"installed [date] per invoice [ref], no warranty period on
+    file — can you confirm coverage?"*, never *"your warranty has likely
+    expired."*). Tries the model for natural phrasing; falls back to a
+    template built directly from the evidence (no model call, can't
+    hallucinate) whenever the model's own output slips into forbidden
+    conclusion-language or the call fails outright.
+
+    This mirrors wa-agent/src/synthesis.py's grounded/always-have-a-safe-
+    fallback design principle without importing that module across the
+    email-sync/wa-agent service boundary — its 7-section, glyph-marked
+    WhatsApp digest contract doesn't fit a one-paragraph vendor email or
+    internal note, so this is a small, deliberately separate composer for
+    that different shape, not a second implementation of the same one.
+    """
+    bits = []
+    if evidence.get("install_date"):
+        bits.append(f"installed {evidence['install_date']}")
+    if evidence.get("source_doc_ref"):
+        bits.append(f"per {evidence['source_doc_ref']}")
+    evidence_str = ", ".join(bits) if bits else "on file, but with limited detail"
+    template = f"{product['name']} was {evidence_str}. {reason} Can you confirm?"
+
+    try:
+        prompt = (
+            "Write ONE short, polite paragraph (2-3 sentences) for a follow-up email or internal note "
+            "about a product. State ONLY the evidence given below as fact — do not add any detail not "
+            "listed. Ask the specific question implied by the gap. Never claim or imply a warranty or "
+            "coverage has expired, lapsed, or is void — state only what is documented and ask, do not "
+            "conclude.\n\n"
+            f"Product: {product['name']}\n"
+            f"Evidence on file: {evidence_str}\n"
+            f"Gap: {reason}"
+        )
+        resp = req.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.3}},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "").strip()
+        if text and not any(b in text.lower() for b in _CONCLUSION_LANGUAGE):
+            return text
+        print(f"[decompose] evidence-note contained forbidden conclusion-language or was empty — using template")
+    except Exception as e:
+        print(f"[decompose] evidence-note composition failed, using template: {e}")
+    return template
+
+
+def _create_followup(cur, investigation_event_id: int, product: dict, reason: str,
+                      evidence: dict, follow_up_action: str, acct: dict | None) -> None:
+    """4c — dispatch the matched investigation_rule's follow_up_action."""
+    if follow_up_action == "draft_vendor_email" and not product.get("vendor_org_ref"):
+        print(f"[decompose] draft_vendor_email requested but product {product['id']} has no vendor_org_ref — falling back to draft_internal_note")
+        follow_up_action = "draft_internal_note"
+
+    if follow_up_action == "draft_vendor_email":
+        gmail_acct = _resolve_gmail_draft_account()
+        if not gmail_acct:
+            print("[decompose] no primary Gmail account available for vendor draft — falling back to draft_internal_note")
+            follow_up_action = "draft_internal_note"
+        else:
+            body = _compose_evidence_note(product, reason, evidence)
+            try:
+                from . import gmail as gmail_mod
+                draft_id, thread_id, message_id = gmail_mod.create_draft(
+                    gmail_acct, product["vendor_org_ref"],
+                    f"Follow-up: {product['name']}", body,
+                )
+                cur.execute(
+                    """UPDATE personal.event
+                       SET investigation_status = 'awaiting_reply', investigation_status_changed_at = now(),
+                           draft_thread_id = %s
+                       WHERE id = %s""",
+                    (thread_id, investigation_event_id),
+                )
+                _apply_familybrain_label(gmail_acct, message_id, "investigation-pending")
+                print(f"[decompose] vendor draft created (draft {draft_id}, thread {thread_id}) for investigation {investigation_event_id}")
+            except Exception as e:
+                print(f"[decompose] vendor draft creation failed for investigation {investigation_event_id}: {e}")
+            return
+
+    if follow_up_action == "draft_internal_note":
+        body = _compose_evidence_note(product, reason, evidence)
+        cur.execute(
+            """INSERT INTO personal.note (source, body, tags, item_type, document_date)
+               VALUES ('investigation', %s, %s, 'task', CURRENT_DATE)""",
+            (f"Investigation follow-up: {product['name']}\n\n{body}", ["investigation"]),
+        )
+        cur.execute(
+            """UPDATE personal.event
+               SET investigation_status = 'drafted', investigation_status_changed_at = now()
+               WHERE id = %s""",
+            (investigation_event_id,),
+        )
+        print(f"[decompose] internal note drafted for investigation {investigation_event_id}")
+        return
+
+    # notify_only — the investigation event itself is already
+    # dashboard/query-visible, which serves as the notification. No draft,
+    # no reply to wait for, so investigation_status stays 'needs_review'.
+
+
+# Same fixed allowlist as graph-api's check_product_completeness.py —
+# duplicated deliberately (small, cross-service, same established tolerance)
+# rather than trusting an interpolated column name from an HTTP response.
+_PRODUCT_FIELD_TYPES = {
+    "warranty_period_months": "int",
+    "warranty_expiry_date": "date",
+    "install_date": "date",
+    "cost": "numeric",
+    "vendor_org_ref": "text",
+}
+
+
+def _extract_missing_field(body: str, field_name: str):
+    """
+    Lightweight, single-field extraction from a reply body — deliberately
+    narrow (ask for exactly the one value check_product_completeness said
+    was missing) rather than a general structured-extraction pass. Returns
+    None (leave the investigation awaiting_reply) if the field genuinely
+    isn't answered yet — never guesses.
+    """
+    if field_name not in _PRODUCT_FIELD_TYPES:
+        return None
+    prompt = (
+        f'Extract the value of "{field_name}" from this email reply. '
+        f"Reply with ONLY the value — a plain number, a date as YYYY-MM-DD, or short text — "
+        f"or the single word NONE if it isn't actually answered.\n\n{body[:1500]}"
+    )
+    try:
+        resp = req.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.0}},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("response", "").strip()
+        if not raw or raw.upper().startswith("NONE"):
+            return None
+        ftype = _PRODUCT_FIELD_TYPES[field_name]
+        if ftype == "int":
+            m = re.search(r"\d+", raw)
+            return int(m.group()) if m else None
+        if ftype == "date":
+            m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
+            return m.group() if m else None
+        if ftype == "numeric":
+            m = re.search(r"[\d.]+", raw)
+            return float(m.group()) if m else None
+        return raw[:500]
+    except Exception as e:
+        print(f"[decompose] field extraction failed for {field_name!r}: {e}")
+        return None
+
+
+def _resolve_investigation(cur, investigation_id: int, acct: dict | None, reply_msg_id: str) -> None:
+    cur.execute(
+        """UPDATE personal.event
+           SET investigation_status = 'resolved', investigation_status_changed_at = now()
+           WHERE id = %s""",
+        (investigation_id,),
+    )
+    if acct and acct.get("provider") == "gmail" and reply_msg_id:
+        try:
+            from . import gmail as gmail_mod
+            svc = gmail_mod._gmail_service(acct)
+            gmail_mod.swap_ingested_label(acct, svc, reply_msg_id, "investigation-pending", "investigation-resolved")
+        except Exception as e:
+            print(f"[decompose] investigation-resolved label swap failed: {e}")
+    elif acct and acct.get("provider") == "outlook" and reply_msg_id:
+        # No category-removal path exists for Outlook yet — additive only,
+        # same limitation noted for the pending label. Investigation status
+        # in Postgres is the source of truth regardless.
+        _apply_familybrain_label(acct, reply_msg_id, "investigation-resolved")
+
+
+def _check_investigation_reply(cur, acct: dict | None, provider_msg_id: str,
+                                 thread_id: str | None, body: str) -> None:
+    """
+    4d — a reply's thread_id matching an awaiting_reply investigation's
+    draft_thread_id is the resolution trigger: a plain equality check, the
+    first real use of thread_id anywhere in this codebase (captured on every
+    email_message row all along, never joined/filtered on before this
+    increment — deliberately chosen over the title-token-overlap heuristic
+    used for calendar dedup, since here we already know exactly which
+    thread we're waiting on).
+    """
+    if not thread_id:
+        return
+    cur.execute(
+        """
+        SELECT id, product_id FROM personal.event
+        WHERE draft_thread_id = %s AND investigation_status = 'awaiting_reply'
+        """,
+        (thread_id,),
+    )
+    inv = cur.fetchone()
+    if not inv:
+        return
+
+    try:
+        resp = req.get(
+            f"{GRAPH_API_URL}/interrogate/check_product_completeness",
+            params={"product_id": inv["product_id"], "trigger_event_type": "maintenance_request"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()["result"]
+    except Exception as e:
+        print(f"[decompose] resolution completeness check failed for investigation {inv['id']}: {e}")
+        return
+
+    missing_field = result.get("missing_field")
+    if not missing_field:
+        # Already complete via some other path (e.g. manual dashboard edit) —
+        # just close the investigation out.
+        print(f"[decompose] investigation {inv['id']} already complete — resolving")
+        _resolve_investigation(cur, inv["id"], acct, provider_msg_id)
+        return
+
+    extracted = _extract_missing_field(body, missing_field)
+    if extracted is None:
+        print(f"[decompose] reply for investigation {inv['id']} didn't answer {missing_field} — leaving awaiting_reply")
+        return
+
+    cur.execute(
+        f"UPDATE personal.product SET {missing_field} = %s, updated_at = now() WHERE id = %s",
+        (extracted, inv["product_id"]),
+    )
+    print(f"[decompose] investigation {inv['id']} resolved — {missing_field} = {extracted!r}")
+    _resolve_investigation(cur, inv["id"], acct, provider_msg_id)
 
 
 # Event types that are context-only (don't commit person time)
@@ -361,6 +908,43 @@ def _enrich_asset_from_confirmed(cur, asset_id: int, confirmed_item: dict,
         print(f"[decompose] asset enrichment failed for asset {asset_id}: {e}")
 
 
+def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int) -> int | None:
+    """Does an existing event already describe the same real-world thing?
+
+    Same shape as ingestor's triage.py _content_already_processed, applied on
+    the calendar-create side: upsert_event's own dedup only catches
+    exact/substring title matches, which misses e.g. LLM-extracted "Vacate
+    Notice" against a manually-created "Vacate 215a Drews Road, Loganholme
+    (Notice to Leave)" for the same date — the exact pair that produced a
+    live duplicate (event 1119044 vs 1118795). Require significant token
+    overlap (unique [a-z0-9]{4,} tokens, threshold ~all-but-one) AND the same
+    effective_date — title alone or date alone both over-match (two distinct
+    property events on a busy day; two unrelated docs sharing address
+    tokens). Fail toward returning None (no supersede, event stands as-is)
+    on any uncertainty — a missed duplicate costs a stray calendar entry, a
+    wrong match silently buries a real distinct event.
+    """
+    tokens = list(dict.fromkeys(re.findall(r'[a-z0-9]{4,}', title.lower())))
+    if not tokens:
+        return None
+    need = max(2, len(tokens) - 1) if len(tokens) >= 2 else 1
+    cur.execute(
+        """
+        SELECT id FROM personal.event
+        WHERE id != %(exclude_id)s
+          AND effective_date = %(eff)s
+          AND status NOT IN ('cancelled', 'superseded')
+          AND (SELECT count(*) FROM unnest(%(toks)s::text[]) t
+               WHERE position(t IN lower(title)) > 0) >= %(need)s
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        {"exclude_id": exclude_id, "eff": effective_dt, "toks": tokens, "need": need},
+    )
+    row = cur.fetchone()
+    return row["id"] if row else None
+
+
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
                              title_to_event_id: dict | None = None,
@@ -426,9 +1010,20 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         if not event_id:
             return None
 
+        effective_dt = date.fromisoformat(date_str)
+        dup_of = _find_similar_existing_event(cur, title, effective_dt, exclude_id=event_id)
+        if dup_of:
+            cur.execute(
+                "UPDATE personal.event SET status = 'superseded', superseded_by_event_id = %s WHERE id = %s",
+                (dup_of, event_id),
+            )
+            print(f"[decompose] '{title[:40]!r}' on {date_str} duplicates existing event {dup_of} — superseded {event_id}")
+            if title_to_event_id is not None:
+                title_to_event_id[title.lower().strip()] = dup_of
+            return dup_of
+
         # Stage 2: set provenance/status and attempt slot override
         event_type   = item.get("event_type", "inferred").upper()
-        effective_dt = date.fromisoformat(date_str)
 
         # Resolve person from title + detail
         person_id = _resolve_person_id(f"{title} {detail}")
@@ -636,6 +1231,17 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
         "received_at":   email["received_at"],
     }
 
+    # 4d — is this email a reply to a drafted investigation follow-up?
+    # Independent of decomposition below: runs whether or not the LLM
+    # extracts any items, and regardless of body/attachment presence.
+    try:
+        with psycopg2.connect(DB_URL) as rconn:
+            with rconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as rcur:
+                _check_investigation_reply(rcur, acct, provider_id, email.get("thread_id"), body)
+            rconn.commit()
+    except Exception as e:
+        print(f"[decompose] investigation-reply check failed for email {email_id}: {e}")
+
     # If no body text and email has no note, try extracting text from attachments (any provider)
     if not body.strip() and not email["note_id"] and provider_id:
         acct = next((a for a in accounts if a["id"] == account_id), None)
@@ -681,12 +1287,18 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                     elif itype == "payment":
                         _create_payment_note(wcur, item, email_id, received_at)
 
-                    elif itype in ("observation", "task"):
-                        tags = ["task"] if itype == "task" else []
+                    elif itype == "observation":
+                        _create_note(wcur, email_id, title, detail, itype, [], received_at)
+
+                    elif itype == "task":
                         priority = item.get("priority", "normal")
-                        if itype == "task" and priority == "high":
-                            tags.append("urgent")
-                        _create_note(wcur, email_id, title, detail, itype, tags, received_at)
+                        task_event_id = _create_task_event(wcur, email_id, title, detail,
+                                                            item.get("date"), priority)
+                        # Increment 4, 4b — does this task concern an existing
+                        # Product with a documented knowledge gap (e.g. no
+                        # warranty on file)? Same transaction/connection as
+                        # the event write above.
+                        _check_product_investigation(wcur, email_id, acct, provider_id, title, detail)
                 wconn.commit()
 
         with psycopg2.connect(DB_URL) as wconn:
@@ -738,7 +1350,7 @@ def decompose_email_by_id(email_id: int, accounts: list[dict]) -> list[int]:
             cur.execute(
                 """
                 SELECT em.id, em.subject, em.from_address, em.received_at,
-                       em.account_id, em.provider_msg_id, em.note_id,
+                       em.account_id, em.provider_msg_id, em.note_id, em.thread_id,
                        n.body AS note_body
                 FROM   personal.email_message em
                 LEFT   JOIN personal.note n ON n.id = em.note_id
@@ -768,7 +1380,7 @@ def decompose_emails(accounts: list[dict]) -> int:
             cur.execute(
                 """
                 SELECT em.id, em.subject, em.from_address, em.received_at,
-                       em.account_id, em.provider_msg_id, em.note_id,
+                       em.account_id, em.provider_msg_id, em.note_id, em.thread_id,
                        n.body AS note_body
                 FROM   personal.email_message em
                 LEFT   JOIN personal.note n ON n.id = em.note_id

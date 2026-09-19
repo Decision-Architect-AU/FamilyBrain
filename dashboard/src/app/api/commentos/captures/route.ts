@@ -7,16 +7,24 @@ export async function GET(req: NextRequest) {
     // today's high-impact opportunities: relevant, unanswered, ranked by impact
     const rows = await q(`
       SELECT cm.id AS comment_id, cm.capture_id, cm.impact, cm.body, cm.author_name, cm.is_reply,
-             c.post_author, c.platform, c.brand, c.engagement, c.impact AS thread_impact
+             c.post_author, c.platform, c.brand, c.engagement, c.impact AS thread_impact,
+             c.first_seen_at
       FROM decision_os.co_comment cm
       JOIN decision_os.co_capture c ON c.id = cm.capture_id
       WHERE cm.triage='relevant' AND NOT cm.is_own AND c.status='active'
         AND NOT EXISTS (SELECT 1 FROM decision_os.co_draft d
                         WHERE d.comment_id=cm.id AND d.status IN ('approved','posted'))
-      ORDER BY cm.is_reply DESC,
-        -- early-bird boost: fresh threads outrank slightly-higher stale ones
-        (cm.impact + CASE WHEN c.captured_at > now() - interval '24 hours' THEN 2
-                          WHEN c.captured_at > now() - interval '72 hours' THEN 0.8 ELSE 0 END) DESC,
+      ORDER BY
+        -- replies to Glenn outrank everything — but only while fresh. Without
+        -- the window, a handful of old unanswered replies squat all six slots
+        -- forever and the strip never changes (the "same comments over and
+        -- over" complaint, at its most visible)
+        (cm.is_reply AND cm.created_at > now() - interval '7 days') DESC,
+        -- early-bird boost: fresh threads outrank slightly-higher stale ones.
+        -- first_seen_at, NOT captured_at — re-captures bump captured_at every
+        -- cycle, which made the same old threads look "fresh" forever
+        (cm.impact + CASE WHEN c.first_seen_at > now() - interval '24 hours' THEN 2
+                          WHEN c.first_seen_at > now() - interval '72 hours' THEN 0.8 ELSE 0 END) DESC,
         cm.created_at DESC LIMIT 6`);
     return NextResponse.json(rows);
   }
@@ -45,8 +53,11 @@ export async function GET(req: NextRequest) {
       (SELECT count(*) FROM decision_os.co_comment o
        JOIN decision_os.co_comment r ON r.capture_id = o.capture_id AND r.id > o.id AND NOT r.is_own
        WHERE o.capture_id = c.id AND o.is_own) DESC,
-      c.impact DESC,
-      c.captured_at DESC LIMIT 100`);
+      -- freshness boost mirrors the focus strip: genuinely-new threads
+      -- (first_seen_at, immune to re-capture bumps) outrank stale high-impact
+      (c.impact + CASE WHEN c.first_seen_at > now() - interval '24 hours' THEN 2
+                       WHEN c.first_seen_at > now() - interval '72 hours' THEN 0.8 ELSE 0 END) DESC,
+      c.first_seen_at DESC LIMIT 100`);
   return NextResponse.json(rows);
 }
 

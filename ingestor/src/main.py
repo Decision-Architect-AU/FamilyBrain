@@ -960,6 +960,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
                       if edge_id is not None else {"ok": False, "error": "edge_id required"}
         elif self.path == "/ingest/invoice_line_item":
             result = ingest_invoice_line_item(body)
+        elif self.path == "/ingest/product":
+            # Increment 4. Body: {"text": "<subject + pdf text>", "source_doc_ref": "personal.note:<id>"}
+            # Called cross-service from email-sync's financial_processor.py —
+            # product_router.py (and the asset_matcher/asset_writer/graph
+            # functions it reuses) lives in ingestor, which is the
+            # established single entry point for all personal.asset writes
+            # (see asset_router.py/asset_writer.py precedent) — email-sync
+            # must not duplicate that matching logic itself.
+            from src.product_router import try_product_routing
+            text = body.get("text", "")
+            source_doc_ref = body.get("source_doc_ref")
+            product = try_product_routing(text, source_doc_ref) if text else None
+            result = {"ok": True, "product": product}
         elif self.path == "/notifications/run-detectors":
             def _run():
                 from src.notification_detectors import run_all_detectors

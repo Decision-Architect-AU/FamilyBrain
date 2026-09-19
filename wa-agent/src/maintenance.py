@@ -24,16 +24,66 @@ import os
 import json
 import time
 import re
+import threading
+import concurrent.futures
 import requests
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, date, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 
-from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, _esc, GRAPHS
+from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, _esc, _looks_like_real_name, GRAPHS
 from src.routine_context_pack import assemble_all_packs
 
 DB_URL     = os.environ.get("DATABASE_URL")
+
+# Backs _run_with_timeout below — one shared pool so a series of timed-out
+# tasks don't each leak a brand new thread indefinitely.
+_task_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="maintenance-task")
+
+
+def _run_with_timeout(fn, timeout_secs: int, task_name: str):
+    """
+    Run a maintenance task with a hard wall-clock timeout so one hang can't
+    block every future cycle forever. Confirmed live: the very first cycle
+    after the concurrency-lock fix landed, task_link() hung and never
+    returned — _maintenance_lock stayed held for 24+ hours straight, so
+    every task after it (including review_query_flags) never ran even once
+    in that window, and every 5-minute cron tick just saw "already_running"
+    with nothing to show for it. Python can't forcibly kill a thread, so a
+    timed-out call keeps running in the background — but the calling cycle
+    moves on and the lock releases, which is what actually matters: the next
+    cron tick gets a real attempt instead of piling up behind a corpse.
+
+    Also catches a genuine exception from the task itself, not just a
+    timeout — confirmed live: task_monitor_queries() had a real bug (wrong
+    column names, an undefined variable) that raised on every call, and
+    because this only caught TimeoutError, that exception propagated straight
+    out of _run_maintenance_locked() and killed the entire cycle mid-pipeline
+    — review_query_flags and everything after monitor silently never ran,
+    for the same practical effect as a hang even though nothing was stuck.
+    One broken task should cost that task's result, not the rest of the run.
+    """
+    future = _task_executor.submit(fn)
+    try:
+        return future.result(timeout=timeout_secs)
+    except concurrent.futures.TimeoutError:
+        print(f"[maintenance] {task_name} exceeded {timeout_secs}s — abandoning for this cycle (may still be running in the background)")
+        return {"timeout": True, "timeout_secs": timeout_secs}
+    except Exception as e:
+        print(f"[maintenance] {task_name} raised: {e!r} — continuing with the rest of the cycle")
+        return {"error": str(e)}
+
+
+# Default ceiling for every task below that doesn't have its own tuned
+# timeout — confirmed live this isn't just a link/audit_concepts/LLM-call
+# problem: the very next cycle after link's timeout fix landed, a
+# completely different task (detect_provider_gaps, plain SQL, no LLM
+# involved) hung the exact same way and held the lock with zero timeout at
+# all, since only the 4 tasks already suspected of being slow had been
+# wrapped. Any task can hang; every task call below now goes through
+# _run_with_timeout so none of them can block the pipeline forever again.
+_DEFAULT_TASK_TIMEOUT = int(os.environ.get("MAINTENANCE_TASK_TIMEOUT_SECS", "1200"))
 
 
 def _pg_throttle_due(task_name: str, interval_secs: int) -> bool:
@@ -106,9 +156,16 @@ def task_re_embed() -> dict:
     return {"re_embedded": total}
 
 
+# This maintenance job only owns personal_graph — property_graph (20k+
+# concepts, entirely unlinked) and decision_graph (CommentOS's own process
+# handles its linking separately) don't belong in its scope; including them
+# was what produced the never-finishing "new" batch that hung for 24h+.
+_LINK_GRAPHS = ["personal_graph"]
+
+
 def task_link() -> dict:
-    """Run concept linker across all graphs."""
-    return run_linker()
+    """Run concept linker — personal_graph only, see _LINK_GRAPHS above."""
+    return run_linker(graphs=_LINK_GRAPHS)
 
 
 def task_audit_concepts() -> dict:
@@ -118,9 +175,10 @@ def task_audit_concepts() -> dict:
     zeroing any it flags as a genuine mismatch. Slow per-call (~200s on the
     reasoning model) but only a handful of samples per run and it's
     maintenance, not the chat path — the model's extra care is worth the
-    cost here in a way it isn't for live queries.
+    cost here in a way it isn't for live queries. Scoped to the same graphs
+    as task_link (see _LINK_GRAPHS) for the same reason.
     """
-    return audit_concepts()
+    return audit_concepts(graphs=_LINK_GRAPHS)
 
 
 def task_review_query_flags() -> dict:
@@ -307,27 +365,224 @@ def task_review_data_expectations() -> dict:
     return results
 
 
+# Cap on duplicate merges processed per graph per task_dedup() call, and how
+# often the loop commits along the way — same batching-with-incremental-
+# progress shape as LINKER_BATCH_SIZE in linker.py, for the same reason: a
+# run that's capped always finishes and keeps whatever it committed, so a
+# backlog shrinks run over run instead of one all-or-nothing attempt that
+# either finishes or (on timeout/restart) loses everything back to square one.
+#
+# Investigated live this session after task_dedup() timed out against the
+# 1200s ceiling. Three separate, compounding problems, all confirmed live:
+#
+# 1. property_graph."Concept" (20,589 nodes, 9,414 of them case-insensitive
+#    duplicates — worst group "Glenn West" × 173) was silently missing the
+#    GIN index postgres/init/32_graph_indexes.sql declares for exactly the
+#    `MATCH (c:Concept {name: ...})` pattern this task runs per duplicate —
+#    present on personal_graph/decision_graph, absent on property_graph,
+#    almost certainly because that label's table didn't exist yet the one
+#    time the init script last ran. EXPLAIN ANALYZE: ~0.4ms via the index vs
+#    ~700ms via a full Seq Scan over all 20,589 rows without it. Re-applied
+#    live via CREATE INDEX CONCURRENTLY — see 32_graph_indexes.sql's note.
+#
+# 2. Most edge label tables across all three graphs (e.g. personal_graph's
+#    SIMILAR_TO, ALIAS_OF, RELATED_TO, RELATES_TO — property_graph had ZERO
+#    edge indexes at all) had no start_id/end_id index, and every one of
+#    them had *never once been ANALYZEd* (last_analyze/last_autoanalyze both
+#    NULL) despite some having grown to hundreds of thousands of rows
+#    (personal_graph SIMILAR_TO: 884,567 live rows against a stale ~14-row
+#    planner estimate) — so even where an index did exist, the planner
+#    ignored it and Seq Scanned. task_dedup()'s redirect/orphan-delete
+#    queries use unlabeled/undirected edge patterns (`(dup)-[r]->(b)`,
+#    `(dup)--()`), which per postgres/README.md's AGE usage note makes AGE
+#    scan *every* edge label table in the graph on every single call — so
+#    this cost was paid per duplicate, not once. Fixed live: added the
+#    missing start_id/end_id indexes (postgres/init/49_graph_edge_indexes.sql)
+#    and ran ANALYZE on every graph vertex/edge table.
+#
+# 3. The actual acute cause of multi-minute single-call hangs (10+ minutes
+#    observed live for one group): the redirect query matched *both* the
+#    duplicate and the canonical side by `name`, not by node id. Many
+#    duplicate-name groups have several physical nodes sharing the exact
+#    same name string (not just a case variant) — e.g. 41 separate
+#    personal_graph Concept nodes are literally all named "Centre of
+#    Movement" — so whichever one of those got picked as canonical, `MATCH
+#    (can:Concept {name: canonical})` matched all 41 of them, not one. Cypher
+#    joins independent MATCH clauses with no shared variable as an implicit
+#    cross product, so a duplicate node with, say, ~190 edges (personal_graph
+#    concepts average ~190 SIMILAR_TO edges each) times 41 canonical matches
+#    is ~7,800 MERGE/DELETE operations from what should have been a single
+#    one-to-one redirect — and this repeated on every remaining duplicate in
+#    that group. This is what the Python-side comparison being a clean O(n)
+#    pass over a lowercase dict masked: the combinatorial blowup was hiding
+#    in the generated Cypher, not the loop. Fixed below by matching *both*
+#    sides on name+id() together, not name alone — always exactly one row
+#    per side regardless of how many physical nodes share that name.
+#    id(x)=<literal> alone gets zero index support in AGE (confirmed live:
+#    always a per-row Seq Scan of the whole label table, even labeled), so
+#    it's combined with the name property (GIN-indexed, already highly
+#    selective) rather than used by itself — id() then just picks the exact
+#    node out of name's already-small candidate set. Bonus correctness fix
+#    from the same change: the old `seen[key] != name` check (comparing name
+#    *strings*) meant two nodes with byte-identical names were never merged
+#    at all — only differently-cased duplicates were — which is very likely
+#    why these backlogs were this large despite dedup nominally running
+#    ~daily. Comparing node ids instead merges exact-duplicate nodes too.
+#
+# One cost this doesn't fully eliminate: AGE's planner re-evaluates the
+# canonical-node match once per edge the duplicate has, rather than once per
+# call (confirmed live via EXPLAIN — a Postgres nested-loop join, not
+# something reachable from the Cypher text; reordering the MATCH clauses
+# didn't change it). Measured live end-to-end (real merges, real data,
+# personal_graph): 200 merges in 456.9s — ~2.3s/merge on average, well above
+# the ~150-350ms a single EXPLAIN of one call suggested, because real calls
+# also hit ~1-in-6 duplicates whose Concept.name is corrupted/junk data
+# (e.g. a 280-character hex blob — a separate ingestion data-quality issue,
+# not something dedup itself should try to fix) that breaks Cypher parsing
+# and costs an extra error+rollback round trip each time (caught by
+# _cypher()'s handler, so it doesn't stop the run — see that function).
+# Root-caused and fixed afterward: extraction now rejects implausible names
+# before they're ever written (ingestor/src/extract_concepts.py), and the
+# loop below skips any that still exist in the backlog outright instead of
+# attempting (and paying for) a doomed Cypher call — see skipped_corrupt.
+# Given three graphs share one 1200s ceiling in _run_maintenance_locked's
+# dedup_prune block, a pure count cap sized for the *optimistic* per-call
+# cost isn't safe — at ~2.3s/merge, DEDUP_BATCH_SIZE alone would need to stay
+# under ~170 per graph (3 × 170 × 2.3s ≈ 1,173s) with zero margin for prune
+# or connection overhead, and would silently blow that budget again the
+# moment per-call cost drifts up further. DEDUP_TIME_BUDGET_SECS is the
+# actual backstop: whichever of the two limits (count or wall-clock) is hit
+# first ends the batch, so a run stays safe even if per-call cost changes.
+#
+# This batching is the remaining belt-and-braces layer on top of all the
+# fixes above: it bounds how long any single task_dedup() call can hold
+# locks (matches the historical "13 backends stuck in this queue" incident
+# documented below) and guarantees forward progress even if the duplicate
+# backlog or a pathological group ever balloons again.
+#
+# Re-measured live after adding the incoming-edge redirect below (each
+# duplicate now costs two AGE MERGE/DELETE calls instead of one, since a
+# duplicate's edges can exist in either direction — see that comment for why
+# the first version of this fix was still leaving husk nodes behind).
+# personal_graph: 67 merges in 270s (~4.0s/merge, up from ~2.3s/merge
+# outgoing-only) and property_graph: 75 merges in 255s (~3.4s/merge) —
+# roughly the 2x this doubling would predict, not the full 2x because the
+# corrupted-name skip (skipped_corrupt, above) also removed some previously-
+# wasted error+rollback round trips. decision_graph stayed cheap (500 merges
+# in ~21s, ~0.04s/merge) — far fewer average edges per concept there, so it
+# keeps hitting DEDUP_BATCH_SIZE long before DEDUP_TIME_BUDGET_SECS.
+# DEDUP_TIME_BUDGET_SECS raised from 250s to 270s to claw back a little of
+# the throughput this cost, using slack already in the worst-case budget
+# below (still 30s under the 1200s ceiling, down from the original 90s).
+# DEDUP_BATCH_SIZE is unchanged — it still never binds on the two expensive
+# graphs (250-270s buys nowhere near 500 merges at ~3.5-4s each) and is
+# still the correct backstop for decision_graph-shaped cheap backlogs.
+DEDUP_BATCH_SIZE  = int(os.environ.get("DEDUP_BATCH_SIZE", "500"))
+# Lowered from 100: at ~3.5-4s/merge, personal_graph/property_graph now only
+# complete ~60-80 merges before hitting DEDUP_TIME_BUDGET_SECS — below the
+# old threshold of 100, so those two graphs' entire batch used to go through
+# a single commit at the very end of the loop, with none of the incremental
+# progress this batching design exists to guarantee (see the "all-or-
+# nothing attempt" note at the top of this comment). 25 gets 2-3 incremental
+# commits into a typical capped run on those graphs again, while still being
+# infrequent enough not to add meaningful per-merge overhead.
+DEDUP_COMMIT_EVERY = int(os.environ.get("DEDUP_COMMIT_EVERY", "25"))
+# Per-graph wall-clock ceiling. task_prune() now carries its own bounded
+# PRUNE_TIMEOUT_SECS (120s default — see that function) for the same reason,
+# and both run per-graph inside the same shared 1200s _DEFAULT_TASK_TIMEOUT
+# in _run_maintenance_locked's dedup_prune block — so the worst case across
+# 3 graphs is 3 × (DEDUP_TIME_BUDGET_SECS + PRUNE_TIMEOUT_SECS), which needs
+# to stay under 1200s with real margin left for connection/fetch overhead:
+# 3 × (270 + 120) = 1,170s.
+DEDUP_TIME_BUDGET_SECS = int(os.environ.get("DEDUP_TIME_BUDGET_SECS", "270"))
+
+
 def task_dedup(graph: str, conn) -> int:
-    """Merge Concept nodes that have identical names (case-insensitive)."""
+    """
+    Merge Concept nodes that have identical names (case-insensitive).
+
+    Groups by lowercase name in Python (a single O(n) pass), but targets
+    the actual merge/delete Cypher by node id, not by name — see
+    DEDUP_BATCH_SIZE's comment above for why that distinction matters here.
+    Capped to DEDUP_BATCH_SIZE merges per call (or DEDUP_TIME_BUDGET_SECS of
+    wall-clock time, whichever comes first) and committed incrementally
+    every DEDUP_COMMIT_EVERY of them.
+    """
+    start = time.time()
     concepts = _cypher(conn, graph,
-        "MATCH (c:Concept) RETURN c.name AS name",
-        "(name agtype)",
+        "MATCH (c:Concept) RETURN id(c) AS id, c.name AS name",
+        "(id agtype, name agtype)",
     )
-    names = [str(r.get("name", "")).strip('"\'') for r in concepts]
-    seen  = {}
+    rows = [(str(r.get("id", "")).strip('"\''), str(r.get("name", "")).strip('"\'')) for r in concepts]
+    seen  = {}   # lowercase name -> (canonical node id, canonical name)
     dupes = 0
-    for name in names:
+    since_commit = 0
+    capped = False
+    skipped_corrupt = 0
+    for node_id, name in rows:
+        # Skip concepts with corrupted/garbage names (e.g. a 280-char hex
+        # blob from a past extraction bug — see linker._looks_like_real_name)
+        # outright, rather than attempting a merge Cypher call on one: that
+        # call was silently failing anyway (caught by _cypher()'s handler),
+        # so this was pure wasted latency — ~1-in-6 duplicates hit this in
+        # the run that motivated DEDUP_TIME_BUDGET_SECS above. Root cause is
+        # now fixed at ingestion (ingestor/src/extract_concepts.py); this
+        # just stops the existing backlog from costing anything here.
+        if not _looks_like_real_name(name):
+            skipped_corrupt += 1
+            continue
         key = name.lower().strip()
-        if key in seen and seen[key] != name:
-            # Redirect all edges from duplicate to canonical, then delete duplicate
-            canonical = seen[key]
+        if key in seen:
+            canonical_id, canonical_name = seen[key]
+            if canonical_id == node_id:
+                continue
+            if dupes >= DEDUP_BATCH_SIZE or (time.time() - start) >= DEDUP_TIME_BUDGET_SECS:
+                capped = True
+                break
+            # Redirect all edges from duplicate to canonical, then delete
+            # duplicate. Both sides matched by name *and* id() together —
+            # id() alone gets zero index support in AGE (always a per-row
+            # Seq Scan, confirmed live, even labeled), but name is GIN-
+            # indexed (postgres/init/32_graph_indexes.sql) and highly
+            # selective on its own; adding the id() filter on top just picks
+            # the exact physical node out of that already-small candidate
+            # set instead of scanning the whole label table unindexed.
             rel_type = "RELATED_TO"
             safe_name      = _esc(name)
-            safe_canonical = _esc(canonical)
+            safe_canonical = _esc(canonical_name)
             _cypher(conn, graph,
-                f"MATCH (dup:Concept {{name: '{safe_name}'}})-[r]->(b) "
-                f"MATCH (can:Concept {{name: '{safe_canonical}'}}) "
+                f"MATCH (dup:Concept {{name: '{safe_name}'}}) WHERE id(dup) = {node_id} "
+                f"MATCH (dup)-[r]->(b) "
+                f"MATCH (can:Concept {{name: '{safe_canonical}'}}) WHERE id(can) = {canonical_id} "
                 f"MERGE (can)-[:{rel_type}]->(b) DELETE r",
+            )
+            # Mirror of the above for the other direction — a duplicate's
+            # INCOMING edges (a)-[r]->(dup) were never redirected before this
+            # fix, only outgoing ones. That left the orphan-delete check
+            # below (which is undirected, `(dup)--()`) never able to delete a
+            # duplicate that still had any incoming edge: the node became a
+            # permanent husk with zero outgoing edges but still-present
+            # incoming ones, so the physical duplicate row never went away.
+            # Confirmed live: personal_graph's Concept count dropped by only
+            # 1 across 112 "merges" and property_graph's didn't drop at all
+            # across 162 "merges" in the same run this was found in — e.g.
+            # "NAB" in personal_graph still had all 33 of its original
+            # duplicate nodes afterward. Same name+id() matching as the
+            # outgoing redirect, for the same reason. This does NOT double
+            # up with the outgoing redirect above when a neighbor has edges
+            # in both directions with the duplicate — (can)-[:RELATED_TO]->N
+            # and N-[:RELATED_TO]->(can) are two distinct edges (opposite
+            # directions), both legitimately needed to preserve what the
+            # duplicate originally recorded. What MERGE's own dedup *does*
+            # collapse is redundant edges within the *same* direction — e.g.
+            # if a second, still-unmerged duplicate also has an edge to N,
+            # its later redirect MERGEs onto this same (can)-[:RELATED_TO]->N
+            # edge instead of creating a parallel copy of it.
+            _cypher(conn, graph,
+                f"MATCH (dup:Concept {{name: '{safe_name}'}}) WHERE id(dup) = {node_id} "
+                f"MATCH (a)-[r]->(dup) "
+                f"MATCH (can:Concept {{name: '{safe_canonical}'}}) WHERE id(can) = {canonical_id} "
+                f"MERGE (a)-[:{rel_type}]->(can) DELETE r",
             )
             # AGE's Cypher parser rejects a bare pattern as a boolean predicate
             # (`WHERE NOT (dup)--()`) — confirmed live, syntax error on every
@@ -336,19 +591,64 @@ def task_dedup(graph: str, conn) -> int:
             # the explicit EXISTS() wrapping other openCypher engines treat
             # as implicit.
             _cypher(conn, graph,
-                f"MATCH (dup:Concept {{name: '{safe_name}'}}) WHERE NOT EXISTS((dup)--()) DELETE dup",
+                f"MATCH (dup:Concept {{name: '{safe_name}'}}) WHERE id(dup) = {node_id} "
+                f"AND NOT EXISTS((dup)--()) DELETE dup",
             )
             dupes += 1
+            since_commit += 1
+            if since_commit >= DEDUP_COMMIT_EVERY:
+                conn.commit()
+                since_commit = 0
         else:
-            seen[key] = name
+            seen[key] = (node_id, name)
     conn.commit()
+    if skipped_corrupt:
+        print(f"[maintenance] dedup {graph}: skipped {skipped_corrupt} concept(s) with implausible/corrupted names")
+    if capped:
+        elapsed = time.time() - start
+        reason = "time budget" if elapsed >= DEDUP_TIME_BUDGET_SECS else "merge count"
+        print(f"[maintenance] dedup {graph}: hit {reason} cap ({dupes} merges, {elapsed:.0f}s) — remainder deferred to next run")
     return dupes
 
 
+# Bulk prune can't commit incrementally the way task_dedup's per-node loop
+# does — it's one set-based query, not a natural per-item loop — so a bounded
+# statement_timeout is its equivalent safety net: treat running out of time
+# as "removed nothing this cycle, try again next run" instead of holding a
+# lock indefinitely. See task_prune()'s docstring for why this is needed at
+# all now.
+PRUNE_TIMEOUT_SECS = int(os.environ.get("PRUNE_TIMEOUT_SECS", "120"))
+
+
 def task_prune(graph: str, conn) -> int:
-    """Remove orphan Concept nodes — no edges and not linked to any document."""
+    """
+    Remove orphan Concept nodes — no edges and not linked to any document.
+
+    Confirmed live this session: this had the exact same bare-pattern-as-
+    boolean-predicate bug already documented (and fixed) in task_dedup()'s
+    delete-check — `WHERE NOT (c)--()` is a syntax error on every call in
+    AGE, which needs the explicit EXISTS() wrapping. Caught and swallowed by
+    _cypher()'s error handler every time, so task_prune() has silently
+    removed zero orphan nodes, ever, since this function was written.
+
+    Fixing that syntax exposed a second, previously-invisible problem: the
+    now-actually-running query checks every Concept for zero edges in every
+    direction, which — like task_dedup()'s redirect/delete queries — makes
+    AGE scan every edge label table per node (unlabeled, undirected pattern;
+    see postgres/README.md's AGE usage note). Confirmed live: personal_graph
+    alone ran past 6 minutes, still going, before being terminated — a
+    single held transaction for that whole time, the same class of risk
+    task_dedup's fix (and the historical incident it references) was about.
+    PRUNE_TIMEOUT_SECS bounds it via Postgres's own statement_timeout so a
+    slow prune can't hold that lock indefinitely; _cypher()'s existing
+    exception handling already turns a cancelled statement into an empty
+    result (rollback + return []), so a timeout here just means 0 removed
+    this cycle rather than a crash or a hang.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"SET LOCAL statement_timeout = '{PRUNE_TIMEOUT_SECS}s'")
     result = _cypher(conn, graph,
-        "MATCH (c:Concept) WHERE NOT (c)--() "
+        "MATCH (c:Concept) WHERE NOT EXISTS((c)--()) "
         "DELETE c RETURN count(c) AS removed",
         "(removed agtype)",
     )
@@ -413,27 +713,36 @@ def task_monitor_queries() -> dict:
     hit_updates: dict[str, dict[str, int]] = {}  # graph → {rule_name: count}
 
     try:
-        # Pull last 24h of wa-agent query audit entries
+        # Pull last 24h of wa-agent query audit entries. Column/table names
+        # here never matched the real audit.log schema (agent/action_type/ts,
+        # not service/action/created_at; the JSON payload lives in `metadata`,
+        # not a nonexistent `detail` column) — confirmed live this has been
+        # throwing every time it actually ran, crashing the whole maintenance
+        # cycle and skipping every task after it (this one sits mid-pipeline,
+        # well before review_query_flags). Separately, nothing in wa-agent
+        # actually writes agent='wa-agent'/action_type='query' rows to
+        # audit.log yet, so even fixed this returns zero rows for now — that's
+        # a real gap (this task's whole reason for existing), just a separate
+        # one from "don't crash the pipeline".
         with conn_pg.cursor() as cur:
             cur.execute("""
-                SELECT detail FROM audit.log
-                WHERE service = 'wa-agent' AND action = 'query'
-                  AND created_at >= now() - interval '24 hours'
-                ORDER BY created_at DESC
+                SELECT metadata AS detail FROM audit.log
+                WHERE agent = 'wa-agent' AND action_type = 'query'
+                  AND ts >= now() - interval '24 hours'
+                ORDER BY ts DESC
                 LIMIT 500
             """)
             rows = cur.fetchall()
     except Exception as e:
         print(f"[maintenance] monitor: audit query failed: {e}")
         conn_pg.close()
-        conn_age.close()
         return {"error": str(e)}
     finally:
         conn_pg.close()
 
     # Load current rules from graph
     from src.search import _get_rules, _source_weights
-    rules_cache = _get_rules(conn_age)
+    rules_cache = _get_rules()
 
     for row in rows:
         try:
@@ -2000,13 +2309,39 @@ def task_routine_context_pack() -> dict:
     }
 
 
+# Confirmed live: maintenance-cron POSTs /maintenance every
+# MAINTENANCE_INTERVAL_SECS (default 300s) unconditionally — the endpoint had
+# no guard against a previous run still being in flight. A single full cycle
+# routinely exceeds 5 minutes (the review_query_flags task alone calls a 35B
+# reasoning model that can take 10+ minutes, or hang, under GPU contention —
+# see llm.py's own comment on this exact model). Result: overlapping runs pile
+# up indefinitely — found 20 concurrent identical linker Cypher queries live,
+# and zero "[maintenance] Complete" log lines in 72h, meaning nothing has
+# actually finished a cycle in that entire window. This lock makes a second
+# trigger a cheap no-op instead of adding to the pile.
+_maintenance_lock = threading.Lock()
+
+
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     Run maintenance tasks in order. Pass task names to run a subset.
     Default order: re_embed → link → dedup → prune → generate_events →
                    refresh_asset_notes → asset_graph_sync → monitor →
                    tune_weights → appointment_digest
+
+    Skips entirely (returns {"skipped": "already_running"}) if a previous
+    call is still in progress — see _maintenance_lock's comment above.
     """
+    if not _maintenance_lock.acquire(blocking=False):
+        print("[maintenance] skipped — a previous run is still in progress")
+        return {"skipped": "already_running"}
+    try:
+        return _run_maintenance_locked(tasks)
+    finally:
+        _maintenance_lock.release()
+
+
+def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
     all_tasks = tasks or [
         "rederive_facts",
         "re_embed", "link", "audit_concepts", "dedup", "prune",
@@ -2029,41 +2364,45 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
     print(f"[maintenance] Starting: {all_tasks}")
 
     if "rederive_facts" in all_tasks:
-        results["rederive_facts"] = task_rederive_facts()
+        results["rederive_facts"] = _run_with_timeout(task_rederive_facts, _DEFAULT_TASK_TIMEOUT, "rederive_facts")
         print(f"[maintenance] rederive_facts done: {results['rederive_facts']}")
 
     if "re_embed" in all_tasks:
-        results["re_embed"] = task_re_embed()
+        results["re_embed"] = _run_with_timeout(task_re_embed, _DEFAULT_TASK_TIMEOUT, "re_embed")
         print(f"[maintenance] re_embed done: {results['re_embed']}")
 
     if "link" in all_tasks:
-        # Linker is O(n²) across all concepts — throttle to once per hour max.
+        # Linker is O(new x total) across all concepts — throttle to once
+        # per day by default. Postgres-backed (see _pg_throttle_due), not a
+        # /tmp flag file: the /tmp version confirmed live to reset on every
+        # container restart, which re-fired this on effectively every
+        # 5-minute maintenance-cron tick instead of respecting the interval
+        # (see postgres/init/41_maintenance_throttle.sql's note, and the
+        # personal_graph SIMILAR_TO table growing from ~295k to 884k+ rows
+        # in about an hour as a direct result).
         _LINK_INTERVAL = int(os.environ.get("LINK_INTERVAL_SECS", "86400"))
-        _link_flag = "/tmp/last_link_run"
-        import pathlib, time as _time
-        _last = float(pathlib.Path(_link_flag).read_text()) if pathlib.Path(_link_flag).exists() else 0
-        if _time.time() - _last >= _LINK_INTERVAL:
-            results["link"] = task_link()
-            pathlib.Path(_link_flag).write_text(str(_time.time()))
+        if _pg_throttle_due("link", _LINK_INTERVAL):
+            _LINK_TIMEOUT = int(os.environ.get("LINK_TIMEOUT_SECS", "1200"))
+            results["link"] = _run_with_timeout(task_link, _LINK_TIMEOUT, "link")
+            _pg_throttle_mark("link")
             print(f"[maintenance] link done: {results['link']}")
         else:
             results["link"] = {"skipped": "throttled"}
-            print(f"[maintenance] link skipped (throttled, next in {int(_LINK_INTERVAL - (_time.time() - _last))}s)")
+            print("[maintenance] link skipped (throttled)")
 
     if "audit_concepts" in all_tasks:
         # Several ~200s reasoning-model calls per run (see linker.audit_concepts
         # docstring) — throttle independently of link, default once per day.
+        # Postgres-backed for the same restart-safety reason as link above.
         _AUDIT_INTERVAL = int(os.environ.get("CONCEPT_AUDIT_INTERVAL_SECS", "86400"))
-        _audit_flag = "/tmp/last_concept_audit_run"
-        import pathlib, time as _time
-        _last = float(pathlib.Path(_audit_flag).read_text()) if pathlib.Path(_audit_flag).exists() else 0
-        if _time.time() - _last >= _AUDIT_INTERVAL:
-            results["audit_concepts"] = task_audit_concepts()
-            pathlib.Path(_audit_flag).write_text(str(_time.time()))
+        if _pg_throttle_due("audit_concepts", _AUDIT_INTERVAL):
+            _AUDIT_TIMEOUT = int(os.environ.get("CONCEPT_AUDIT_TIMEOUT_SECS", "1200"))
+            results["audit_concepts"] = _run_with_timeout(task_audit_concepts, _AUDIT_TIMEOUT, "audit_concepts")
+            _pg_throttle_mark("audit_concepts")
             print(f"[maintenance] audit_concepts done: {results['audit_concepts']}")
         else:
             results["audit_concepts"] = {"skipped": "throttled"}
-            print(f"[maintenance] audit_concepts skipped (throttled, next in {int(_AUDIT_INTERVAL - (_time.time() - _last))}s)")
+            print("[maintenance] audit_concepts skipped (throttled)")
 
     if "check_data_expectations" in all_tasks:
         # Cheap SQL only — no throttle, runs every cycle so violations get
@@ -2080,7 +2419,8 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         import pathlib, time as _time
         _last = float(pathlib.Path(_review_flag).read_text()) if pathlib.Path(_review_flag).exists() else 0
         if _time.time() - _last >= _REVIEW_INTERVAL:
-            results["review_data_expectations"] = task_review_data_expectations()
+            _REVIEW_TIMEOUT = int(os.environ.get("DATA_EXPECTATION_REVIEW_TIMEOUT_SECS", "1200"))
+            results["review_data_expectations"] = _run_with_timeout(task_review_data_expectations, _REVIEW_TIMEOUT, "review_data_expectations")
             pathlib.Path(_review_flag).write_text(str(_time.time()))
             print(f"[maintenance] review_data_expectations done: {results['review_data_expectations']}")
         else:
@@ -2102,65 +2442,74 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         # pileup — the earlier EXISTS() syntax fix alone doesn't touch this.
         _DEDUP_INTERVAL = int(os.environ.get("DEDUP_INTERVAL_SECS", "86400"))
         if _pg_throttle_due("dedup_prune", _DEDUP_INTERVAL):
-            conn = _conn()
-            try:
-                dedup_total = prune_total = 0
-                for graph in GRAPHS:
+            def _run_dedup_prune():
+                conn = _conn()
+                try:
+                    dedup_total = prune_total = 0
+                    for graph in GRAPHS:
+                        if "dedup" in all_tasks:
+                            dedup_total += task_dedup(graph, conn)
+                        if "prune" in all_tasks:
+                            prune_total += task_prune(graph, conn)
+                    out = {}
                     if "dedup" in all_tasks:
-                        dedup_total += task_dedup(graph, conn)
+                        out["dedup"] = {"merged": dedup_total}
                     if "prune" in all_tasks:
-                        prune_total += task_prune(graph, conn)
-                if "dedup" in all_tasks:
-                    results["dedup"] = {"merged": dedup_total}
-                    print(f"[maintenance] dedup done: {dedup_total} merged")
-                if "prune" in all_tasks:
-                    results["prune"] = {"removed": prune_total}
-                    print(f"[maintenance] prune done: {prune_total} removed")
-            finally:
-                conn.close()
+                        out["prune"] = {"removed": prune_total}
+                    return out
+                finally:
+                    conn.close()
+
+            dp_result = _run_with_timeout(_run_dedup_prune, _DEFAULT_TASK_TIMEOUT, "dedup_prune")
+            if "dedup" in all_tasks:
+                results["dedup"] = dp_result.get("dedup", dp_result) if isinstance(dp_result, dict) else dp_result
+                print(f"[maintenance] dedup done: {results['dedup']}")
+            if "prune" in all_tasks:
+                results["prune"] = dp_result.get("prune", dp_result) if isinstance(dp_result, dict) else dp_result
+                print(f"[maintenance] prune done: {results['prune']}")
             _pg_throttle_mark("dedup_prune")
         else:
             results["dedup"] = results["prune"] = {"skipped": "throttled"}
             print("[maintenance] dedup/prune skipped (throttled)")
 
     if "generate_events" in all_tasks:
-        results["generate_events"] = task_generate_events()
+        results["generate_events"] = _run_with_timeout(task_generate_events, _DEFAULT_TASK_TIMEOUT, "generate_events")
         print(f"[maintenance] generate_events done: {results['generate_events']}")
 
     if "refresh_asset_notes" in all_tasks:
-        results["refresh_asset_notes"] = task_refresh_asset_notes()
+        results["refresh_asset_notes"] = _run_with_timeout(task_refresh_asset_notes, _DEFAULT_TASK_TIMEOUT, "refresh_asset_notes")
         print(f"[maintenance] refresh_asset_notes done: {results['refresh_asset_notes']}")
 
     if "detect_conflicts" in all_tasks:
-        results["detect_conflicts"] = task_detect_conflicts()
+        results["detect_conflicts"] = _run_with_timeout(task_detect_conflicts, _DEFAULT_TASK_TIMEOUT, "detect_conflicts")
         print(f"[maintenance] detect_conflicts done: {results['detect_conflicts']}")
 
     if "detect_provider_gaps" in all_tasks:
-        results["detect_provider_gaps"] = task_detect_provider_gaps()
+        results["detect_provider_gaps"] = _run_with_timeout(task_detect_provider_gaps, _DEFAULT_TASK_TIMEOUT, "detect_provider_gaps")
         print(f"[maintenance] detect_provider_gaps done: {results['detect_provider_gaps']}")
 
     if "reconcile_ingested" in all_tasks:
-        results["reconcile_ingested"] = task_reconcile_ingested()
+        results["reconcile_ingested"] = _run_with_timeout(task_reconcile_ingested, _DEFAULT_TASK_TIMEOUT, "reconcile_ingested")
         print(f"[maintenance] reconcile_ingested done: {results['reconcile_ingested']}")
 
     if "asset_graph_sync" in all_tasks:
-        results["asset_graph_sync"] = task_asset_graph_sync()
+        results["asset_graph_sync"] = _run_with_timeout(task_asset_graph_sync, _DEFAULT_TASK_TIMEOUT, "asset_graph_sync")
         print(f"[maintenance] asset_graph_sync done: {results['asset_graph_sync']}")
 
     if "monitor" in all_tasks:
-        results["monitor"] = task_monitor_queries()
+        results["monitor"] = _run_with_timeout(task_monitor_queries, _DEFAULT_TASK_TIMEOUT, "monitor")
         print(f"[maintenance] monitor done: {results['monitor']}")
 
     if "tune_weights" in all_tasks:
-        results["tune_weights"] = task_tune_weights()
+        results["tune_weights"] = _run_with_timeout(task_tune_weights, _DEFAULT_TASK_TIMEOUT, "tune_weights")
         print(f"[maintenance] tune_weights done: {results['tune_weights']}")
 
     if "appointment_digest" in all_tasks:
-        results["appointment_digest"] = task_appointment_digest()
+        results["appointment_digest"] = _run_with_timeout(task_appointment_digest, _DEFAULT_TASK_TIMEOUT, "appointment_digest")
         print(f"[maintenance] appointment_digest done: {results['appointment_digest']}")
 
     if "routine_context_pack" in all_tasks:
-        results["routine_context_pack"] = task_routine_context_pack()
+        results["routine_context_pack"] = _run_with_timeout(task_routine_context_pack, _DEFAULT_TASK_TIMEOUT, "routine_context_pack")
         print(f"[maintenance] routine_context_pack done: {results['routine_context_pack']}")
 
     if "notify_provider_conflicts" in all_tasks:
@@ -2177,7 +2526,7 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
             print(f"[maintenance] notify_provider_conflicts error: {e}")
 
     if "asset_summary" in all_tasks:
-        results["asset_summary"] = task_asset_summary()
+        results["asset_summary"] = _run_with_timeout(task_asset_summary, _DEFAULT_TASK_TIMEOUT, "asset_summary")
         print(f"[maintenance] asset_summary done: {results['asset_summary']}")
 
     if "review_query_flags" in all_tasks:
@@ -2186,7 +2535,8 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         # (see _pg_throttle_due), not a /tmp flag file.
         _RQF_INTERVAL = int(os.environ.get("QUERY_FLAGS_REVIEW_INTERVAL_SECS", "86400"))
         if _pg_throttle_due("review_query_flags", _RQF_INTERVAL):
-            results["review_query_flags"] = task_review_query_flags()
+            _RQF_TIMEOUT = int(os.environ.get("QUERY_FLAGS_REVIEW_TIMEOUT_SECS", "1200"))
+            results["review_query_flags"] = _run_with_timeout(task_review_query_flags, _RQF_TIMEOUT, "review_query_flags")
             _pg_throttle_mark("review_query_flags")
             print(f"[maintenance] review_query_flags done: {results['review_query_flags']}")
         else:
@@ -2200,7 +2550,7 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         # also imply a report was sent).
         _QFR_INTERVAL = int(os.environ.get("QUERY_FLAGS_REPORT_INTERVAL_SECS", "86400"))
         if _pg_throttle_due("query_flags_report", _QFR_INTERVAL):
-            results["query_flags_report"] = task_query_flags_report()
+            results["query_flags_report"] = _run_with_timeout(task_query_flags_report, _DEFAULT_TASK_TIMEOUT, "query_flags_report")
             _pg_throttle_mark("query_flags_report")
             print(f"[maintenance] query_flags_report done: {results['query_flags_report']}")
         else:

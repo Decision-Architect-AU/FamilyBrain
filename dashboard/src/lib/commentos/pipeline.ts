@@ -29,7 +29,22 @@ Comment: "${c.body.slice(0, 1200)}"
 Signal types: objection (pushback on an idea), question (something they want answered), misconception (a wrong belief), insight (a sharp observation), language (a memorable phrasing the audience uses).
 Pillars: maturity, trust, scope, decision-architecture, ai-org, other.
 Reply ONLY with JSON: {"signals": [{"type": "...", "canonical": "one clean exportable sentence restating the signal in neutral words", "excerpt": "the short verbatim phrase it came from", "pillar": "...", "significance": 1-5}]} (0-3 signals; empty array if none)`, 500);
-  const signals = (extractJson(raw).signals || []).slice(0, 3);
+  // 14b is loose with the envelope: bare arrays instead of {"signals": []},
+  // and sometimes a stray quote glued to elements (`["{"type": ...`) that no
+  // whole-string parse survives. Try envelope, then bare array, then salvage
+  // individual {"type": ...} objects; a comment yielding nothing parseable is
+  // done (extracted), not an error — deterministic failures were clogging the
+  // ORDER BY id queue so new comments never got extracted.
+  let parsed: any = null;
+  try { parsed = extractJson(raw); } catch { parsed = null; }
+  let signals: any[] = Array.isArray(parsed) ? parsed : parsed?.signals || [];
+  if (!signals.some((s: any) => s && typeof s === 'object' && s.type)) {
+    signals = [];
+    for (const f of raw.match(/\{"type":[\s\S]*?"significance":\s*\d+\s*\}/g) || []) {
+      try { signals.push(JSON.parse(f)); } catch { /* skip fragment */ }
+    }
+  }
+  signals = signals.filter((s: any) => s && typeof s === 'object').slice(0, 3);
   let created = 0;
   for (const s of signals) {
     if (!s.canonical || !s.type) continue;

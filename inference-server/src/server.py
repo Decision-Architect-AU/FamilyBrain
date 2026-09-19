@@ -249,9 +249,21 @@ def chat(req: ChatRequest):
     config.max_new_tokens = max_tokens
     config.temperature = temperature
 
+    # LLMPipeline.generate() expects a prompt string, not the raw chat-message
+    # list — passing `history` directly here always raised inside the
+    # OpenVINO GenAI binding, surfaced through FastAPI's generic handler as a
+    # bare 500 "Internal Server Error" with no detail (nothing here caught
+    # it). Confirmed live: this endpoint has never actually worked for a
+    # plain (non-VLM, non-OVMS) model — every existing caller, including
+    # ingestor's asset_router.py, has been silently getting None back.
+    # Mirrors /api/generate's own plain-string-concatenation convention for
+    # this same pipeline type (no real chat-template rendering here, same as
+    # the rest of this file for non-VLM models).
+    prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in history)
+
     start = time.time()
     with _generate_lock:
-        response = pipe.generate(history, config)
+        response = pipe.generate(prompt, config)
     elapsed = time.time() - start
 
     return {

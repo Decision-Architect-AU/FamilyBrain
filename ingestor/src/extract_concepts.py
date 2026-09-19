@@ -88,6 +88,60 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
     return chunks
 
 
+# Real concept/person/org/framework names are short and mostly alphabetic.
+# Confirmed live (wa-agent linker/maintenance session, personal_graph): the
+# extraction model occasionally misreads binary/encoded content embedded in a
+# chunk (an attachment, a hash, base64 data) as an entity name and returns it
+# verbatim as "name" — one confirmed example was a 280-character hex string.
+# Once written as a Concept/Person/etc node, that garbage breaks Cypher string
+# interpolation downstream wherever the name gets matched again (see
+# wa-agent/src/linker.py's _esc()/_cypher() comments) and just accumulates.
+# Reject it here, before it's ever handed to graph_writer, rather than trying
+# to clean it up after the fact.
+_MAX_NAME_LEN          = 120
+_MAX_NAME_LEN_NO_SPACE = 30
+
+
+def _looks_like_real_name(name: str) -> bool:
+    if not name or len(name) > _MAX_NAME_LEN:
+        return False
+    if len(name) > _MAX_NAME_LEN_NO_SPACE and " " not in name:
+        return False
+    allowed = sum(1 for c in name if c.isalnum() or c.isspace() or c in "-_.,'&()/")
+    return allowed / len(name) >= 0.85
+
+
+def _sanitize_extraction(parsed: dict) -> dict:
+    """Drop items with implausible names from a single chunk's raw extraction
+    output. Applied at this single choke point so it covers both consumers of
+    extract_from_chunk()'s return value — the streaming on_chunk callback
+    (which writes chunk results to the graph directly, per chunk) and the
+    batch merge_extractions() path — rather than needing the check twice."""
+    if not isinstance(parsed, dict):
+        return parsed
+    for key in ("concepts", "people", "organisations", "frameworks"):
+        items = parsed.get(key)
+        if not isinstance(items, list):
+            continue
+        kept = []
+        for item in items:
+            name = item.get("name", "") if isinstance(item, dict) else ""
+            if _looks_like_real_name(name.strip()):
+                kept.append(item)
+            else:
+                print(f"[extract] dropped implausible {key[:-1]} name ({len(name)} chars): {name[:60]!r}...")
+        parsed[key] = kept
+    rels = parsed.get("relationships")
+    if isinstance(rels, list):
+        parsed["relationships"] = [
+            r for r in rels
+            if isinstance(r, dict)
+            and _looks_like_real_name(str(r.get("from", "")).strip())
+            and _looks_like_real_name(str(r.get("to", "")).strip())
+        ]
+    return parsed
+
+
 def extract_from_chunk(chunk: str, client: ollama.Client, model: str | None = None, prompt_template: str | None = None) -> dict:
     """Run LLM extraction on a single chunk. Returns structured dict."""
     template = prompt_template or QUICK_PROMPT
@@ -98,7 +152,7 @@ def extract_from_chunk(chunk: str, client: ollama.Client, model: str | None = No
         raw = resp["response"].strip()
         match = re.search(r'\{[\s\S]*\}', raw)
         if match:
-            return json.loads(match.group())
+            return _sanitize_extraction(json.loads(match.group()))
     except Exception as e:
         print(f"[extract] chunk extraction error: {e}")
     return empty

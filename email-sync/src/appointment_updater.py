@@ -549,15 +549,58 @@ def _gcal_tag(ev: dict, title: str) -> str:
     return f"#familybrain/{person}/{category}"
 
 
-def _build_gcal_description(ev: dict, title: str, notes: str, writer: str = "appointment_updater") -> str:
-    """Combine notes with FamilyBrain management tags."""
+def _fetch_child_tasks(event_id: int | None) -> list[dict]:
+    """
+    Increment 5 — parent-card reflection. A task can optionally be linked to
+    a parent appointment via the existing parent_event_id column (same FK
+    already used for relative-event linking and Increment 4's
+    investigation->maintenance-event link — no new column). Confirmed live
+    before building this: no ENRICHES edge or "nightly enrich sweep" exists
+    anywhere in the codebase to extend, despite README/spec references — this
+    is genuinely new logic, not an extension of existing infrastructure.
+    """
+    if not event_id:
+        return []
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, title, task_status FROM personal.event
+                       WHERE parent_event_id = %s AND event_type = 'task'
+                       ORDER BY created_at ASC""",
+                    (event_id,),
+                )
+                return list(cur.fetchall())
+    except Exception as e:
+        print(f"[appt] child-task lookup failed for event {event_id}: {e}")
+        return []
+
+
+def _build_gcal_description(ev: dict, title: str, notes: str, writer: str = "appointment_updater",
+                             child_tasks: list[dict] | None = None) -> str:
+    """Combine notes with FamilyBrain management tags.
+
+    child_tasks (Increment 5) renders as a checkbox line per linked task,
+    appended after notes and before the FamilyBrain tag lines — additive, so
+    an event with no child tasks (the None/empty default) renders
+    byte-identical to before this was added.
+    """
     from datetime import timezone
     category_tag = _gcal_tag(ev, title)
     updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     updated_tag = f"#familybrain/updated/{updated_at}/{writer}"
     tags = f"{category_tag}\n{updated_tag}"
-    if notes:
-        return f"{notes}\n\n{tags}"
+
+    body_parts = [notes] if notes else []
+    if child_tasks:
+        checklist = "\n".join(
+            f"{'✅' if t.get('task_status') == 'done' else '☐'} {t['title']}"
+            for t in child_tasks
+        )
+        body_parts.append(checklist)
+
+    if body_parts:
+        return f"{chr(10).join(body_parts)}\n\n{tags}"
     return tags
 
 
@@ -676,7 +719,8 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
     title  = ev["title"]
     fb_id  = _tracking_id(ev)
 
-    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    description = _build_gcal_description(ev, title, ev.get("notes") or "",
+                                            child_tasks=_fetch_child_tasks(ev_id))
     if fb_id:
         description = _gcal_description_with_debug(description, fb_id)
 
@@ -736,7 +780,8 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
     title  = ev["title"]
     fb_id  = _tracking_id(ev)
 
-    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    description = _build_gcal_description(ev, title, ev.get("notes") or "",
+                                            child_tasks=_fetch_child_tasks(ev.get("id")))
     if fb_id:
         description = _gcal_description_with_debug(description, fb_id)
 
@@ -887,10 +932,33 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     -- for obligations that were given an explicit due date in the
                     -- first place, so a dateless obligation's next_update_at stays
                     -- NULL forever and this branch never fires for it either.
-                    (event_type <> 'obligation' AND (gcal_event_id IS NULL OR updated_at > calendar_written_at))
+                    --
+                    -- Same invariant applies to 'maintenance_request'/'investigation'
+                    -- (Increment 4, email_decomposer.py's _check_product_investigation)
+                    -- — both are direct, non-calendar-facing INSERTs with starts_at
+                    -- always NULL, purely internal bookkeeping for the completeness-
+                    -- gap lifecycle. Never eligible via next_update_at either since
+                    -- nothing ever sets it for these two event types.
+                    --
+                    -- 'task' (Increment 5) is excluded for a different reason: it has
+                    -- its own channel (Google Tasks, task_sync.py) and its own
+                    -- next_update_at set via channel_resolver.materialise() same as
+                    -- obligations — it must never take the bare push path either,
+                    -- since that would send it to Google Calendar instead of Tasks.
+                    (event_type NOT IN ('obligation', 'maintenance_request', 'investigation', 'task')
+                     AND (gcal_event_id IS NULL OR updated_at > calendar_written_at))
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
                 AND status NOT IN ('cancelled', 'superseded', 'ingested')
+                -- Blanket exclusion, not just the first OR-branch above: a task WITH a
+                -- due date (starts_at/effective_date set) would otherwise still match
+                -- the second OR-branch (next_update_at <= now(), which channel_resolver
+                -- sets for every task same as obligations) and the starts_at >= now()-1h
+                -- guard below wouldn't stop it, since a real future due-date satisfies
+                -- that comparison fine — unlike dateless obligation/maintenance_request/
+                -- investigation rows, which that guard excludes incidentally via NULL.
+                -- Confirmed live this gap exists before adding this line.
+                AND event_type != 'task'
                 -- Ordinarily gmail-sourced events came from Google's own "Events from
                 -- Gmail" auto-detection and are skipped entirely (Google already put
                 -- them on the calendar, writing again would duplicate). The exception:

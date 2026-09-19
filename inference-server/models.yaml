@@ -20,10 +20,10 @@ models:
 
 
   # Primary extraction — GPU (convert qwen2.5:14b INT4 when ready)
- # qwen2.5:14b:
-  #  path: C:\Users\Glenn\qwen2.5-14b-ov
-   # type: generate
-   # device: AUTO:GPU,CPU
+  qwen2.5:14b:
+    path: C:\Users\Glenn\qwen2.5-14b-ov
+    type: generate
+    device: AUTO:GPU
 
   # Reasoning — CPU/RAM
   #qwen2.5:32b:

@@ -167,9 +167,16 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
     as an attached image were invisible to triage and the decomposer.
     """
     try:
+        # No $select: contentBytes lives on the fileAttachment subtype, not
+        # the base attachment type Graph resolves $select against — asking
+        # for it directly 400s on every call ("Could not find a property
+        # named 'contentBytes' on type 'microsoft.graph.attachment'"),
+        # confirmed live. Silently caught below, so this has been failing on
+        # every single Outlook attachment, ever, invisibly — a photographed
+        # invite emailed to self came through with an empty body and got
+        # triaged as skip because the image was never actually fetched.
         resp = requests.get(
-            f"{GRAPH_BASE}/me/messages/{msg_id}/attachments"
-            "?$select=name,contentType,contentBytes,size",
+            f"{GRAPH_BASE}/me/messages/{msg_id}/attachments",
             headers=_headers(account), timeout=30,
         )
         resp.raise_for_status()
@@ -362,6 +369,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
     except Exception as e:
         print(f"[outlook] sync_email failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_email: {e}")
 
     if skipped:
         print(f"[outlook] {skipped} messages skipped (junk/filtered) for {account['email_address']}")
@@ -624,6 +632,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
     except Exception as e:
         print(f"[outlook] sync_calendar failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_calendar: {e}")
 
     return synced
 

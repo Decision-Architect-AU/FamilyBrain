@@ -25,6 +25,7 @@ from .filters import should_ingest, reset_cache as reset_filter_cache
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",   # read + label + send (excludes permanent delete)
     "https://www.googleapis.com/auth/calendar",       # full calendar read/write (create, update, delete events)
+    "https://www.googleapis.com/auth/tasks",          # Increment 5 — Google Tasks channel, full read/write
 ]
 
 # Label cache: account_id → {category_name: labelId}
@@ -103,9 +104,10 @@ def search_messages(account: dict, query: str, max_results: int = 20) -> list[di
     return [svc.users().messages().get(userId="me", id=mid, format="full").execute() for mid in ids]
 
 
-def create_draft(account: dict, to: str, subject: str, body_text: str, body_html: str | None = None) -> str:
+def create_draft(account: dict, to: str, subject: str, body_text: str, body_html: str | None = None) -> tuple[str, str, str]:
     """
-    Create a Gmail draft in `account`'s own mailbox. Returns the new draft id.
+    Create a Gmail draft in `account`'s own mailbox. Returns
+    (draft_id, thread_id, message_id).
     Uses the account's own Gmail API credentials — unlike an external Gmail
     connector/MCP tool that may be authorized against a completely different
     mailbox than any FamilyBrain-connected account (confirmed live: a draft
@@ -115,6 +117,12 @@ def create_draft(account: dict, to: str, subject: str, body_text: str, body_html
     When `body_html` is given, sends a multipart/alternative message (plain
     text + HTML) so mail clients that render HTML show the styled version
     (e.g. bold/red for urgent items) while still degrading gracefully.
+
+    thread_id/message_id are returned alongside draft_id (Increment 4) so a
+    caller can recognise a reply to this specific draft later (investigation
+    follow-ups — see personal.event.draft_thread_id) and apply a label to the
+    drafted message (apply_ingested_label operates on a message id, not a
+    draft id) without a second API round-trip to look either up after the fact.
     """
     import base64
     from email.mime.text import MIMEText
@@ -131,7 +139,7 @@ def create_draft(account: dict, to: str, subject: str, body_text: str, body_html
     msg["subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     result = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-    return result["id"]
+    return result["id"], result["message"]["threadId"], result["message"]["id"]
 
 
 # ── Email ──────────────────────────────────────────────────────────────────────
@@ -298,6 +306,25 @@ def apply_ingested_label(account: dict, svc, msg_id: str, category: str) -> None
         ).execute()
     except Exception as e:
         print(f"[gmail] Failed to apply label for {msg_id}: {e}")
+
+
+def swap_ingested_label(account: dict, svc, msg_id: str, remove_category: str, add_category: str) -> None:
+    """
+    Remove FamilyBrain/<remove_category> and add FamilyBrain/<add_category> on
+    a single message in one modify() call (Increment 4, 4d: investigation-
+    pending → investigation-resolved). apply_ingested_label only ever adds —
+    this is the first real removal path.
+    """
+    try:
+        remove_id = _get_or_create_label(svc, account["id"], remove_category)
+        add_id = _get_or_create_label(svc, account["id"], add_category)
+        svc.users().messages().modify(
+            userId="me",
+            id=msg_id,
+            body={"addLabelIds": [add_id], "removeLabelIds": [remove_id]},
+        ).execute()
+    except Exception as e:
+        print(f"[gmail] Failed to swap label for {msg_id}: {e}")
 
 
 def sync_email(account: dict, ingestor_url: str) -> int:
@@ -491,6 +518,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
     except Exception as e:
         print(f"[gmail] sync_email failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_email: {e}")
 
     if skipped:
         print(f"[gmail] {skipped} messages skipped (junk/filtered) for {account['email_address']}")
@@ -681,6 +709,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
     except Exception as e:
         print(f"[gmail] sync_calendar failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_calendar: {e}")
 
     return synced
 

@@ -5,6 +5,7 @@ in, typed dict out, no LLM calls, read-only.
 """
 from . import (
     changes_since,
+    check_product_completeness,
     dependency_chain,
     events_in_window,
     handled_items,
@@ -20,4 +21,5 @@ REGISTRY = {
     "dependency_chain": (dependency_chain.run, dependency_chain.Params, dependency_chain.pack_text),
     "changes_since": (changes_since.run, changes_since.Params, changes_since.pack_text),
     "handled_items": (handled_items.run, handled_items.Params, handled_items.pack_text),
+    "check_product_completeness": (check_product_completeness.run, check_product_completeness.Params, check_product_completeness.pack_text),
 }

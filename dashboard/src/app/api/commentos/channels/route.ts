@@ -8,8 +8,12 @@ export async function GET() {
         AND coalesce(r.started_at, r.created_at) > now() - interval '24 hours') AS runs_today,
       (SELECT coalesce(sum(r.threads_captured),0) FROM decision_os.co_run r WHERE r.channel_id=c.id
         AND coalesce(r.finished_at, r.started_at, r.created_at) > now() - interval '24 hours') AS threads_today,
-      (SELECT count(*) FROM decision_os.co_keyword k WHERE k.channel_id=c.id AND k.active) AS active_keywords
-    FROM decision_os.co_channel c ORDER BY c.id`);
+      (SELECT count(*) FROM decision_os.co_keyword k WHERE k.channel_id=c.id AND k.active) AS active_keywords,
+      (SELECT count(*) FROM decision_os.co_capture cap WHERE cap.platform=c.slug AND cap.status='active') AS captures,
+      (SELECT max(cap.captured_at) FROM decision_os.co_capture cap WHERE cap.platform=c.slug) AS last_capture,
+      (SELECT count(*) FROM decision_os.co_comment cm JOIN decision_os.co_capture cap ON cap.id=cm.capture_id
+        WHERE cap.platform=c.slug) AS total_comments
+    FROM decision_os.co_channel c ORDER BY c.channel_type, c.id`);
   return NextResponse.json(rows);
 }
 
