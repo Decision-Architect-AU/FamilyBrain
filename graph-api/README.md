@@ -20,7 +20,7 @@ API docs available at `http://localhost:4003/docs` when running.
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
 AGE_GRAPH_NAME=personal_graph
 OLLAMA_URL=http://172.23.96.1:11434
 EXTRACT_MODEL=qwen2.5:14b

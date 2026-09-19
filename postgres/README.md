@@ -14,12 +14,17 @@ PostgreSQL 16 with Apache AGE 1.6, pgvector, and pg_trgm. The single source of t
 
 | Schema | Owner | Purpose |
 |--------|-------|---------|
-| `personal` | curator | Family, care, household, appointments, notes, assets, events |
+| `personal` | curator | Family, care, household, appointments, notes, assets, events, products |
 | `property_deals` | curator | Property listings, market research |
 | `decision_architect` | curator | Frameworks, thought leadership |
+| `decision_os` | curator | Decision OS state |
+| `ed_core` | commentos | CommentOS concept ontology — concepts, failure modes, outcomes, MEANS edges |
 | `audit` | audit_writer | Append-only activity log |
-| `config` | curator | Intent rules, response personas, channel rules |
+| `config` | curator | Intent rules, response personas, channel rules, maintenance throttles |
 | `n8n` | n8n | n8n workflow state |
+| `personal_graph`, `property_graph`, `decision_graph` | curator | AGE graph storage — one label per physical table, created lazily on first write |
+
+The database itself is named **`openclaw`**, not `familybrain` — the repo directory and the container prefix differ, so `psql -d familybrain` fails.
 
 ## Roles
 
@@ -32,6 +37,7 @@ PostgreSQL 16 with Apache AGE 1.6, pgvector, and pg_trgm. The single source of t
 | `n8n` | Read/write n8n schema only |
 | `scraper` | Write to property_deals |
 | `pr_agent` | Read/write decision_architect |
+| `commentos` | Read/write ed_core (CommentOS ontology) |
 
 ## AGE usage
 
@@ -55,26 +61,33 @@ Every edge in `personal_graph` carries `confidence INT` (0–100, backfilled per
 
 `config.maintenance_throttle` (`postgres/init/41_maintenance_throttle.sql`) tracks per-task last-run timestamps for wa-agent's maintenance cycle. This replaced a `/tmp`-file-based throttle: the container filesystem resets on every restart, so a task throttled to "once per day" would silently run on every restart instead — during a session with frequent rebuilds this let the `dedup`/`prune` task run unthrottled and hold Postgres backends in lock contention for minutes at a time, blocking live queries. A Postgres-backed throttle survives restarts by construction, since it lives in the same durable store the rest of the state does.
 
+## Recent schema additions
+
+| Script | What it adds |
+|---|---|
+| `48_email_account_sync_status.sql` | `email_account.last_sync_error` / `last_sync_error_at` — the most recent failure message per account, cleared automatically on the next success. Added because a revoked Gmail token failed on every attempt for over two weeks with the only trace in container logs; `last_synced_at` showed the account was stale but never why. |
+| `49_products.sql` | `personal.product` — products owned under an asset, with warranty window, vendor address string and investigation lifecycle. `tier` defaults to `secondary` so Asset stays the default-view entity and Product surfaces only on drill-down. |
+| `49_graph_edge_indexes.sql` | Edge indexes for `personal_graph` traversal. |
+| `50_google_tasks.sql` | `personal.event.task_status` (`open`/`done`) and a `channel` discriminator on `calendar_sync_map`, generalising it from calendar-mirror-only to "our event ↔ one external resource on some channel". Existing rows backfill to `gcal_mirror`, so mirror behaviour is untouched; tasks use `gtask_primary`. |
+
+Two scripts share the `49_` prefix (`49_products.sql`, `49_graph_edge_indexes.sql`). They are independent, so either order works, but the next addition should not assume the prefix is unique.
+
 ## Initialisation
 
-`postgres/init/` contains ordered SQL scripts that run on first container start. To re-run a migration manually:
+`postgres/init/` contains ordered SQL scripts that run **only on first container start**, against an empty data directory. Adding a file to that directory does not apply it to a database that already exists — a new migration has to be run by hand as well:
 
 ```bash
-docker exec familybrain-postgres psql -U geoff -d familybrain -f /path/to/migration.sql
+docker exec familybrain-postgres psql -U geoff -d openclaw -f /docker-entrypoint-initdb.d/<migration>.sql
 ```
 
-Migrations in `postgres/migrations/` must be applied manually after initial setup:
-
-```bash
-docker exec familybrain-postgres psql -U geoff -d familybrain -f /docker-entrypoint-initdb.d/<migration>.sql
-```
+Scripts in `postgres/migrations/` are never run automatically and always have to be applied this way. To run one from a path on the host, copy it in first with `docker cp`.
 
 ## Environment variables
 
 ```env
 POSTGRES_USER=geoff
 POSTGRES_PASSWORD=<required>
-POSTGRES_DB=familybrain
+POSTGRES_DB=openclaw
 DASHBOARD_DB_PASSWORD=<required>
 AUDIT_DB_PASSWORD=<required>
 N8N_DB_PASSWORD=<required>
