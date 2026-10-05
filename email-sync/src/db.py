@@ -47,9 +47,29 @@ def update_sync_cursor(account_id: int, cursor: str) -> None:
         with c.cursor() as cur:
             cur.execute(
                 """UPDATE personal.email_account
-                   SET sync_cursor = %s, last_synced_at = now(), updated_at = now()
+                   SET sync_cursor = %s, last_synced_at = now(), updated_at = now(),
+                       last_sync_error = NULL, last_sync_error_at = NULL
                    WHERE id = %s""",
                 (cursor, account_id),
+            )
+        c.commit()
+
+
+def record_sync_error(account_id: int, error: str) -> None:
+    """
+    Persist the most recent sync failure so it's dashboard-visible instead of
+    only living in container logs — confirmed live: shannon.garner@gmail.com's
+    Gmail token failed with invalid_grant on every single attempt for over
+    2 weeks with nothing queryable to show for it. Cleared automatically the
+    next time a sync succeeds (see update_sync_cursor/update_calendar_sync_cursor).
+    """
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.email_account
+                   SET last_sync_error = %s, last_sync_error_at = now()
+                   WHERE id = %s""",
+                (error[:2000], account_id),
             )
         c.commit()
 
@@ -71,7 +91,8 @@ def update_calendar_sync_cursor(account_id: int, cursor: str) -> None:
         with c.cursor() as cur:
             cur.execute(
                 """UPDATE personal.email_account
-                   SET calendar_sync_cursor = %s, updated_at = now()
+                   SET calendar_sync_cursor = %s, updated_at = now(),
+                       last_sync_error = NULL, last_sync_error_at = NULL
                    WHERE id = %s""",
                 (cursor, account_id),
             )
@@ -125,16 +146,20 @@ def is_already_ingested(account_id: int, provider_msg_id: str) -> bool:
             return cur.fetchone() is not None
 
 
-def get_retryable_messages(account_id: int) -> list[str]:
-    """Return provider_msg_ids with status 'error' or 'pending' (have body to re-fetch)."""
+def get_retryable_messages(account_id: int, limit: int = 500) -> list[str]:
+    """Return provider_msg_ids with status 'error' or 'pending' (have body to re-fetch).
+
+    Callers cap `limit` to what one sync cycle can actually drain — the
+    ingestor is single-threaded, so an oversized batch stalls the whole loop.
+    """
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """SELECT provider_msg_id FROM personal.email_message
                    WHERE account_id = %s AND ingest_status IN ('error', 'pending')
                    ORDER BY received_at DESC NULLS LAST
-                   LIMIT 500""",
-                (account_id,),
+                   LIMIT %s""",
+                (account_id, limit),
             )
             return [r["provider_msg_id"] for r in cur.fetchall()]
 
@@ -436,19 +461,28 @@ def cascade_relative_events(parent_event_id: int) -> int:
     return updated
 
 
-def get_sync_map(source_account_id: int, source_provider_id: str) -> Optional[dict]:
+def get_sync_map(source_account_id: int, source_provider_id: str, channel: str = "gcal_mirror") -> Optional[dict]:
+    """
+    channel defaults to 'gcal_mirror' — the pre-Increment-5 calendar-mirror
+    behavior every existing caller relies on. Increment 5's Task sync passes
+    channel='gtask_primary' explicitly (see calendar_sync_map's channel
+    column, added by postgres/init/50_google_tasks.sql, which generalized
+    this table from calendar-mirror-specific to channel-discriminated).
+    """
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """SELECT * FROM personal.calendar_sync_map
-                   WHERE source_account_id = %s AND source_provider_id = %s""",
-                (source_account_id, source_provider_id),
+                   WHERE channel = %s AND source_account_id = %s AND source_provider_id = %s""",
+                (channel, source_account_id, source_provider_id),
             )
             return cur.fetchone()
 
 
 def is_mirror_event(mirror_account_id: int, mirror_provider_id: str) -> bool:
-    """Return True if this Outlook event ID was created by appointment_updater as a mirror."""
+    """Return True if this Outlook event ID was created by appointment_updater as a mirror.
+    Calendar-mirror-specific by construction (mirror_account_id/mirror_provider_id are only
+    ever populated for channel='gcal_mirror' rows) — no channel filter needed."""
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
@@ -468,7 +502,9 @@ def upsert_sync_map(
     target_cal_provider_id: Optional[str] = None,
     sync_status: str = "synced",
     etag: Optional[str] = None,
+    channel: str = "gcal_mirror",
 ) -> None:
+    """channel defaults to 'gcal_mirror' — see get_sync_map's docstring."""
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
@@ -476,9 +512,9 @@ def upsert_sync_map(
                 INSERT INTO personal.calendar_sync_map
                     (event_id, source_account_id, source_provider_id,
                      mirror_account_id, mirror_provider_id, target_cal_provider_id,
-                     sync_status, last_synced_at, etag, last_etag)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, now(), %s, %s)
-                ON CONFLICT (source_account_id, source_provider_id) DO UPDATE
+                     sync_status, last_synced_at, etag, last_etag, channel)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s)
+                ON CONFLICT (channel, source_account_id, source_provider_id) DO UPDATE
                     SET mirror_account_id       = COALESCE(EXCLUDED.mirror_account_id, calendar_sync_map.mirror_account_id),
                         mirror_provider_id      = COALESCE(EXCLUDED.mirror_provider_id, calendar_sync_map.mirror_provider_id),
                         target_cal_provider_id  = COALESCE(EXCLUDED.target_cal_provider_id, calendar_sync_map.target_cal_provider_id),
@@ -489,6 +525,6 @@ def upsert_sync_map(
                 """,
                 (event_id, source_account_id, source_provider_id,
                  mirror_account_id, mirror_provider_id, target_cal_provider_id,
-                 sync_status, etag, etag if target_cal_provider_id else None),
+                 sync_status, etag, etag if target_cal_provider_id else None, channel),
             )
         c.commit()

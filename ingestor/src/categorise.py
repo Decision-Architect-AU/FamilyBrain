@@ -17,6 +17,8 @@ import psycopg2
 import psycopg2.extras
 import ollama
 
+from .llm_caller import caller_client
+
 OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 FAST_MODEL    = os.environ.get("MODEL_PARSER_1ST", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b"))
 CAREFUL_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("CATEGORISE_CAREFUL_MODEL", "qwen2.5:3b"))
@@ -73,7 +75,7 @@ Reply with a JSON object: {{"category": "<one of the categories above>", "confid
 
 
 def _client() -> ollama.Client:
-    return ollama.Client(host=OLLAMA_URL)
+    return caller_client("categorise")
 
 
 def _parse_fast(response: str) -> tuple[str, float]:

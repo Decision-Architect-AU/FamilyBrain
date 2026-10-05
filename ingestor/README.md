@@ -81,7 +81,7 @@ Every edge written to `personal_graph` carries `confidence INT` (0–100). Suppr
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
 AUDIT_SERVICE_URL=http://audit-logger:4000
 OLLAMA_URL=http://172.23.96.1:11434
 AGENT_MODEL=qwen2.5:3b

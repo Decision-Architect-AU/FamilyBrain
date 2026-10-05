@@ -18,6 +18,7 @@ import requests
 
 from . import db
 from .filters import should_ingest, reset_cache as reset_filter_cache
+from .ingest_client import INGEST_TIMEOUT, RETRY_BATCH, ingestor_ready
 
 TENANT_ID     = os.environ.get("MICROSOFT_TENANT_ID", "consumers")  # 'consumers' for personal MSA
 CLIENT_ID     = os.environ["MICROSOFT_CLIENT_ID"]
@@ -167,9 +168,16 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
     as an attached image were invisible to triage and the decomposer.
     """
     try:
+        # No $select: contentBytes lives on the fileAttachment subtype, not
+        # the base attachment type Graph resolves $select against — asking
+        # for it directly 400s on every call ("Could not find a property
+        # named 'contentBytes' on type 'microsoft.graph.attachment'"),
+        # confirmed live. Silently caught below, so this has been failing on
+        # every single Outlook attachment, ever, invisibly — a photographed
+        # invite emailed to self came through with an empty body and got
+        # triaged as skip because the image was never actually fetched.
         resp = requests.get(
-            f"{GRAPH_BASE}/me/messages/{msg_id}/attachments"
-            "?$select=name,contentType,contentBytes,size",
+            f"{GRAPH_BASE}/me/messages/{msg_id}/attachments",
             headers=_headers(account), timeout=30,
         )
         resp.raise_for_status()
@@ -188,7 +196,7 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
             r = requests.post(
                 f"{ingestor_url}/ingest/extract",
                 json={"content_b64": content_b64, "filename": filename},
-                timeout=60,
+                timeout=INGEST_TIMEOUT,
             )
             if r.ok and r.json().get("ok"):
                 text = r.json().get("text", "").strip()
@@ -197,6 +205,11 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
         except Exception as e:
             print(f"[outlook] attachment extract failed for {filename!r}: {e}")
     return "\n\n".join(blocks)
+
+
+# Fields every inbox fetch needs — the delta cursor bakes this projection in,
+# so the initial fetch, delta seed and retry re-fetch must all agree.
+_MSG_SELECT = "id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments"
 
 
 def sync_email(account: dict, ingestor_url: str) -> int:
@@ -212,6 +225,13 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
     reset_filter_cache()
 
+    def _tally(result: str) -> None:
+        nonlocal ingested, skipped
+        if result == "ingested":
+            ingested += 1
+        elif result == "skipped":
+            skipped += 1
+
     try:
         if cursor:
             url = cursor  # deltaLink is a complete URL
@@ -219,7 +239,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             initial_days = int(os.environ.get("OUTLOOK_INITIAL_DAYS", "90"))
             since = (datetime.now(timezone.utc) - timedelta(days=initial_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             # Use regular messages endpoint for initial fetch — delta ignores $filter
-            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments&$filter=receivedDateTime+ge+{since}"
+            url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime+desc&$select={_MSG_SELECT}&$filter=receivedDateTime+ge+{since}"
 
         while url:
             resp = requests.get(url, headers=_headers(account), timeout=30)
@@ -227,99 +247,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             data = resp.json()
 
             for msg in data.get("value", []):
-                msg_id = msg["id"]
-                if db.is_already_ingested(account_id, msg_id):
+                if db.is_already_ingested(account_id, msg["id"]):
                     continue
-
-                from_name, from_addr = _parse_address(msg.get("from") or {})
-                to_addrs = [
-                    r["emailAddress"]["address"]
-                    for r in msg.get("toRecipients") or []
-                    if r.get("emailAddress", {}).get("address")
-                ]
-                body_obj  = msg.get("body") or {}
-                body_text = (
-                    _strip_html(body_obj.get("content", ""))
-                    if (body_obj.get("contentType") or "").lower() == "html"
-                    else body_obj.get("content", "")
-                )
-                # Fall back to Graph API bodyPreview when HTML stripping yields nothing
-                # (happens with image-only or layout-only emails)
-                if not body_text.strip():
-                    body_text = msg.get("bodyPreview", "")
-
-                if msg.get("hasAttachments"):
-                    attachment_text = _extract_attachments_text(account, msg_id, ingestor_url)
-                    if attachment_text:
-                        body_text = f"{body_text}\n\n{attachment_text}"
-
-                subject = msg.get("subject") or "(no subject)"
-
-                # Skip locally if still no body — avoids ingestor round-trip rejection
-                if not body_text.strip():
-                    skipped += 1
-                    db.mark_skipped(account_id, msg_id, from_addr, subject,
-                                    msg.get("receivedDateTime"), "outlook:empty_body")
-                    continue
-
-                # Self-sent emails (e.g. scanner to self) always pass through
-                acct_addr = account.get("email_address", "").lower()
-                is_self_sent = from_addr.lower() == acct_addr
-
-                # Only sync Focused inbox — skip Other unless domain is in financial_domain DB table
-                if not is_self_sent and msg.get("inferenceClassification") == "other":
-                    domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
-                    try:
-                        import psycopg2
-                        _db_url = os.environ.get("DATABASE_URL")
-                        with psycopg2.connect(_db_url) as _conn:
-                            with _conn.cursor() as _cur:
-                                _cur.execute(
-                                    "SELECT 1 FROM personal.financial_domain WHERE %s ILIKE '%%' || domain || '%%' LIMIT 1",
-                                    (domain,)
-                                )
-                                _in_whitelist = _cur.fetchone() is not None
-                    except Exception:
-                        _in_whitelist = False
-                    if not _in_whitelist:
-                        skipped += 1
-                        db.mark_skipped(account_id, msg_id, from_addr, subject,
-                                        msg.get("receivedDateTime"), "outlook:other")
-                        continue
-
-                ok, reason = should_ingest(
-                    from_address=from_addr,
-                    subject=subject,
-                    body_text=body_text,
-                )
-                if not ok:
-                    print(f"[outlook] skipped {msg_id} ({from_addr}): {reason}")
-                    skipped += 1
-                    db.mark_skipped(account_id, msg_id, from_addr, subject,
-                                    msg.get("receivedDateTime"), reason)
-                    continue
-
-                payload = {
-                    "account_id":      account_id,
-                    "provider_msg_id": msg_id,
-                    "thread_id":       msg.get("conversationId"),
-                    "from_address":    from_addr,
-                    "from_name":       from_name,
-                    "to_addresses":    to_addrs,
-                    "subject":         subject,
-                    "received_at":     msg.get("receivedDateTime"),
-                    "body_text":       body_text,
-                    "attachments":     [],
-                    "is_sent":         False,
-                }
-                r2 = requests.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
-                if r2.ok:
-                    ingested += 1
-                    # Apply FamilyBrain/<category> Outlook category tag
-                    category = r2.json().get("category", "personal")
-                    apply_ingested_category(account, msg_id, category)
-                else:
-                    print(f"[outlook] ingestor rejected {msg_id}: {r2.text}")
+                _tally(_process_message(account, msg, ingestor_url))
 
             # Pagination — save nextLink as cursor so retries resume mid-backfill
             next_link  = data.get("@odata.nextLink")
@@ -347,7 +277,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     # "(no subject)". Must match the fields the real sync loop needs.
                     seed_resp = requests.get(
                         f"{GRAPH_BASE}/me/mailFolders/inbox/messages/delta"
-                        f"?$top=1&$select=id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,conversationId,hasAttachments",
+                        f"?$top=1&$select={_MSG_SELECT}",
                         headers=_headers(account), timeout=30,
                     )
                     seed_data = seed_resp.json()
@@ -362,6 +292,34 @@ def sync_email(account: dict, ingestor_url: str) -> int:
 
     except Exception as e:
         print(f"[outlook] sync_email failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_email: {e}")
+
+    # Retry previously failed messages (e.g. triage deferred while Ollama was
+    # down). The delta cursor has already moved past them, so without this
+    # pass they would never be looked at again.
+    #
+    # Bounded and gated: the ingestor is single-threaded, so a large backlog
+    # makes every post block on connect. An unbounded batch here outlived the
+    # watchdog's restart threshold, so no cycle ever finished and the calendar
+    # loop never ran either.
+    retry_ids = []
+    if not ingestor_ready(ingestor_url):
+        print(f"[outlook] ingestor busy — skipping retry pass this cycle for {account['email_address']}")
+    else:
+        retry_ids = db.get_retryable_messages(account_id, limit=RETRY_BATCH)
+    if retry_ids:
+        print(f"[outlook] retrying {len(retry_ids)} error/pending messages for {account['email_address']}")
+    for msg_id in retry_ids:
+        try:
+            resp = requests.get(f"{GRAPH_BASE}/me/messages/{msg_id}?$select={_MSG_SELECT}",
+                                headers=_headers(account), timeout=(5, 30))
+            if resp.status_code == 404:
+                db.mark_skipped(account_id, msg_id, "", "", None, "outlook:deleted")
+                continue
+            resp.raise_for_status()
+            _tally(_process_message(account, resp.json(), ingestor_url))
+        except Exception as e:
+            print(f"[outlook] retry failed for {msg_id}: {e}")
 
     if skipped:
         print(f"[outlook] {skipped} messages skipped (junk/filtered) for {account['email_address']}")
@@ -370,6 +328,105 @@ def sync_email(account: dict, ingestor_url: str) -> int:
     ingested += _sync_sent_items(account, ingestor_url)
 
     return ingested
+
+
+def _process_message(account: dict, msg: dict, ingestor_url: str) -> str:
+    """Filter one inbox message and submit it. Returns 'ingested', 'skipped' or 'failed'."""
+    account_id = account["id"]
+    msg_id     = msg["id"]
+
+    from_name, from_addr = _parse_address(msg.get("from") or {})
+    to_addrs = [
+        r["emailAddress"]["address"]
+        for r in msg.get("toRecipients") or []
+        if r.get("emailAddress", {}).get("address")
+    ]
+    body_obj  = msg.get("body") or {}
+    body_text = (
+        _strip_html(body_obj.get("content", ""))
+        if (body_obj.get("contentType") or "").lower() == "html"
+        else body_obj.get("content", "")
+    )
+    # Fall back to Graph API bodyPreview when HTML stripping yields nothing
+    # (happens with image-only or layout-only emails)
+    if not body_text.strip():
+        body_text = msg.get("bodyPreview", "")
+
+    if msg.get("hasAttachments"):
+        attachment_text = _extract_attachments_text(account, msg_id, ingestor_url)
+        if attachment_text:
+            body_text = f"{body_text}\n\n{attachment_text}"
+
+    subject = msg.get("subject") or "(no subject)"
+
+    # Skip locally if still no body — avoids ingestor round-trip rejection
+    if not body_text.strip():
+        db.mark_skipped(account_id, msg_id, from_addr, subject,
+                        msg.get("receivedDateTime"), "outlook:empty_body")
+        return "skipped"
+
+    # Self-sent emails (e.g. scanner to self) always pass through
+    acct_addr = account.get("email_address", "").lower()
+    is_self_sent = from_addr.lower() == acct_addr
+
+    # Only sync Focused inbox — skip Other unless domain is in financial_domain DB table
+    if not is_self_sent and msg.get("inferenceClassification") == "other":
+        domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
+        try:
+            import psycopg2
+            _db_url = os.environ.get("DATABASE_URL")
+            with psycopg2.connect(_db_url) as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT 1 FROM personal.financial_domain WHERE %s ILIKE '%%' || domain || '%%' LIMIT 1",
+                        (domain,)
+                    )
+                    _in_whitelist = _cur.fetchone() is not None
+        except Exception:
+            _in_whitelist = False
+        if not _in_whitelist:
+            db.mark_skipped(account_id, msg_id, from_addr, subject,
+                            msg.get("receivedDateTime"), "outlook:other")
+            return "skipped"
+
+    ok, reason = should_ingest(
+        from_address=from_addr,
+        subject=subject,
+        body_text=body_text,
+    )
+    if not ok:
+        print(f"[outlook] skipped {msg_id} ({from_addr}): {reason}")
+        db.mark_skipped(account_id, msg_id, from_addr, subject,
+                        msg.get("receivedDateTime"), reason)
+        return "skipped"
+
+    payload = {
+        "account_id":      account_id,
+        "provider_msg_id": msg_id,
+        "thread_id":       msg.get("conversationId"),
+        "from_address":    from_addr,
+        "from_name":       from_name,
+        "to_addresses":    to_addrs,
+        "subject":         subject,
+        "received_at":     msg.get("receivedDateTime"),
+        "body_text":       body_text,
+        "attachments":     [],
+        "is_sent":         False,
+    }
+    r2 = requests.post(f"{ingestor_url}/ingest/email", json=payload, timeout=INGEST_TIMEOUT)
+    if not r2.ok:
+        print(f"[outlook] ingestor rejected {msg_id}: {r2.text}")
+        return "failed"
+    result = r2.json()
+    if not result.get("ok", True):
+        print(f"[outlook] ingestor deferred {msg_id}: {result.get('error')}")
+        return "failed"
+    if result.get("skipped"):
+        # Triaged out (marketing/skip) — don't tag it as a FamilyBrain item
+        return "skipped"
+    # Apply FamilyBrain/<category> Outlook category tag
+    apply_ingested_category(account, msg_id, result.get("category", "personal"))
+    return "ingested"
 
 
 def _sync_sent_items(account: dict, ingestor_url: str) -> int:
@@ -441,7 +498,7 @@ def _sync_sent_items(account: dict, ingestor_url: str) -> int:
                     "attachments":     [],
                     "is_sent":         True,
                 }
-                r2 = req_lib.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
+                r2 = req_lib.post(f"{ingestor_url}/ingest/email", json=payload, timeout=INGEST_TIMEOUT)
                 if r2.ok:
                     ingested += 1
                 else:
@@ -624,6 +681,7 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
     except Exception as e:
         print(f"[outlook] sync_calendar failed for {account['email_address']}: {e}")
+        db.record_sync_error(account_id, f"sync_calendar: {e}")
 
     return synced
 

@@ -16,6 +16,8 @@ import psycopg2
 import psycopg2.extras
 import requests
 
+from .llm_caller import caller_headers
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")
@@ -44,7 +46,7 @@ def _generate(model: str, prompt: str, num_predict: int = 300) -> str:
     r = requests.post(f"{OLLAMA_URL}/api/generate", json={
         "model": model, "prompt": prompt, "stream": False,
         "options": {"temperature": 0.2, "num_predict": num_predict},
-    }, timeout=300)
+    }, headers=caller_headers("pipeline"), timeout=300)
     r.raise_for_status()
     return r.json()["response"].strip()
 
@@ -52,7 +54,8 @@ def _generate(model: str, prompt: str, num_predict: int = 300) -> str:
 def _embed(text: str) -> str:
     """Embed text; returns pgvector literal string."""
     r = requests.post(f"{OLLAMA_URL}/api/embeddings",
-                      json={"model": EMBED_MODEL, "prompt": text}, timeout=60)
+                      json={"model": EMBED_MODEL, "prompt": text},
+                      headers=caller_headers("embed"), timeout=60)
     r.raise_for_status()
     vec = r.json()["embedding"]
     return "[" + ",".join(f"{v:.6f}" for v in vec) + "]"

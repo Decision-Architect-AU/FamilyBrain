@@ -18,16 +18,28 @@ Personal brain scope:
     extracurricular activities (music/sport programs, choir, concerts,
     recitals, permission forms, group/team assignments, performance schedules)
 
-Two-stage:
+Three-stage:
+  0. Household-forward gate (deterministic, DB) — forwards between the
+     household's own connected inboxes are never hard-skipped; if their
+     content hasn't been processed yet they ingest outright
   1. Keyword rules (no LLM) — catches obvious cases fast
   2. LLM fast-path (3b) — for ambiguous cases
 """
 import re
 import os
+import time
 import ollama
+
+from .llm_caller import caller_client
+
+DB_URL = os.environ.get("DATABASE_URL")
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 TRIAGE_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("TRIAGE_MODEL", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b")))
+
+
+class TriageUnavailable(Exception):
+    """The LLM triage step couldn't run — the email should be retried, not skipped."""
 
 # ── Always skip — known noise senders ────────────────────────────────────────
 # These never produce personal_brain content regardless of subject
@@ -78,6 +90,8 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
     r'commbank|westpac|nab\.com\.au|anz|macquarie|'
     r'firstmac|resimac|peppermoney|brighten|mamoney|'
     r'ignitionapp\.com|'
+    # Hospitals / specialists — appointment letters and admission paperwork
+    r'ramsayhealth|pindara|healthscope|mater\.org\.au|drneilsmith|'
     r'sammygordonsschoolofproperty\.com\.au)',   # property education — Q&A session reminders carry real dates/times
     re.I,
 )
@@ -89,14 +103,30 @@ _INGEST_SUBJECT_KW = re.compile(
     r'invoice|receipt|statement|tax invoice|remittance|eft|bas|tax return|'
     r'payment received|payment due|overdue|balance due|direct debit|'
     r'loan|mortgage|interest rate|repayment|pre-approval|'
+    # Purchases / order confirmations — these are receipts in all but name
+    # ("Ordered: ...", "Order #1241762312 confirmed") and previously fell
+    # through to the LLM step, which skipped them whenever Ollama was down
+    r'ordered(?=:)|order (?:is |has been )?confirm(?:ed|ation)?|order #?\s?\d{4,}|your order|'
+    r'purchase confirm(?:ed|ation)?|payment confirm(?:ed|ation)?|payment notification|'
+    r'booking confirmed|reservation confirmed|'
     # Property management (NOT listings)
     r'ownership statement|rental statement|management fee|maintenance request|'
     r'lease|tenancy|strata levy|body corporate|council rates|'
     r'conveyancing|contract of sale|title search|'
     r'building inspection|pest inspection|due diligence|'
+    # Tenancy termination — these carry hard deadlines and were previously
+    # missed entirely (no keyword matched "Notice to Leave" or "vacate"),
+    # letting a real vacate-date email fall through to the ambiguous LLM step
+    r'notice to leave|notice to vacate|vacate by|vacating|'
+    r'termination notice|end of lease|end of tenancy|'
     # Health / medical
     r'appointment|referral|pathology|prescription|test results|hospital|'
     r'specialist|gp|doctor|medicare|health fund|'
+    # Surgery / hospital admission — a "MyCare: Estimate of Patient Costs for
+    # Admission" and an online admission form confirmation both matched
+    # nothing here and were skipped, so a surgery never reached the calendar
+    r'admission|pre[- ]?admission|day surgery|surgery|surgical|operation|'
+    r'anaesthe|pre[- ]?op|post[- ]?op|discharge|theatre list|'
     # NDIS / disability
     r'ndis|support worker|service agreement|plan management|'
     r'occupational therapy|speech therapy|physiotherapy|'
@@ -147,6 +177,124 @@ _MARKETING_SUBJECT_KW = re.compile(
     re.I,
 )
 
+# ── Forwarded-message annotation ─────────────────────────────────────────────
+# A short human-written note added above quoted/forwarded content (e.g.
+# "Loganholme to vacate on 28/10/2026" forwarded straight from an agent's
+# Notice to Leave) is a much stronger personal-relevance signal than anything
+# in the forwarded boilerplate below it, but gets diluted by keyword checks
+# that scan the whole body. If that annotation contains a real date, treat it
+# as ingest outright rather than leaving it to the ambiguous LLM fallback.
+_FORWARD_MARKER_RE = re.compile(
+    r'-{2,}\s*forwarded message\s*-{2,}|'
+    r'-{2,}\s*original message\s*-{2,}|'
+    r'^begin forwarded message:|'
+    r'^on .+ wrote:',
+    re.I | re.M,
+)
+_DATE_PATTERN_RE = re.compile(
+    r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|'
+    r'\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|'
+    r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\b',
+    re.I,
+)
+
+
+def _forwarded_annotation(body: str) -> str:
+    """Return the human-written text above a forwarded/quoted-message marker, if any."""
+    m = _FORWARD_MARKER_RE.search(body)
+    return body[:m.start()].strip() if m else ""
+
+
+# ── Household-forward gate ───────────────────────────────────────────────────
+# A forward between the household's own connected inboxes (e.g. partner →
+# partner) is a deliberate act — a family member wouldn't forward something to
+# the other unless it mattered. Keyword/LLM triage must never hard-skip these
+# (the vacate-notice incident: a Notice to Leave forwarded partner-to-partner
+# resolved to skip). Instead: verify the forwarded content has already been
+# processed somewhere in the brain; if it hasn't, force full decomposition.
+
+_FWD_SUBJECT_RE = re.compile(r'^\s*(?:(?:fwd?|fw|re)\s*:\s*)+', re.I)
+
+_HOUSEHOLD_CACHE = {"at": 0.0, "addrs": frozenset()}
+_HOUSEHOLD_TTL_S = 600
+
+
+def _household_addresses() -> frozenset:
+    """Lowercased addresses of the household's own connected inboxes
+    (personal.email_account), cached for a few minutes."""
+    now = time.time()
+    if now - _HOUSEHOLD_CACHE["at"] < _HOUSEHOLD_TTL_S:
+        return _HOUSEHOLD_CACHE["addrs"]
+    try:
+        import psycopg2
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT lower(email_address) FROM personal.email_account")
+                addrs = frozenset(r[0] for r in cur.fetchall() if r[0])
+        _HOUSEHOLD_CACHE.update(at=now, addrs=addrs)
+    except Exception as e:
+        print(f"[triage] household-account lookup failed — gate inactive: {e}")
+    return _HOUSEHOLD_CACHE["addrs"]
+
+
+def _is_forward(subject: str, body: str) -> bool:
+    m = _FWD_SUBJECT_RE.match(subject or "")
+    if m and re.search(r'\bfwd?\b', m.group(0), re.I):
+        return True
+    return bool(_FORWARD_MARKER_RE.search(body))
+
+
+def _content_already_processed(subject: str) -> bool:
+    """Has the SUBSTANCE this forward carries already been captured?
+
+    'Processed' means a personal.event with a real date whose title relates to
+    the cleaned subject — nothing weaker. The vacate-notice incident had an
+    already-'ingested' email_message with the exact matching subject whose
+    extraction produced only a dateless task note; counting mere row existence
+    (email_message / note / dateless event) as processed reproduces exactly
+    the failure this gate exists to catch. Unverifiable (short subject, DB
+    error) counts as NOT processed — fail toward reprocessing, never a silent
+    drop. False negatives only cost a redundant decomposition pass."""
+    key = _FWD_SUBJECT_RE.sub("", subject or "").strip()
+    if len(key) < 8:
+        return False
+    # Significant-token overlap, not whole-string substring: an event titled
+    # "Vacate 215a Drews Road" must match the subject "Notice to Leave for
+    # 215a Drews Road, Loganholme" even though neither contains the other.
+    # Require nearly ALL the subject's tokens: the entity tokens alone are not
+    # enough ("215a Drews Road Loganholme" rent-review events match 4/6 tokens
+    # of a Notice to Leave subject for the same property), and the doc-type
+    # tokens alone aren't either ("notice"+"leave" for a different property).
+    # Only an event carrying both — e.g. "Vacate 215a Drews Road, Loganholme
+    # (Notice to Leave)" — counts as processed. A miss here only costs a
+    # redundant decomposition pass; a false match re-creates the incident.
+    tokens = list(dict.fromkeys(re.findall(r'[a-z0-9]{4,}', key.lower())))
+    if not tokens:
+        return False
+    need = max(2, len(tokens) - 1) if len(tokens) >= 2 else 1
+    try:
+        import psycopg2
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM personal.event e
+                        WHERE coalesce(e.effective_date,
+                                       (e.starts_at AT TIME ZONE 'Australia/Brisbane')::date)
+                              IS NOT NULL
+                          AND (SELECT count(*) FROM unnest(%(toks)s::text[]) t
+                               WHERE position(t IN lower(e.title)) > 0) >= %(need)s
+                    )
+                    """,
+                    {"toks": tokens, "need": need},
+                )
+                return bool(cur.fetchone()[0])
+    except Exception as e:
+        print(f"[triage] processed-check failed — treating as unprocessed: {e}")
+        return False
+
+
 # ── LLM prompt ────────────────────────────────────────────────────────────────
 _TRIAGE_PROMPT = """You are triaging emails for a personal knowledge system (personal brain).
 
@@ -166,6 +314,11 @@ Decide:
 - marketing: Promotional, newsletter, listing alert, discount offer, event promo
 - skip: Notifications, social updates, or correspondence not relevant to personal brain
 
+If this is a forward and there's a short personal note above the quoted/forwarded
+content, weigh that note heavily — it often signals real personal relevance (e.g. a
+deadline, a decision, a date to act on) even when the forwarded content below it reads
+like generic notification or legal boilerplate.
+
 Reply with exactly one word: ingest, marketing, or skip.
 
 From: {from_address}
@@ -180,6 +333,17 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     subj   = subject or ""
     body   = body_text[:1200]
     sender = from_address.lower()
+
+    # 0. Household-internal forward — deterministic gate, ahead of every
+    # keyword/LLM rule. If one of our own connected inboxes forwarded this,
+    # never hard-skip on content judgment: verify the forwarded content was
+    # already processed, and if it wasn't, force it through decomposition.
+    # If it WAS already captured, fall through — a fresh annotation can still
+    # earn ingestion on its own merits via the rules below.
+    if _is_forward(subj, body_text) and sender in _household_addresses():
+        if not _content_already_processed(subj):
+            print(f"[triage] household forward not yet processed — forcing ingest: {subj[:60]}")
+            return "ingest"
 
     # 1. Known noise senders — always skip
     if _ALWAYS_SKIP_SENDERS.search(sender):
@@ -201,15 +365,22 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     if _INGEST_SUBJECT_KW.search(body[:400]):
         return "ingest"
 
-    # 6. Clear marketing signals
+    # 6. Forwarded email with a dated personal annotation above the quoted
+    # content — a human took the time to flag a specific date, which outweighs
+    # whatever the forwarded boilerplate below it looks like
+    annotation = _forwarded_annotation(body)
+    if annotation and _DATE_PATTERN_RE.search(annotation):
+        return "ingest"
+
+    # 7. Clear marketing signals
     if _MARKETING_SUBJECT_KW.search(subj):
         return "marketing"
     if _MARKETING_BODY_KW.search(body):
         return "marketing"
 
-    # 7. Ambiguous — ask the LLM
+    # 8. Ambiguous — ask the LLM
     try:
-        client = ollama.Client(host=OLLAMA_URL)
+        client = caller_client("triage")
         resp = client.generate(
             model=TRIAGE_MODEL,
             prompt=_TRIAGE_PROMPT.format(
@@ -221,9 +392,12 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
         )
         word = resp["response"].strip().lower().split()[0] if resp["response"].strip() else ""
         word = re.sub(r"[^a-z]", "", word)
-        if word in ("ingest", "marketing", "skip"):
-            return word
-        return "skip"
     except Exception as e:
-        print(f"[triage] LLM error — defaulting to skip: {e}")
-        return "skip"
+        # Never turn an outage into a verdict — a 'skip' here is permanent
+        # (the message is never re-fetched), which silently dropped hundreds
+        # of receipts while Ollama was down. Let the caller mark it retryable.
+        print(f"[triage] LLM error — deferring: {e}")
+        raise TriageUnavailable(str(e)) from e
+    if word in ("ingest", "marketing", "skip"):
+        return word
+    return "skip"

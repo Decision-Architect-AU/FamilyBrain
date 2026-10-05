@@ -7,6 +7,12 @@ const STEP = 'border border-gray-800 rounded-lg p-4 bg-gray-900/40';
 
 export default function PlaybookPage() {
   const { data, mutate } = useSWR('/api/commentos/playbook', fetcher, { refreshInterval: 30000 });
+  const { data: shares, mutate: mutShares } = useSWR('/api/commentos/shares', fetcher, { refreshInterval: 60000 });
+  const shareAct = async (id: number, status: string) => {
+    await fetch('/api/commentos/shares', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'status', id, status }) });
+    mutShares();
+  };
   if (!data) return <div className="animate-pulse text-gray-500">Loading playbook…</div>;
   const s = data.scoreboard || {};
 
@@ -70,6 +76,15 @@ export default function PlaybookPage() {
             <span className="text-xs text-gray-500">{a.n_signals} signals</span>
             <span className={`text-xs px-2 py-0.5 rounded ${a.produced_ref ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'}`}>
               {a.produced_ref ? 'published' : a.status}</span>
+            {!a.produced_ref && (
+              <button onClick={async (e) => {
+                const btn = e.currentTarget; btn.textContent = 'drafting…';
+                await fetch('http://localhost:8765/publish-seed', { method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ seed_id: a.id }) }).catch(() => {});
+                btn.textContent = '✓ in Blogger drafts';
+              }} className="text-xs px-2 py-0.5 bg-purple-800 hover:bg-purple-700 rounded"
+                title="Creates a Blogger DRAFT — you review and hit Publish there">✍ Draft to blog</button>)}
             <a href="/commentos/seeds" className="text-xs text-cyan-400">open →</a>
           </div>
         ))}
@@ -95,6 +110,30 @@ export default function PlaybookPage() {
         ))}
       </div>
 
+      {/* Step 5: cross-reference */}
+      {(shares || []).length > 0 && (
+        <div className={STEP}>
+          <div className="font-bold mb-1">5 · 📢 Cross-post <span className="text-xs text-gray-500 font-normal">— content from one channel, shared to the others</span></div>
+          {(shares || []).map((sh: any) => (
+            <div key={sh.id} className="border-t border-gray-800 py-2 text-sm">
+              <div className="flex gap-2 text-xs text-gray-500 mb-1">
+                <span className="px-1.5 rounded bg-gray-800">{sh.kind === 'blog_post' ? '✍ blog' : '★ review'}</span>
+                <span>{sh.title.slice(0, 60)}</span>
+                <span className="ml-auto">→ {sh.target_channel}</span>
+              </div>
+              <pre className="text-xs text-gray-300 whitespace-pre-wrap bg-gray-950/50 rounded p-2">{sh.text}</pre>
+              <div className="flex gap-2 mt-1.5">
+                <button onClick={async () => { await navigator.clipboard.writeText(sh.text); }}
+                  className="text-xs px-2 py-0.5 bg-gray-800 rounded">Copy</button>
+                <a href="https://www.linkedin.com/feed/" target="_blank" rel="noopener"
+                  className="text-xs px-2 py-0.5 bg-gray-800 rounded text-cyan-400">Open LinkedIn ↗</a>
+                <button onClick={() => shareAct(sh.id, 'posted')} className="text-xs px-2 py-0.5 bg-green-800 rounded">Posted ✓</button>
+                <button onClick={() => shareAct(sh.id, 'dismissed')} className="text-xs px-2 py-0.5 text-gray-500">dismiss</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <p className="text-xs text-gray-600">The loop: be early → watch good questions → harvest what they attract → publish THE answer → deploy it every time the question recurs. Each pass compounds: vocabulary, warmth, page follows, IQ.</p>
     </div>
   );

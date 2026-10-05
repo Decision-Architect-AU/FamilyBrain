@@ -22,6 +22,8 @@ import random
 import psycopg2
 import psycopg2.extras
 import requests
+
+from .llm_caller import caller_headers
 from datetime import datetime, timezone
 
 DB_URL      = os.environ.get("DATABASE_URL")
@@ -49,6 +51,18 @@ EMBED_THRESHOLD  = float(os.environ.get("LINKER_EMBED_THRESHOLD", "0.82"))
 # Minimum name token overlap ratio to create an ALIAS_OF edge
 ALIAS_THRESHOLD  = float(os.environ.get("LINKER_ALIAS_THRESHOLD", "0.6"))
 
+# Max "new" (never-linked) concepts processed in a single run. Confirmed
+# live: property_graph accumulated 20,466 concepts with linked_at IS NULL
+# (decision_graph 6,472) — every one of them "new" at once, comparing each
+# against the full concept set (O(new x total)) with no cap. _mark_linked()
+# only fires once at the very end of link_graph(), so a run that never
+# finishes (or gets timeout-abandoned by maintenance.py's _run_with_timeout)
+# makes zero permanent progress — next run sees the identical backlog and
+# retries the same doomed pass forever. Capping to a batch means a run
+# always finishes and marks whatever it processed, so the backlog actually
+# shrinks run over run instead of resetting to the same size every time.
+LINKER_BATCH_SIZE = int(os.environ.get("LINKER_BATCH_SIZE", "500"))
+
 _STOP = {"pty", "ltd", "atf", "the", "and", "for", "of", "in", "a", "an", "no", "inv"}
 
 
@@ -69,6 +83,7 @@ def _embed(text: str) -> list[float]:
         resp = requests.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": EMBED_MODEL, "prompt": text[:512]},
+            headers=caller_headers("linker-embed"),
             timeout=30,
         )
         if resp.status_code < 500:
@@ -104,14 +119,55 @@ def _cypher(conn, graph: str, query: str, col_defs: str = "(r agtype)") -> list[
             cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
     except Exception as e:
-        print(f"[linker] Cypher error on {graph}: {e}")
+        # The exception text from Postgres is often just the corrupted
+        # property value itself (see _looks_like_real_name() below), which
+        # on its own doesn't say which call/graph/query produced it — log
+        # the query too (truncated) so a failure is actually actionable.
+        print(f"[linker] Cypher error on {graph}: {e}\n[linker]   query: {query[:300]!r}")
         conn.rollback()
         return []
 
 
 def _esc(s: str) -> str:
-    """Escape single quotes for interpolation into a Cypher string literal."""
+    """
+    Escape single quotes/backslashes for interpolation into a Cypher string
+    literal. Note this only protects the *Cypher* string boundary — the
+    outer SQL wraps the whole query in `$cypher$ ... $cypher$` dollar-quoting
+    (see _cypher() above), and AGE requires that query text to be a literal:
+    its cypher() function parses/transforms the query at plan time, so the
+    query string can't be passed as a bind parameter the way property values
+    normally would be (confirmed against AGE's docs — this is a real
+    limitation, not an oversight here). Pathological content containing the
+    literal substring "$cypher$" could in principle still break out of that
+    outer boundary even with this escaping in place. _looks_like_real_name()
+    below is the actual mitigation used in practice: reject implausible
+    values before they ever reach here, rather than relying on escaping a
+    boundary that can't be fully closed against arbitrary content.
+    """
     return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
+# Real concept names are short and mostly alphabetic. Confirmed live this
+# session (personal_graph): a meaningful fraction of Concept nodes (~9-16%
+# across two runs) have corrupted `name` properties — e.g. a 280-character
+# hex string — from an extraction-time data-quality bug (now fixed at the
+# source in ingestor/src/extract_concepts.py's _looks_like_real_name(), which
+# this mirrors). Graphs ingested before that fix still carry a backlog of
+# these, and each one that reaches _cypher() as an interpolated value costs
+# an error+rollback round trip (see that function) while silently no-op'ing
+# whatever operation was attempted. Filtering them out before they're used
+# avoids both costs; see _get_concepts() and maintenance.py's task_dedup().
+_MAX_NAME_LEN          = 120
+_MAX_NAME_LEN_NO_SPACE = 30
+
+
+def _looks_like_real_name(name: str) -> bool:
+    if not name or len(name) > _MAX_NAME_LEN:
+        return False
+    if len(name) > _MAX_NAME_LEN_NO_SPACE and " " not in name:
+        return False
+    allowed = sum(1 for c in name if c.isalnum() or c.isspace() or c in "-_.,'&()/")
+    return allowed / len(name) >= 0.85
 
 
 def _merge_edge(conn, graph: str, from_name: str, to_name: str,
@@ -144,9 +200,13 @@ def _get_concepts(conn, graph: str) -> list[dict]:
         "(name agtype, embedding agtype, linked_at agtype)",
     )
     out = []
+    skipped = 0
     for r in rows:
         name = _unwrap(r.get("name"))
         if not name:
+            continue
+        if not _looks_like_real_name(name):
+            skipped += 1
             continue
         emb_raw = _unwrap(r.get("embedding"))
         embedding = None
@@ -156,6 +216,8 @@ def _get_concepts(conn, graph: str) -> list[dict]:
             except Exception:
                 embedding = None
         out.append({"name": name, "embedding": embedding, "linked_at": _unwrap(r.get("linked_at"))})
+    if skipped:
+        print(f"[linker] {graph}: skipped {skipped} concept(s) with implausible/corrupted names")
     return out
 
 
@@ -176,13 +238,19 @@ def _mark_linked(conn, graph: str, names: list[str]) -> None:
     conn.commit()
 
 
-def link_graph(graph: str, conn) -> dict:
+def link_graph(graph: str, conn, batch_size: int | None = None) -> dict:
     """
     Run all linkage passes for a single graph. Only concepts that have never
     been linked before (no linked_at) are compared against the full set —
     already-linked pairs already have their edges from a prior run and don't
     need re-scoring. Embeddings are cached on the Concept node and computed
     exactly once per concept, ever, instead of every run for every concept.
+
+    The "new" set is capped to batch_size (default LINKER_BATCH_SIZE) per
+    run and _mark_linked() is called on exactly what was processed — a
+    backlog larger than one batch is deliberately left with linked_at still
+    NULL and picked up on the next run, rather than attempting the whole
+    thing in one pass that might never finish (see LINKER_BATCH_SIZE above).
     """
     counts = {"alias": 0, "similar": 0, "new": 0, "embedded": 0}
 
@@ -195,9 +263,15 @@ def link_graph(graph: str, conn) -> dict:
         print(f"[linker] {graph}: {len(concepts)} concepts, none new since last run — skipping")
         return counts
 
+    batch_size = LINKER_BATCH_SIZE if batch_size is None else batch_size
+    total_new = len(new_concepts)
+    if batch_size and total_new > batch_size:
+        print(f"[linker] {graph}: {total_new} new concepts — processing {batch_size} this run, {total_new - batch_size} deferred to a later run")
+        new_concepts = new_concepts[:batch_size]
+
     counts["new"] = len(new_concepts)
     all_names = [c["name"] for c in concepts]
-    print(f"[linker] {graph}: {len(concepts)} concepts total, {len(new_concepts)} new — linking those against the full set")
+    print(f"[linker] {graph}: {len(concepts)} concepts total, {len(new_concepts)} new (of {total_new} pending) — linking those against the full set")
 
     # ── Pass 1: name similarity (ALIAS_OF) — only pairs involving a new concept ──
     for a in new_concepts:
@@ -246,14 +320,14 @@ def link_graph(graph: str, conn) -> dict:
     return counts
 
 
-def run_linker(graphs: list[str] | None = None) -> dict:
+def run_linker(graphs: list[str] | None = None, batch_size: int | None = None) -> dict:
     """Link concepts across specified graphs (default: all)."""
     targets = graphs or GRAPHS
     results = {}
     conn = _conn()
     try:
         for graph in targets:
-            results[graph] = link_graph(graph, conn)
+            results[graph] = link_graph(graph, conn, batch_size=batch_size)
     finally:
         conn.close()
     return results

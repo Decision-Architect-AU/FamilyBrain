@@ -2,6 +2,8 @@
 import os
 import json
 import ollama
+
+from .llm_caller import caller_client
 import psycopg2
 import psycopg2.extras
 
@@ -16,7 +18,7 @@ def _conn():
 
 def _embed(text: str) -> list[float]:
     """Embed text, chunking and averaging if it exceeds the model's context window."""
-    client = ollama.Client(host=OLLAMA_URL)
+    client = caller_client("ingest")
     chunk_size = 4000
     chunks = [text[i:i+chunk_size] for i in range(0, min(len(text), 32000), chunk_size)]
     vectors = []

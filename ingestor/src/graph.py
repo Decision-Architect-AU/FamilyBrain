@@ -981,6 +981,42 @@ def write_asset_node(asset: dict) -> None:
         print(f"[graph] Asset node error '{asset['name']}': {e}")
 
 
+def write_product_node(product: dict, asset_ref: str) -> None:
+    """
+    Write a :Product node in personal_graph, linked INSTALLED_AT its parent
+    :Asset — same hydration convention as write_asset_node() (ref pointer
+    back to the Postgres row, no duplicated identity). Both Product and Asset
+    live in personal_graph so this edge is graph-native; FinancialDocument
+    nodes live in property_graph instead (financial_processor.py's
+    _record_in_graph), which AGE can't traverse from here — that link is
+    Postgres-only (personal.product.source_doc_ref), not a graph edge.
+    """
+    graph = "personal_graph"
+    ref   = f"personal.product:{product['id']}"
+
+    node_props = {
+        "ref":       ref,
+        "name":      product["name"],
+        "category":  product.get("category"),
+        "tier":      product.get("tier", "secondary"),
+        "product_id": product["id"],
+    }
+    props = build_props(node_props)
+    try:
+        _cypher1(graph, f"MERGE (p:Product {{ref: {_cypher_val('ref', ref)}}}) SET {_build_set('p', node_props)} RETURN p")
+        print(f"[graph] Product node: {product['name']}")
+        # _merge_edge hardcodes (a)-[r:edge]->(b) — a must alias the FROM
+        # node (Product) and b the TO node (Asset) to get the right direction.
+        _merge_edge(
+            graph,
+            f"MATCH (a:Product {{ref: {_cypher_val('ref', ref)}}})",
+            f", (b:Asset {{ref: {_cypher_val('ref', asset_ref)}}})",
+            "INSTALLED_AT",
+        )
+    except Exception as e:
+        print(f"[graph] Product node error '{product['name']}': {e}")
+
+
 def spawn_travel_nodes(
     event_row_id: int,
     starts_at: str,

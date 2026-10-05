@@ -264,6 +264,13 @@ export default function ChatPage() {
   ] as const;
   const [model, setModel]     = useState<typeof MODEL_OPTIONS[number]['value']>('qwen2.5:14b');
   const [thinking, setThinking] = useState(false);
+  const GRAPH_OPTIONS = [
+    { value: 'auto', label: 'Auto' },
+    { value: 'personal', label: 'Personal' },
+    { value: 'property', label: 'Property' },
+    { value: 'decision', label: 'Decision' },
+  ] as const;
+  const [graph, setGraph]     = useState<typeof GRAPH_OPTIONS[number]['value']>('auto');
   const modelSupportsThinking = MODEL_OPTIONS.find(o => o.value === model)?.supportsThinking ?? false;
   const [dataPane, setDataPane] = useState<DataPane | null>(null);
   const [showDataPane, setShowDataPane] = useState(false);
@@ -286,7 +293,7 @@ export default function ChatPage() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text.trim(), model, thinking: modelSupportsThinking && thinking, person_hint: lastFocusedPerson }),
+        body: JSON.stringify({ message: text.trim(), model, thinking: modelSupportsThinking && thinking, person_hint: lastFocusedPerson, ...(graph !== 'auto' ? { graph } : {}) }),
       });
       const data = await res.json();
       const reply: Message = {
@@ -352,6 +359,21 @@ export default function ChatPage() {
             <div className="text-sm font-semibold text-white">Geoff</div>
             <div className="text-[11px] text-gray-500">Family Brain</div>
           </div>
+          <select
+            value={graph}
+            onChange={e => setGraph(e.target.value as typeof GRAPH_OPTIONS[number]['value'])}
+            title="Restrict this chat to one knowledge graph — Auto lets the model pick (or fan out) based on your message"
+            className={`text-xs px-3 py-1.5 rounded-md border bg-transparent transition-colors whitespace-nowrap
+              focus:outline-none [&>option]:bg-[#1f2c34]
+              ${graph !== 'auto'
+                ? 'border-[#00a884] text-[#00a884]'
+                : 'border-[#2a3942] text-gray-300 hover:text-white hover:border-gray-500'
+              }`}
+          >
+            {GRAPH_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
           <select
             value={model}
             onChange={e => setModel(e.target.value as typeof MODEL_OPTIONS[number]['value'])}

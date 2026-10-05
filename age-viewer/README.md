@@ -16,7 +16,7 @@ Open `http://localhost:8888` and connect with:
 |-------|-------|
 | Host | `postgres` |
 | Port | `5432` |
-| Database | `familybrain` |
+| Database | `openclaw` |
 | User | `geoff` |
 | Password | *(from `.env` `POSTGRES_SUPERUSER_PASSWORD`)* |
 

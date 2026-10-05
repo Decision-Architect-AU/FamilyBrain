@@ -17,6 +17,8 @@ import psycopg2
 import psycopg2.extras
 import requests as req
 
+from .llm_caller import caller_headers
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +29,7 @@ FINANCIALS_ROOT = Path(os.environ.get("FINANCIALS_DIR", "/financials"))
 OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL     = os.environ.get("AGENT_MODEL", "qwen2.5:3b")
 DB_URL          = os.environ["DATABASE_URL"]
+INGESTOR_URL    = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
 
 # Domain whitelist is loaded dynamically from personal.financial_domain at run time.
 # Fallback used only if the table is empty or unreachable.
@@ -204,6 +207,7 @@ def _doc_label(subject: str, fname: str, pdf_snippet: str) -> str:
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
                   "options": {"temperature": 0.1, "num_predict": 20}},
+            headers=caller_headers("financial"),
             timeout=20,
         )
         label = resp.json().get("response", "").strip().strip('"').strip("'")
@@ -271,6 +275,7 @@ def _classify_entity(subject: str, body: str, from_addr: str,
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False},
+            headers=caller_headers("financial"),
             timeout=30,
         )
         slug = resp.json().get("response", "Personal").strip().split()[0]
@@ -610,6 +615,7 @@ def _embed(text: str) -> list[float] | None:
         resp = req.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": EMBED_MODEL, "prompt": text[:4000]},
+            headers=caller_headers("financial-embed"),
             timeout=30,
         )
         resp.raise_for_status()
@@ -947,6 +953,25 @@ def process_financial_emails(accounts: list[dict]) -> int:
                                      received_at=received_at)
                 _record_in_graph(subject, from_addr, entity_slug, fy, dest,
                                  received_at, pdf_text=pdf_txt, note_id=note_id)
+                # Increment 4: product/service classification — separate
+                # from entity routing above (which decides WHERE to file the
+                # document), this decides whether it describes a physical
+                # product and links it to the Asset it belongs to.
+                # product_router.py lives in ingestor (the established single
+                # entry point for all personal.asset/Product writes — see
+                # asset_router.py precedent), so this crosses the service
+                # boundary via HTTP like the existing /ingest/extract call in
+                # outlook.py, not a same-process import. Best effort: never
+                # blocks the save/file/graph-record path above.
+                try:
+                    source_doc_ref = f"personal.note:{note_id}" if note_id else None
+                    req.post(
+                        f"{INGESTOR_URL}/ingest/product",
+                        json={"text": f"{subject}\n\n{pdf_txt}", "source_doc_ref": source_doc_ref},
+                        timeout=30,
+                    )
+                except Exception as e:
+                    print(f"[financials] product routing failed for '{fname}': {e}")
             except Exception as e:
                 print(f"[financials] save failed for '{fname}': {e}")
 

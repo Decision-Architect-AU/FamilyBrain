@@ -31,6 +31,7 @@ def auth_gmail():
     scopes = [
         "https://www.googleapis.com/auth/gmail.modify",   # read + label + send
         "https://www.googleapis.com/auth/calendar",       # full calendar read/write
+        "https://www.googleapis.com/auth/tasks",          # Increment 5 — Google Tasks channel
     ]
     flow = InstalledAppFlow.from_client_config(client_config, scopes,
                                                redirect_uri="http://localhost")

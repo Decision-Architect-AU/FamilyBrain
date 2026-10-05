@@ -39,5 +39,5 @@ Append-only audit logger. All services POST activity here; the dashboard reads i
 ## Environment variables
 
 ```env
-DATABASE_URL=postgresql://audit_writer:<password>@postgres:5432/familybrain
+DATABASE_URL=postgresql://audit_writer:<password>@postgres:5432/openclaw
 ```

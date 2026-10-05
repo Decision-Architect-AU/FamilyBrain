@@ -34,6 +34,16 @@ _AEST = timezone(timedelta(hours=10))
 # invents a glyph outside it.
 GLYPHS = {"⚠", "✓", "◐", "✗", "⚑"}
 
+# Bare "nothing here" placeholders — confirmed live: a 14B model sometimes
+# writes a literal "None" as a section's content instead of omitting the
+# section entirely, which technically isn't empty-string content but is
+# exactly the "header with nothing under it" the spec's omission rule
+# forbids. Matched only against the section's FULL stripped content (a
+# genuine sentence like "There are no known risks" is legitimate prose, not
+# this placeholder pattern) so real short-but-informative content is never
+# mistaken for a lazy placeholder.
+_EMPTY_PLACEHOLDER_RE = re.compile(r"^(none|n/?a|nil|nothing|no items?)\.?$", re.IGNORECASE)
+
 _SECTION_NAMES = ["ANSWER", "ATTENTION", "OUTSTANDING", "CHANGED", "RISKS", "HANDLED", "REFS"]
 # Tolerant of a wrong #-count on either side (confirmed live: a 14B model
 # reliably wrote the section names but inconsistently dropped one trailing
@@ -214,14 +224,28 @@ def parse_response(raw: str) -> dict:
     if refs_raw is None:
         parse_errors.append("REFS section missing")
     else:
-        try:
-            parsed_refs = json.loads(refs_raw)
-            if isinstance(parsed_refs, list):
-                refs = parsed_refs
-            else:
-                parse_errors.append("REFS did not parse to a JSON array")
-        except json.JSONDecodeError:
+        candidates = [refs_raw]
+        stripped = refs_raw.strip()
+        if stripped and not stripped.startswith("["):
+            # Confirmed live: the model sometimes writes the ref list as a
+            # bare comma-separated string of quoted values with no enclosing
+            # brackets ("personal.event:1", "personal.event:2" instead of
+            # ["personal.event:1", "personal.event:2"]) — cheap to recover
+            # from without weakening what counts as a valid ref list.
+            candidates.append(f"[{stripped.rstrip(',')}]")
+        parsed_refs = None
+        for candidate in candidates:
+            try:
+                parsed_refs = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+        if parsed_refs is None:
             parse_errors.append("REFS is not valid JSON")
+        elif isinstance(parsed_refs, list):
+            refs = parsed_refs
+        else:
+            parse_errors.append("REFS did not parse to a JSON array")
 
     return {"sections": sections, "refs": refs, "parse_errors": parse_errors}
 
@@ -257,8 +281,10 @@ def validate(parsed: dict, steps: list[dict]) -> list[str]:
         violations.append("ANSWER section missing or empty")
 
     for name, content in sections.items():
-        if name != "ANSWER" and content == "":
-            violations.append(f"{name} section present with empty content (must be omitted, not left blank)")
+        if name == "ANSWER":
+            continue
+        if content == "" or _EMPTY_PLACEHOLDER_RE.match(content):
+            violations.append(f"{name} section present with empty/placeholder content (must be omitted, not left blank)")
 
     if refs is not None:
         valid_refs = _valid_refs_from_steps(steps)

@@ -3,7 +3,7 @@
 ## 1. Google OAuth2 App (once — covers all Gmail accounts)
 
 1. Go to https://console.cloud.google.com → New Project → "FamilyBrain"
-2. Enable APIs: **Gmail API** and **Google Calendar API**
+2. Enable APIs: **Gmail API**, **Google Calendar API** and **Google Tasks API**
 3. Credentials → Create OAuth 2.0 Client ID → Desktop app
 4. Download client_secret JSON → note `client_id` and `client_secret`
 5. Add to `.env`:
@@ -34,7 +34,43 @@ Use the helper script to authorise each account and get its refresh token:
 docker compose run --rm email-sync python -m src.auth_helper
 ```
 
-This opens a browser for each account and prints the refresh_token.
+This prints an authorisation URL per account, then asks you to paste the full redirect URL back; it prints the `refresh_token`.
+
+Gmail consent covers three scopes in one grant, all defined in `src/auth_helper.py` and mirrored in `src/gmail.py`:
+
+| Scope | Why |
+|-------|-----|
+| `gmail.modify` | read, label and send — excludes permanent delete |
+| `calendar` | full calendar read/write (create, update, delete events) |
+| `tasks` | Google Tasks channel, read/write |
+
+### Scopes and re-authorisation
+
+**A refresh token is only valid for the scopes it was issued with.** Adding a scope — as the Tasks channel did — does not extend existing tokens. Every account authorised before the change keeps working against the old scope set until the token is replaced, and calls needing the new scope fail. If the grant was revoked, every sync fails with `invalid_grant: Token has been expired or revoked`.
+
+The other ways a refresh token dies: the account password changes, access is revoked under the Google account's third-party apps, or the token goes unused for roughly six months.
+
+To re-authorise an existing account, run the helper again and replace the stored token. Clearing `access_token` and `token_expiry` forces a fresh refresh on the next poll instead of a retry against the dead one, and clearing the error columns stops a stale failure showing on the dashboard:
+
+```sql
+-- at the psql prompt; \prompt keeps the token out of shell and psql history
+\prompt 'new refresh token: ' tok
+UPDATE personal.email_account
+   SET refresh_token = :'tok',
+       access_token = NULL,
+       token_expiry = NULL,
+       last_sync_error = NULL,
+       last_sync_error_at = NULL
+ WHERE email_address = 'you@gmail.com';
+```
+
+Then restart the service so the next poll picks it up:
+
+```bash
+docker restart familybrain-email-sync
+```
+
+Note that `docker restart` reuses the existing image. A **code** change needs `docker compose --profile normal up -d --build email-sync`, since the source is baked in rather than bind-mounted.
 
 ## 4. Add accounts to the database
 

@@ -113,12 +113,23 @@ Rules:
 - When unsure about persona, use null"""
 
 
-def classify(message: str) -> ClassifyResult:
-    """Single classification pass — returns graphs + persona together."""
+def classify(message: str, graph_override: str | None = None) -> ClassifyResult:
+    """
+    Single classification pass — returns graphs + persona together.
 
-    # Fast path: explicit graph override in the message text
+    graph_override: an explicit graph name ("personal"/"property"/"decision")
+    from a caller-level selector (e.g. dashboard chat's graph dropdown) —
+    takes priority over both the in-message regex and the LLM call for graph
+    selection, same downstream persona-detection path as a phrase-triggered
+    override ("search decision graph"). Invalid/unknown values are ignored
+    (fall through to the normal detection below) rather than raising, since
+    this arrives from a request body the caller controls loosely.
+    """
+    # Fast path: explicit graph override, either from the caller or the message text
     explicit_graphs: list[str] | None = None
-    if _ALL_GRAPHS.search(message):
+    if graph_override and graph_override in _GRAPH_NAMES:
+        explicit_graphs = [_GRAPH_NAMES[graph_override]]
+    elif _ALL_GRAPHS.search(message):
         explicit_graphs = ["personal_graph", "property_graph", "decision_graph"]
     else:
         m = _EXPLICIT_GRAPH.search(message)

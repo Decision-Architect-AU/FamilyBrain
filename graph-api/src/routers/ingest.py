@@ -1,6 +1,8 @@
 """Natural language ingestor endpoints."""
 import json
 import os
+
+from ..llm_caller import caller_headers
 import time
 import uuid
 from typing import Any
@@ -156,6 +158,7 @@ def extract(req: ExtractRequest):
         resp = httpx.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": EXTRACT_MODEL, "prompt": prompt, "system": system, "stream": False},
+            headers=caller_headers("ingest"),
             timeout=120,
         )
         resp.raise_for_status()

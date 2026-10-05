@@ -27,11 +27,13 @@ from . import email_decomposer as decompose_mod
 from . import appointment_updater as appt_mod
 from . import item_review as review_mod
 from . import weekly_digest as digest_mod
+from . import task_sync as task_sync_mod
 
 DB_URL                  = os.environ["DATABASE_URL"]
 INGESTOR_URL            = os.environ.get("INGESTOR_URL", "http://ingestor:4001")
 EMAIL_POLL_INTERVAL     = int(os.environ.get("EMAIL_POLL_INTERVAL_SECS", "300"))    # 5 min
 CALENDAR_POLL_INTERVAL  = int(os.environ.get("CALENDAR_POLL_INTERVAL_SECS", "900")) # 15 min
+TASKS_POLL_INTERVAL     = int(os.environ.get("TASKS_POLL_INTERVAL_SECS", "900"))    # 15 min, same convention as calendar
 FINANCIAL_POLL_INTERVAL = int(os.environ.get("FINANCIAL_POLL_INTERVAL_SECS", "300")) # 5 min
 REVIEW_POLL_INTERVAL    = int(os.environ.get("REVIEW_POLL_INTERVAL_SECS", "90"))    # item_flag queue poll
 DIGEST_CHECK_INTERVAL   = int(os.environ.get("DIGEST_CHECK_INTERVAL_SECS", "3600")) # hourly check, weekly fire
@@ -70,6 +72,7 @@ for _f in os.listdir(_HEARTBEAT_DIR):
 _LOOP_INTERVALS = {
     "email":     EMAIL_POLL_INTERVAL,
     "calendar":  CALENDAR_POLL_INTERVAL,
+    "tasks":     TASKS_POLL_INTERVAL,
     "financial": FINANCIAL_POLL_INTERVAL,
     "review":    REVIEW_POLL_INTERVAL,
     "digest":    DIGEST_CHECK_INTERVAL,
@@ -207,6 +210,17 @@ def calendar_loop() -> None:
         time.sleep(CALENDAR_POLL_INTERVAL)
 
 
+def task_loop() -> None:
+    while True:
+        try:
+            accounts = get_enabled_accounts()
+            task_sync_mod.run_task_sync(accounts)
+        except Exception as e:
+            print(f"[email-sync] Task loop error: {e}")
+        _touch_heartbeat("tasks")
+        time.sleep(TASKS_POLL_INTERVAL)
+
+
 def financial_loop() -> None:
     # Stagger by half the email interval so LLM calls don't overlap with decompose_emails
     time.sleep(EMAIL_POLL_INTERVAL // 2)
@@ -224,6 +238,15 @@ def run_item_review() -> None:
     # (candidate extraction) that legitimately take well over one poll interval;
     # touching the heartbeat between flags (not just once per full loop
     # iteration) keeps a slow single review from starving the watchdog.
+    # A review involves ingestor posts and live LLM calls. When the ingestor is
+    # backlogged, each of those blocks until it times out and a single flag
+    # overruns the watchdog threshold — which restarts the whole process and
+    # takes every other loop down with it (that is how Outlook calendar import
+    # stopped for weeks). Don't start a review we can't finish in time.
+    from .ingest_client import ingestor_ready
+    if not ingestor_ready(INGESTOR_URL):
+        print("[item-review] ingestor busy — skipping this tick")
+        return
     accounts = get_enabled_accounts()
     flags = review_mod.claim_pending_flags(limit=1)
     for flag in flags:
@@ -300,8 +323,8 @@ def digest_loop() -> None:
 
 if __name__ == "__main__":
     print(f"[email-sync] Starting — email every {EMAIL_POLL_INTERVAL}s, calendar every {CALENDAR_POLL_INTERVAL}s, "
-          f"financial every {FINANCIAL_POLL_INTERVAL}s, item-review every {REVIEW_POLL_INTERVAL}s, "
-          f"digest check every {DIGEST_CHECK_INTERVAL}s (fires Mondays)")
+          f"tasks every {TASKS_POLL_INTERVAL}s, financial every {FINANCIAL_POLL_INTERVAL}s, "
+          f"item-review every {REVIEW_POLL_INTERVAL}s, digest check every {DIGEST_CHECK_INTERVAL}s (fires Mondays)")
     print(f"[email-sync] Ingestor: {INGESTOR_URL}")
 
     # Watchdog starts FIRST, before any blocking call — including the initial
@@ -328,11 +351,13 @@ if __name__ == "__main__":
     # Start background loops
     t_email  = threading.Thread(target=email_loop,     daemon=True, name="email-loop")
     t_cal    = threading.Thread(target=calendar_loop,  daemon=True, name="calendar-loop")
+    t_task   = threading.Thread(target=task_loop,      daemon=True, name="task-loop")
     t_fin    = threading.Thread(target=financial_loop, daemon=True, name="financial-loop")
     t_review = threading.Thread(target=review_loop,    daemon=True, name="review-loop")
     t_digest = threading.Thread(target=digest_loop,    daemon=True, name="digest-loop")
     t_email.start()
     t_cal.start()
+    t_task.start()
     t_fin.start()
     t_review.start()
     t_digest.start()
