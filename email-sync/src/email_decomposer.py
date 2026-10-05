@@ -185,6 +185,12 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
         "- calendar_event: a scheduled appointment, meeting, booking, deadline, or ANY document/script/plan "
         "  that references a date — including relative dates like '+ 4 weeks', 'review in 6 weeks', 'next session'. "
         "  Each distinct date in a document becomes its own calendar_event.\n"
+        "  A meeting must be actually booked/agreed with a date. NOT calendar_events: an offer to meet, "
+        "  'book a time using this link', a proposed time awaiting a reply, or a meeting that already "
+        "  happened ('thanks for your time yesterday') — use observation for those.\n"
+        "  An email that re-confirms or changes logistics of an appointment (assistant confirming the "
+        "  booking, 'switching to Zoom') describes the SAME meeting: use exactly the day and time it "
+        "  states — 'the 21st' means day 21 — never shift it.\n"
         "- payment: ONLY use when the email is an unpaid invoice, bill, or explicit payment request "
         "  with a real amount and biller stated in the email body. "
         "  Do NOT use for booking confirmations (payment already made), receipts, or anything without a clear 'please pay' instruction. "
@@ -945,6 +951,160 @@ def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int)
     return row["id"] if row else None
 
 
+_FREE_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "hotmail.com", "outlook.com", "live.com",
+    "msn.com", "yahoo.com", "yahoo.com.au", "icloud.com", "me.com",
+    "bigpond.com", "bigpond.net.au", "optusnet.com.au",
+}
+
+
+def _find_same_sender_event(cur, from_address: str | None, effective_dt,
+                            time_str: str | None, exclude_id: int) -> int | None:
+    """Is this the same meeting an organisation already told us about?
+
+    A booking tends to arrive several times from one counterparty — the
+    booking-system confirmation, then an assistant's "just confirming Joe will
+    meet you at 11:00am on the 21st", then a "switching to Zoom" note — each
+    extracted under a different title ("Discovery Call" vs "Meeting with Joe"),
+    so the title-token check in _find_similar_existing_event never matches
+    them. Same sender organisation + same date is the stronger signal:
+      - both timed and the times agree → same meeting
+      - incoming untimed → same meeting only if that sender rarely produces
+        events (≤3 in ±30 days), so a school sending several same-day items
+        doesn't get collapsed
+    Free-mail senders are excluded — the domain says nothing about who they are.
+    """
+    if not from_address or "@" not in from_address:
+        return None
+    domain = from_address.rsplit("@", 1)[1].strip().lower().rstrip(">")
+    if not domain or domain in _FREE_MAIL_DOMAINS:
+        return None
+    pattern = f"%From: %@{domain}%"
+    cur.execute(
+        """
+        SELECT id,
+               to_char(starts_at AT TIME ZONE 'Australia/Brisbane', 'HH24:MI') AS hhmm,
+               starts_at::time <> '00:00'::time AS timed
+        FROM personal.event
+        WHERE id != %(exclude_id)s
+          AND effective_date = %(eff)s
+          AND status NOT IN ('cancelled', 'superseded')
+          AND notes ILIKE %(pat)s
+        ORDER BY created_at ASC
+        """,
+        {"exclude_id": exclude_id, "eff": effective_dt, "pat": pattern},
+    )
+    same_day = cur.fetchall()
+    if not same_day:
+        return None
+    if time_str:
+        for row in same_day:
+            if row["timed"] and row["hhmm"] == time_str:
+                return row["id"]
+        return None
+    if len(same_day) != 1:
+        return None
+    cur.execute(
+        """
+        SELECT count(*) AS n FROM personal.event
+        WHERE status NOT IN ('cancelled', 'superseded')
+          AND notes ILIKE %(pat)s
+          AND effective_date BETWEEN %(eff)s - 30 AND %(eff)s + 30
+        """,
+        {"pat": pattern, "eff": effective_dt},
+    )
+    return same_day[0]["id"] if cur.fetchone()["n"] <= 3 else None
+
+
+_DAY_SUFFIX = r'(?:st|nd|rd|th)'
+_MONTH_WORD = r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?'
+# Explicit day-of-month mentions: "the 21st", "21 September", "September 21",
+# "21/09". Each yields (day, month-or-None, match span).
+_EXPLICIT_DAY_RES = [
+    re.compile(rf'\b(\d{{1,2}})\s*{_DAY_SUFFIX}?\s+(?:of\s+)?{_MONTH_WORD}', re.I),
+    re.compile(rf'\b{_MONTH_WORD}\s+(\d{{1,2}}){_DAY_SUFFIX}?\b', re.I),
+    re.compile(rf'\b(\d{{1,2}}){_DAY_SUFFIX}\b', re.I),
+    re.compile(r'\b(\d{1,2})[/.](\d{1,2})(?:[/.]\d{2,4})?\b'),
+]
+_RELATIVE_DATE_RE = re.compile(
+    r'\b(today|tonight|tomorrow|next (?:week|month)|this (?:week|weekend)|'
+    r'monday|tuesday|wednesday|thursday|friday|saturday|sunday|'
+    r'in \d+ (?:days?|weeks?|months?)|\+\s*\d+\s*(?:days?|weeks?))\b', re.I)
+_TIME_NEAR_RE = re.compile(r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b(\d{1,2}):(\d{2})\b', re.I)
+
+
+def _explicit_day_refs(text: str) -> list[tuple[int, int | None, tuple[int, int]]]:
+    refs = []
+    for i, rx in enumerate(_EXPLICIT_DAY_RES):
+        for m in rx.finditer(text):
+            try:
+                if i == 0:
+                    day, month = int(m.group(1)), _MONTHS[m.group(2)[:3].lower()]
+                elif i == 1:
+                    day, month = int(m.group(2)), _MONTHS[m.group(1)[:3].lower()]
+                elif i == 2:
+                    day, month = int(m.group(1)), None
+                else:
+                    day, month = int(m.group(1)), int(m.group(2))
+            except (KeyError, ValueError):
+                continue
+            if 1 <= day <= 31 and (month is None or 1 <= month <= 12):
+                refs.append((day, month, m.span()))
+    return refs
+
+
+def _ground_event_date(item: dict, body: str) -> None:
+    """Correct an LLM calendar date that disagrees with a day the email states.
+
+    The 14b model will turn "Joe will meet you at 11:00am on the 21st" into
+    date 2026-09-22 with no time. When the email names days explicitly and the
+    LLM's day isn't one of them, snap to the single stated day within ±3 days
+    (picking up an adjacent time like "11:00am" if the LLM dropped it).
+    Left alone when the date is relative/derived, when the email mentions
+    relative days ("next Tuesday") we can't verify, or when the evidence is
+    ambiguous — this only fixes clear misreads, it never discards events.
+    """
+    date_str = item.get("date")
+    if not date_str or item.get("relative_to") or item.get("relative_offset_days"):
+        return
+    try:
+        llm_date = date.fromisoformat(date_str)
+    except ValueError:
+        return
+    text = body[:4000]
+    refs = _explicit_day_refs(text)
+    if not refs:
+        return
+    if any(d == llm_date.day and (mo is None or mo == llm_date.month) for d, mo, _ in refs):
+        return
+    if _RELATIVE_DATE_RE.search(text):
+        return
+    nearby = {}
+    for d, mo, span in refs:
+        try:
+            cand = date(llm_date.year, mo or llm_date.month, d)
+        except ValueError:
+            continue
+        if abs((cand - llm_date).days) <= 3:
+            nearby.setdefault(cand, span)
+    if len(nearby) != 1:
+        return
+    (cand, span), = nearby.items()
+    print(f"[decompose] date grounding: '{item.get('title', '')[:40]}' {date_str} → {cand} (stated in email)")
+    item["date"] = cand.isoformat()
+    if not item.get("time"):
+        window = text[max(0, span[0] - 40):span[1] + 40]
+        tm = _TIME_NEAR_RE.search(window)
+        if tm:
+            if tm.group(3):
+                h, mi = int(tm.group(1)), int(tm.group(2) or 0)
+                h = h % 12 + (12 if tm.group(3).lower() == "pm" else 0)
+            else:
+                h, mi = int(tm.group(4)), int(tm.group(5))
+            if 0 <= h < 24 and 0 <= mi < 60:
+                item["time"] = f"{h:02d}:{mi:02d}"
+
+
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
                              title_to_event_id: dict | None = None,
@@ -1011,12 +1171,24 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             return None
 
         effective_dt = date.fromisoformat(date_str)
-        dup_of = _find_similar_existing_event(cur, title, effective_dt, exclude_id=event_id)
+        dup_of = (_find_similar_existing_event(cur, title, effective_dt, exclude_id=event_id)
+                  or _find_same_sender_event(cur, (email_meta or {}).get("from_address"),
+                                             effective_dt, time_str, exclude_id=event_id))
         if dup_of:
             cur.execute(
                 "UPDATE personal.event SET status = 'superseded', superseded_by_event_id = %s WHERE id = %s",
                 (dup_of, event_id),
             )
+            # A follow-up about the same meeting often carries the newest
+            # logistics (Zoom link, venue) — keep them on the surviving event
+            if meeting_url or location:
+                cur.execute(
+                    """UPDATE personal.event
+                       SET meeting_url = COALESCE(%s, meeting_url),
+                           location    = COALESCE(%s, location)
+                       WHERE id = %s""",
+                    (meeting_url, location, dup_of),
+                )
             print(f"[decompose] '{title[:40]!r}' on {date_str} duplicates existing event {dup_of} — superseded {event_id}")
             if title_to_event_id is not None:
                 title_to_event_id[title.lower().strip()] = dup_of
@@ -1273,6 +1445,16 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
             itype = item.get("type")
             title = item.get("title", "")
             detail = item.get("detail", "")
+
+            if itype == "calendar_event":
+                _ground_event_date(item, body)
+                # A meeting dated before the email arrived already happened
+                # ("thanks for your time on Zoom yesterday") — it's a record,
+                # not something to put in the calendar
+                if item.get("date") and received_at and item["date"] < received_at[:10]:
+                    print(f"[decompose] '{title[:40]}' dated {item['date']} is before the email "
+                          f"({received_at[:10]}) — keeping as observation, not an event")
+                    itype = "observation"
 
             with psycopg2.connect(DB_URL) as wconn:
                 with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:

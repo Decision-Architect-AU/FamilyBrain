@@ -35,6 +35,10 @@ DB_URL = os.environ.get("DATABASE_URL")
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 TRIAGE_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("TRIAGE_MODEL", os.environ.get("CATEGORISE_FAST_MODEL", "qwen2.5:3b")))
 
+
+class TriageUnavailable(Exception):
+    """The LLM triage step couldn't run — the email should be retried, not skipped."""
+
 # ── Always skip — known noise senders ────────────────────────────────────────
 # These never produce personal_brain content regardless of subject
 _ALWAYS_SKIP_SENDERS = re.compile(
@@ -95,6 +99,12 @@ _INGEST_SUBJECT_KW = re.compile(
     r'invoice|receipt|statement|tax invoice|remittance|eft|bas|tax return|'
     r'payment received|payment due|overdue|balance due|direct debit|'
     r'loan|mortgage|interest rate|repayment|pre-approval|'
+    # Purchases / order confirmations — these are receipts in all but name
+    # ("Ordered: ...", "Order #1241762312 confirmed") and previously fell
+    # through to the LLM step, which skipped them whenever Ollama was down
+    r'ordered(?=:)|order (?:is |has been )?confirm(?:ed|ation)?|order #?\s?\d{4,}|your order|'
+    r'purchase confirm(?:ed|ation)?|payment confirm(?:ed|ation)?|payment notification|'
+    r'booking confirmed|reservation confirmed|'
     # Property management (NOT listings)
     r'ownership statement|rental statement|management fee|maintenance request|'
     r'lease|tenancy|strata levy|body corporate|council rates|'
@@ -373,9 +383,12 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
         )
         word = resp["response"].strip().lower().split()[0] if resp["response"].strip() else ""
         word = re.sub(r"[^a-z]", "", word)
-        if word in ("ingest", "marketing", "skip"):
-            return word
-        return "skip"
     except Exception as e:
-        print(f"[triage] LLM error — defaulting to skip: {e}")
-        return "skip"
+        # Never turn an outage into a verdict — a 'skip' here is permanent
+        # (the message is never re-fetched), which silently dropped hundreds
+        # of receipts while Ollama was down. Let the caller mark it retryable.
+        print(f"[triage] LLM error — deferring: {e}")
+        raise TriageUnavailable(str(e)) from e
+    if word in ("ingest", "marketing", "skip"):
+        return word
+    return "skip"

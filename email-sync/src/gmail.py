@@ -447,8 +447,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     ingested += 1
                     # Apply FamilyBrain/<category> label so it's visible in Gmail inbox
                     result = resp.json()
-                    category = result.get("category", "personal")
-                    apply_ingested_label(account, svc, msg_id, category)
+                    # Triaged-out (marketing/skip) mail isn't a FamilyBrain item — don't label it
+                    if not result.get("skipped"):
+                        apply_ingested_label(account, svc, msg_id, result.get("category", "personal"))
                 else:
                     print(f"[gmail] ingestor rejected {msg_id}: {resp.text}")
             except Exception as e:
@@ -493,9 +494,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 if resp.ok:
                     ingested += 1
                     result = resp.json()
-                    category = result.get("category", "personal")
-                    apply_ingested_label(account, svc, msg_id, category)
-                    db.mark_label_applied(account_id, msg_id)
+                    if not result.get("skipped"):
+                        apply_ingested_label(account, svc, msg_id, result.get("category", "personal"))
+                        db.mark_label_applied(account_id, msg_id)
                 else:
                     print(f"[gmail] retry ingestor rejected {msg_id}: {resp.text}")
             except Exception as e:

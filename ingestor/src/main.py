@@ -30,7 +30,7 @@ from src import audit
 from src import graph as graph_writer
 from src.categorise import categorise_email, save_category, backfill_categories
 from src.config_index import record_ingest
-from src.triage import triage_email
+from src.triage import triage_email, TriageUnavailable
 from src.asset_router import try_asset_routing
 
 WATCH_DIR      = pathlib.Path(os.environ.get("INGEST_WATCH_DIR", "/data/ReadyToIngest"))
@@ -210,7 +210,30 @@ def ingest_email(payload: dict) -> dict:
         return {"ok": False, "error": "Empty email body — skipping"}
 
     # ── Triage: gate before full extraction ──────────────────────────────────
-    triage_action = triage_email(from_address, subject, body_text)
+    try:
+        triage_action = triage_email(from_address, subject, body_text)
+    except TriageUnavailable as e:
+        # Record as 'error' so email-sync's retry pass re-fetches and re-triages it
+        try:
+            with psycopg2.connect(DB_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO personal.email_message
+                            (account_id, provider_msg_id, subject, from_address, received_at,
+                             ingest_status, ingest_error, ingest_at)
+                        VALUES (%s, %s, %s, %s, %s, 'error', %s, now())
+                        ON CONFLICT (account_id, provider_msg_id) DO UPDATE
+                            SET ingest_status = 'error', ingest_error = EXCLUDED.ingest_error
+                            WHERE personal.email_message.ingest_status NOT IN ('ingested', 'confirmed')
+                        """,
+                        (account_id, provider_msg_id, subject, from_address, received_at,
+                         f"triage unavailable: {e}"),
+                    )
+                conn.commit()
+        except Exception as te:
+            print(f"[ingestor] triage-deferral record failed for {provider_msg_id}: {te}")
+        return {"ok": False, "error": f"triage unavailable: {e}"}
     if triage_action in ("marketing", "skip"):
         # Save a minimal record so we don't re-process, but skip full extraction
         try:
@@ -228,7 +251,13 @@ def ingest_email(payload: dict) -> dict:
                              category, category_confidence, categorised_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'skip', %s, now(),
                                 %s, 0.9, now())
-                        ON CONFLICT (account_id, provider_msg_id) DO NOTHING
+                        ON CONFLICT (account_id, provider_msg_id) DO UPDATE
+                            SET ingest_status = EXCLUDED.ingest_status,
+                                ingest_error  = NULL,
+                                category      = EXCLUDED.category,
+                                categorised_at = now()
+                            -- only settle retries; never demote an ingested/confirmed row
+                            WHERE personal.email_message.ingest_status IN ('error', 'pending')
                         """,
                         (
                             account_id, provider_msg_id, payload.get("thread_id"),
