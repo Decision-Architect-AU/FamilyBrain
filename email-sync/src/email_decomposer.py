@@ -45,6 +45,10 @@ GRAPH_API_URL = os.environ.get("GRAPH_API_URL", "http://graph-api:4003")
 _BATCH = 20   # emails per run
 
 
+class DecomposeUnavailable(Exception):
+    """The extraction LLM couldn't run — the email must stay queued, not be marked done."""
+
+
 def _extract_meeting_url(body: str) -> str | None:
     """Pull the first meeting join URL from the raw body before any truncation."""
     m = _MEETING_URL_RE.search(body)
@@ -251,10 +255,15 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
                 items = []
         except Exception as e:
             print(f"[decompose] LLM retry failed: {e}")
-            items = []
+            raise DecomposeUnavailable(str(e)) from e
     except Exception as e:
-        print(f"[decompose] LLM failed: {e}")
-        items = []
+        # An unreachable or erroring LLM is not "this email has no items": the
+        # caller marks the email decomposed and never looks at it again, which
+        # is how a urology appointment ("Appointment Date: 29th September
+        # 2026") was lost while Ollama was down. Signal it instead so the
+        # email stays queued for the next cycle.
+        print(f"[decompose] LLM unavailable, will retry: {e}")
+        raise DecomposeUnavailable(str(e)) from e
 
     return _ensure_annotation_date_captured(items, subject, body, received_date)
 
@@ -951,6 +960,76 @@ def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int)
     return row["id"] if row else None
 
 
+# Commercial show/event advertising — a season or a session we were told
+# about, not a booking we hold. Deliberately venue/box-office flavoured so a
+# school concert or recital (which the family really does attend) is untouched.
+_PROMO_KW = re.compile(
+    r'\b(the musical|now showing|opening night|box office|matinee|cabaret|'
+    r'on sale now|tickets? (?:from|on sale)|book now|limited season|'
+    r'playing (?:now|until|from|\d)|final weeks?|world premiere|'
+    r'live in concert|comedy festival|touring)\b', re.I)
+# Evidence we actually hold a seat for it.
+# Note: deliberately NOT a bare "your tickets" — promo copy says "get your
+# tickets now", so that phrase is advertising, not proof of a booking.
+_BOOKED_KW = re.compile(
+    r'\b(booking (?:reference|number|confirmed)|your (?:booking|reservation)|'
+    r'your tickets? (?:are|is|have been|for)|order #|confirmation (?:number|code)|'
+    r'e-?ticket|tickets? attached|reservation confirmed|seat [a-z]?\d+)\b', re.I)
+
+
+def _is_unbooked_promo(title: str, detail: str, body: str) -> bool:
+    """Is this a show being advertised to us rather than one we've booked?
+
+    "Menopause The Musical ... Playing 30 Sept" came out of a promotional
+    email and was written straight into the Family calendar as though it were
+    an appointment. Those belong on Tentative until a booking exists.
+    """
+    text = f"{title} {detail}"
+    if not _PROMO_KW.search(text) and not _PROMO_KW.search(body[:2000]):
+        return False
+    return not _BOOKED_KW.search(f"{text} {body[:2000]}")
+
+
+# Things that genuinely run for days. Everything else with a long span is the
+# LLM having paired a start date with an unrelated later date in the email.
+_MULTI_DAY_KW = re.compile(
+    r'\b(holiday|holidays|school break|break|vacation|camp|cruise|trip|tour|'
+    r'festival|conference|retreat|term \d|semester|leave|exhibition|'
+    r'stay|away|season|program(?:me)?|championships?|carnival)\b', re.I)
+# A deadline is a moment, never a range, however many dates surround it.
+_DEADLINE_KW = re.compile(
+    r'\b(deadline|due|closes?|closing|expires?|expiry|cut[- ]?off|'
+    r'last day|final day|rsvp|submit by)\b', re.I)
+_MAX_UNEXPLAINED_SPAN_DAYS = 3
+
+
+def _sane_end_date(title: str, detail: str, date_str: str, end_str):
+    """Drop an end_date that would smear a one-off event across the calendar.
+
+    "Applications ... open until Friday 11th September 2026" became an all-day
+    event from 11 Sep to 17 Oct — a five-week banner sitting across every day
+    in Google Calendar, still visible weeks after the deadline passed, because
+    the model paired the deadline with an unrelated later date in the email.
+    Long spans are kept only when the text actually describes something
+    multi-day (a holiday, a camp, a conference).
+    """
+    if not end_str:
+        return end_str
+    try:
+        span = (date.fromisoformat(end_str) - date.fromisoformat(date_str)).days
+    except (TypeError, ValueError):
+        return None
+    if span <= 0:
+        return None
+    text = f"{title} {detail}"
+    if _DEADLINE_KW.search(title) or (
+            span > _MAX_UNEXPLAINED_SPAN_DAYS and not _MULTI_DAY_KW.search(text)):
+        print(f"[decompose] dropped end_date {end_str} for '{title[:40]}' "
+              f"({span}d span, nothing says it runs that long) — single-day event")
+        return None
+    return end_str
+
+
 _FREE_MAIL_DOMAINS = {
     "gmail.com", "googlemail.com", "hotmail.com", "outlook.com", "live.com",
     "msn.com", "yahoo.com", "yahoo.com.au", "icloud.com", "me.com",
@@ -1109,7 +1188,8 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
                              title_to_event_id: dict | None = None,
                              pre_extracted_meeting_url: str | None = None,
-                             email_meta: dict | None = None) -> int | None:
+                             email_meta: dict | None = None,
+                             email_body: str = "") -> int | None:
     """Create a calendar event. Returns the new event id, or None on failure."""
     from .db import upsert_event
     title    = item.get("title", "")
@@ -1130,6 +1210,8 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
     # Reject all-day events where the LLM defaulted to the email received date
     if not time_str and date_str == received_date[:10]:
         return None
+
+    end_str = _sane_end_date(title, detail, date_str, end_str)
 
     try:
         if time_str:
@@ -1221,10 +1303,18 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         # Update event with provenance/status and slot fields.
         # Status stays 'confirmed' — events go to GCal regardless of whether we resolved
         # a person (concerts, family events, etc. have no person but are still valid).
+        # Exception: a show we were merely advertised goes in suspended, which
+        # the calendar writer routes to Tentative with the reason attached.
+        if _is_unbooked_promo(title, detail, email_body or ""):
+            ev_status, susp_reason = "suspended", "advertised show — no booking held"
+            print(f"[decompose] '{title[:40]}' looks advertised, not booked — routing to Tentative")
+        else:
+            ev_status, susp_reason = "confirmed", None
         cur.execute("""
             UPDATE personal.event
             SET provenance      = 'email',
-                status          = 'confirmed',
+                status          = %s,
+                suspended_reason = %s,
                 slot_key        = %s,
                 slot_class      = %s,
                 blocks_person   = %s,
@@ -1233,7 +1323,7 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                 asset_id        = COALESCE(asset_id, %s),
                 occurrence_date = %s
             WHERE id = %s
-        """, (slot_key, slot_class, blocks_person, rank,
+        """, (ev_status, susp_reason, slot_key, slot_class, blocks_person, rank,
               person_id, routine_asset_id, effective_dt, event_id))
         if routine_asset_id:
             print(f"[decompose] linked event {event_id} ({title[:40]!r}) to routine asset {routine_asset_id}")
@@ -1464,7 +1554,8 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                                                 received_date=received_at,
                                                 title_to_event_id=title_to_event_id,
                                                 pre_extracted_meeting_url=pre_meeting_url,
-                                                email_meta=email_meta)
+                                                email_meta=email_meta,
+                                                email_body=body)
 
                     elif itype == "payment":
                         _create_payment_note(wcur, item, email_id, received_at)
@@ -1496,7 +1587,7 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
     except Exception as e:
         err_str = str(e).lower()
         # Network/API errors — leave email_decomposed = false so it retries next cycle
-        is_transient = any(x in err_str for x in (
+        is_transient = isinstance(e, DecomposeUnavailable) or any(x in err_str for x in (
             "name or service not known", "unable to find the server",
             "nameresolutionerror", "connectionerror", "connection reset",
             "timeout", "timed out", "max retries",

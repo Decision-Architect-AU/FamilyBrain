@@ -146,16 +146,20 @@ def is_already_ingested(account_id: int, provider_msg_id: str) -> bool:
             return cur.fetchone() is not None
 
 
-def get_retryable_messages(account_id: int) -> list[str]:
-    """Return provider_msg_ids with status 'error' or 'pending' (have body to re-fetch)."""
+def get_retryable_messages(account_id: int, limit: int = 500) -> list[str]:
+    """Return provider_msg_ids with status 'error' or 'pending' (have body to re-fetch).
+
+    Callers cap `limit` to what one sync cycle can actually drain — the
+    ingestor is single-threaded, so an oversized batch stalls the whole loop.
+    """
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """SELECT provider_msg_id FROM personal.email_message
                    WHERE account_id = %s AND ingest_status IN ('error', 'pending')
                    ORDER BY received_at DESC NULLS LAST
-                   LIMIT 500""",
-                (account_id,),
+                   LIMIT %s""",
+                (account_id, limit),
             )
             return [r["provider_msg_id"] for r in cur.fetchall()]
 

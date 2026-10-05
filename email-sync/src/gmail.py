@@ -21,6 +21,7 @@ from googleapiclient.errors import HttpError
 
 from . import db
 from .filters import should_ingest, reset_cache as reset_filter_cache
+from .ingest_client import INGEST_TIMEOUT, RETRY_BATCH, ingestor_ready
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",   # read + label + send (excludes permanent delete)
@@ -442,7 +443,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                     continue
 
                 parsed["account_id"] = account_id
-                resp = req.post(f"{ingestor_url}/ingest/email", json=parsed, timeout=60)
+                resp = req.post(f"{ingestor_url}/ingest/email", json=parsed, timeout=INGEST_TIMEOUT)
                 if resp.ok:
                     ingested += 1
                     # Apply FamilyBrain/<category> label so it's visible in Gmail inbox
@@ -456,7 +457,13 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 print(f"[gmail] error processing {msg_id}: {e}")
 
         # Retry previously failed messages
-        retry_ids = db.get_retryable_messages(account_id)
+        # Bounded + gated for the same reason as outlook.py: the ingestor is
+        # single-threaded, so an oversized batch stalls the sync loop.
+        retry_ids = []
+        if not ingestor_ready(ingestor_url):
+            print(f"[gmail] ingestor busy — skipping retry pass this cycle for {account['email_address']}")
+        else:
+            retry_ids = db.get_retryable_messages(account_id, limit=RETRY_BATCH)
         if retry_ids:
             print(f"[gmail] retrying {len(retry_ids)} error/pending messages for {account['email_address']}")
         for msg_id in retry_ids:
@@ -490,7 +497,7 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                                     parsed["subject"], parsed.get("received_at"), reason)
                     continue
                 parsed["account_id"] = account_id
-                resp = req.post(f"{ingestor_url}/ingest/email", json=parsed, timeout=60)
+                resp = req.post(f"{ingestor_url}/ingest/email", json=parsed, timeout=INGEST_TIMEOUT)
                 if resp.ok:
                     ingested += 1
                     result = resp.json()

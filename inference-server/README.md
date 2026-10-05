@@ -83,3 +83,69 @@ OLLAMA_URL=http://172.23.96.1:11434
 ```
 
 `172.23.96.1` is the WSL2 host gateway address — the Windows-side IP reachable from inside containers.
+
+## Observability — queue depth, backlog, latency
+
+Every generation path serialises on one lock: the GPU runs a single pipeline at
+a time. FastAPI's sync endpoints run in a threadpool, so concurrent callers
+don't fail — they **queue**, each holding a thread while it waits. That makes a
+backlog invisible from outside the process: `/api/tags` answers instantly (it
+needs no lock) while every `/api/generate` call sits behind the queue until the
+caller gives up with a read timeout.
+
+That failure mode happened for real: a bulk email re-triage queued hundreds of
+requests, 272 threads ended up parked on the lock, and from the outside the
+server looked alive but every service that needed a model silently stalled —
+email triage, email decomposition and calendar enrichment all at once.
+
+So `src/metrics.py` measures **the wait separately from the inference**:
+
+| Field | Meaning |
+|---|---|
+| `queue_depth` | callers parked on the lock right now |
+| `in_flight` / `current` | what holds the model, and for how long |
+| `wait_s` | time a request spent queued before it started |
+| `infer_s` | time the model itself took |
+| `oldest_wait_s` | longest-waiting caller still queued |
+
+A big `wait_s` with a normal `infer_s` means the queue is the problem, not the
+model — the distinction that matters when deciding whether to throttle callers
+or pick a smaller model.
+
+```
+GET /api/metrics[?history=180]
+```
+
+Returns the counters above plus `latency` (wait/infer p50 and p95 over the last
+200 calls), `by_model` totals, `recent` calls, a sampled `history` series, and
+`events`. The endpoint deliberately takes no lock, so it still answers while
+the server is saturated — if even this times out, the process is wedged rather
+than merely backlogged.
+
+**Events** answer "when did it get backlogged, and when did it come good":
+
+- `backlog_started` — `queue_depth` reached `INFERENCE_BACKLOG_DEPTH`, recording
+  what was holding the model and for how long
+- `backlog_cleared` — the queue drained, with how long the backlog lasted and
+  its peak depth
+- `generation_slow` — one generation has held the model past
+  `INFERENCE_STUCK_SECS` (the caller has long since timed out)
+
+Events append to `inference_events.jsonl` and are reloaded at startup, so the
+history survives a restart. They also print to the console as `[metrics] ...`
+lines, alongside one `[http]` line per non-polling request carrying model,
+status, total time and the queue depth at completion.
+
+The dashboard renders all of this at **/inference** (queue-over-time chart,
+backlog events, wait-vs-infer percentiles, per-model and recent calls), reading
+it through `dashboard/src/app/api/inference/route.ts`.
+
+### Tuning
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `INFERENCE_BACKLOG_DEPTH` | `3` | waiting callers that count as a backlog |
+| `INFERENCE_STUCK_SECS` | `300` | warn about one generation holding this long |
+| `INFERENCE_SAMPLE_SECS` | `10` | history sampling cadence |
+| `INFERENCE_SAMPLE_RETAIN` | `2160` | samples kept (6h at 10s) |
+| `INFERENCE_EVENT_LOG` | `inference_events.jsonl` | backlog event log path |

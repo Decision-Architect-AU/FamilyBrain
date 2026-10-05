@@ -88,6 +88,8 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
     r'commbank|westpac|nab\.com\.au|anz|macquarie|'
     r'firstmac|resimac|peppermoney|brighten|mamoney|'
     r'ignitionapp\.com|'
+    # Hospitals / specialists — appointment letters and admission paperwork
+    r'ramsayhealth|pindara|healthscope|mater\.org\.au|drneilsmith|'
     r'sammygordonsschoolofproperty\.com\.au)',   # property education — Q&A session reminders carry real dates/times
     re.I,
 )
@@ -118,6 +120,11 @@ _INGEST_SUBJECT_KW = re.compile(
     # Health / medical
     r'appointment|referral|pathology|prescription|test results|hospital|'
     r'specialist|gp|doctor|medicare|health fund|'
+    # Surgery / hospital admission — a "MyCare: Estimate of Patient Costs for
+    # Admission" and an online admission form confirmation both matched
+    # nothing here and were skipped, so a surgery never reached the calendar
+    r'admission|pre[- ]?admission|day surgery|surgery|surgical|operation|'
+    r'anaesthe|pre[- ]?op|post[- ]?op|discharge|theatre list|'
     # NDIS / disability
     r'ndis|support worker|service agreement|plan management|'
     r'occupational therapy|speech therapy|physiotherapy|'

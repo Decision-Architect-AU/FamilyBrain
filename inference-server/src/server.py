@@ -9,6 +9,7 @@ Endpoints implemented:
   POST /api/chat              — chat generation (non-streaming)
   POST /api/embeddings        — text embeddings
   GET  /                      — health check
+  GET  /api/metrics           — queue depth, latency, backlog history/events
 """
 import time
 import json
@@ -20,13 +21,13 @@ from typing import Optional
 import openvino_genai as ov_genai
 import tempfile, os
 
-_generate_lock = threading.Lock()
 
 from src.model_registry import (
     load_registry, list_models, get_generate_pipeline, get_vlm_pipeline,
     embed_text, rerank_pairs, get_whisper_pipeline
 )
 from src.ovms_proxy import is_ovms_model, ovms_generate, ovms_chat, OVMSUnavailable
+from src.metrics import metrics
 
 # This checkpoint reasons (visible "Thinking Process:" preamble, multi-step
 # deconstruct/draft/check-constraints/refine cycle) regardless of the
@@ -61,19 +62,36 @@ def _render_vlm_prompt(model_name: str, messages: list[dict], thinking: bool) ->
 app = FastAPI(title="FamilyBrain Inference Server")
 
 
+# Paths that are polled constantly (health, model list, metrics) would drown
+# the log, and generate bodies are whole prompts — neither belongs in a line
+# per request. Log the shape of the call plus how long it took end to end,
+# which includes any time spent queued for the model.
+_QUIET_PATHS = {"/", "/api/tags", "/api/ps", "/api/metrics"}
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    if request.url.path in _QUIET_PATHS:
+        return await call_next(request)
     body = await request.body()
-    caller = f"{request.client.host}:{request.client.port}"
-    ua = request.headers.get("user-agent", "unknown")
-    snippet = body[:200].decode(errors="replace") if body else ""
-    print(f"[{caller}] [{ua}] {request.method} {request.url.path} — {snippet}", flush=True)
-    return await call_next(request)
+    caller = request.client.host if request.client else "?"
+    model = "?"
+    try:
+        model = (json.loads(body).get("model") or "?") if body else "?"
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    started = time.time()
+    response = await call_next(request)
+    print(f"[http] {request.method} {request.url.path} model={model} "
+          f"caller={caller} bytes={len(body)} status={response.status_code} "
+          f"total={time.time() - started:.1f}s queued={metrics.queue_depth}", flush=True)
+    return response
 
 
 @app.on_event("startup")
 def startup():
     load_registry()
+    metrics.start_sampler()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -96,6 +114,12 @@ def list_tags():
 @app.get("/api/ps")
 def ps():
     return {"models": list_models()}
+
+
+@app.get("/api/metrics")
+def api_metrics(history: int = 180):
+    """Queue depth, what's running, latency percentiles, backlog events."""
+    return metrics.snapshot(history_limit=history)
 
 
 # ── Generate ──────────────────────────────────────────────────────────────────
@@ -130,7 +154,7 @@ def generate(req: GenerateRequest):
         messages.append({"role": "user", "content": req.prompt})
         prompt = _render_vlm_prompt(req.model, messages, req.thinking)
         start = time.time()
-        with _generate_lock:
+        with metrics.slot(req.model, "generate:vlm"):
             result = vlm_pipe.generate(prompt, max_new_tokens=vlm_max_tokens, temperature=temperature)
         elapsed = time.time() - start
         # VLMPipeline.generate() returns a VLMDecodedResults object, not a
@@ -152,7 +176,8 @@ def generate(req: GenerateRequest):
         # implements that wiring correctly).
         try:
             start = time.time()
-            response = ovms_generate(req.model, req.prompt, req.system, max_tokens, temperature)
+            with metrics.slot(req.model, "generate:ovms"):
+                response = ovms_generate(req.model, req.prompt, req.system, max_tokens, temperature)
             elapsed = time.time() - start
         except OVMSUnavailable as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -166,6 +191,7 @@ def generate(req: GenerateRequest):
 
     pipe = get_generate_pipeline(req.model)
     if pipe is None:
+        metrics.note_rejected(req.model)
         raise HTTPException(status_code=404, detail=f"Model {req.model} not loaded")
 
     config = ov_genai.GenerationConfig()
@@ -177,7 +203,7 @@ def generate(req: GenerateRequest):
         prompt = f"{req.system}\n\n{prompt}"
 
     start = time.time()
-    with _generate_lock:
+    with metrics.slot(req.model, "generate"):
         response = pipe.generate(prompt, config)
     elapsed = time.time() - start
 
@@ -216,7 +242,7 @@ def chat(req: ChatRequest):
         vlm_max_tokens = max(max_tokens, _VLM_MIN_MAX_TOKENS)
         prompt = _render_vlm_prompt(req.model, history, req.thinking)
         start = time.time()
-        with _generate_lock:
+        with metrics.slot(req.model, "chat:vlm"):
             result = vlm_pipe.generate(prompt, max_new_tokens=vlm_max_tokens, temperature=temperature)
         elapsed = time.time() - start
         response = result.texts[0] if hasattr(result, "texts") else str(result)
@@ -230,7 +256,8 @@ def chat(req: ChatRequest):
     if is_ovms_model(req.model):
         try:
             start = time.time()
-            response = ovms_chat(req.model, history, max_tokens, temperature)
+            with metrics.slot(req.model, "chat:ovms"):
+                response = ovms_chat(req.model, history, max_tokens, temperature)
             elapsed = time.time() - start
         except OVMSUnavailable as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -243,6 +270,7 @@ def chat(req: ChatRequest):
 
     pipe = get_generate_pipeline(req.model)
     if pipe is None:
+        metrics.note_rejected(req.model)
         raise HTTPException(status_code=404, detail=f"Model {req.model} not loaded")
 
     config = ov_genai.GenerationConfig()
@@ -262,7 +290,7 @@ def chat(req: ChatRequest):
     prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in history)
 
     start = time.time()
-    with _generate_lock:
+    with metrics.slot(req.model, "chat"):
         response = pipe.generate(prompt, config)
     elapsed = time.time() - start
 
@@ -332,7 +360,7 @@ async def transcribe(
         config = ov_genai.WhisperGenerateConfig()
         if language:
             config.language = f"<|{language}|>"
-        with _generate_lock:
+        with metrics.slot(model, "transcribe"):
             result = pipe.generate(tmp_path, config)
     finally:
         os.unlink(tmp_path)

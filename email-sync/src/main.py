@@ -238,6 +238,15 @@ def run_item_review() -> None:
     # (candidate extraction) that legitimately take well over one poll interval;
     # touching the heartbeat between flags (not just once per full loop
     # iteration) keeps a slow single review from starving the watchdog.
+    # A review involves ingestor posts and live LLM calls. When the ingestor is
+    # backlogged, each of those blocks until it times out and a single flag
+    # overruns the watchdog threshold — which restarts the whole process and
+    # takes every other loop down with it (that is how Outlook calendar import
+    # stopped for weeks). Don't start a review we can't finish in time.
+    from .ingest_client import ingestor_ready
+    if not ingestor_ready(INGESTOR_URL):
+        print("[item-review] ingestor busy — skipping this tick")
+        return
     accounts = get_enabled_accounts()
     flags = review_mod.claim_pending_flags(limit=1)
     for flag in flags:

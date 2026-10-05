@@ -18,6 +18,7 @@ import requests
 
 from . import db
 from .filters import should_ingest, reset_cache as reset_filter_cache
+from .ingest_client import INGEST_TIMEOUT, RETRY_BATCH, ingestor_ready
 
 TENANT_ID     = os.environ.get("MICROSOFT_TENANT_ID", "consumers")  # 'consumers' for personal MSA
 CLIENT_ID     = os.environ["MICROSOFT_CLIENT_ID"]
@@ -195,7 +196,7 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
             r = requests.post(
                 f"{ingestor_url}/ingest/extract",
                 json={"content_b64": content_b64, "filename": filename},
-                timeout=60,
+                timeout=INGEST_TIMEOUT,
             )
             if r.ok and r.json().get("ok"):
                 text = r.json().get("text", "").strip()
@@ -296,13 +297,22 @@ def sync_email(account: dict, ingestor_url: str) -> int:
     # Retry previously failed messages (e.g. triage deferred while Ollama was
     # down). The delta cursor has already moved past them, so without this
     # pass they would never be looked at again.
-    retry_ids = db.get_retryable_messages(account_id)
+    #
+    # Bounded and gated: the ingestor is single-threaded, so a large backlog
+    # makes every post block on connect. An unbounded batch here outlived the
+    # watchdog's restart threshold, so no cycle ever finished and the calendar
+    # loop never ran either.
+    retry_ids = []
+    if not ingestor_ready(ingestor_url):
+        print(f"[outlook] ingestor busy — skipping retry pass this cycle for {account['email_address']}")
+    else:
+        retry_ids = db.get_retryable_messages(account_id, limit=RETRY_BATCH)
     if retry_ids:
         print(f"[outlook] retrying {len(retry_ids)} error/pending messages for {account['email_address']}")
     for msg_id in retry_ids:
         try:
             resp = requests.get(f"{GRAPH_BASE}/me/messages/{msg_id}?$select={_MSG_SELECT}",
-                                headers=_headers(account), timeout=30)
+                                headers=_headers(account), timeout=(5, 30))
             if resp.status_code == 404:
                 db.mark_skipped(account_id, msg_id, "", "", None, "outlook:deleted")
                 continue
@@ -403,7 +413,7 @@ def _process_message(account: dict, msg: dict, ingestor_url: str) -> str:
         "attachments":     [],
         "is_sent":         False,
     }
-    r2 = requests.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
+    r2 = requests.post(f"{ingestor_url}/ingest/email", json=payload, timeout=INGEST_TIMEOUT)
     if not r2.ok:
         print(f"[outlook] ingestor rejected {msg_id}: {r2.text}")
         return "failed"
@@ -488,7 +498,7 @@ def _sync_sent_items(account: dict, ingestor_url: str) -> int:
                     "attachments":     [],
                     "is_sent":         True,
                 }
-                r2 = req_lib.post(f"{ingestor_url}/ingest/email", json=payload, timeout=60)
+                r2 = req_lib.post(f"{ingestor_url}/ingest/email", json=payload, timeout=INGEST_TIMEOUT)
                 if r2.ok:
                     ingested += 1
                 else:

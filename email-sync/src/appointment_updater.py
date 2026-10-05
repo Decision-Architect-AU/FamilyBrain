@@ -983,10 +983,19 @@ def run_appointment_updater(accounts: list[dict]) -> int:
         with rconn.cursor() as cur:
             cur.execute("""
                 SELECT id, gcal_event_id, gcal_calendar_id
-                FROM personal.event
+                FROM personal.event e
                 WHERE gcal_event_id IS NOT NULL
                   AND (
                     status IN ('cancelled', 'superseded')
+                    -- A suspended occurrence belongs on Tentative and nowhere
+                    -- else. The write path below reroutes future ones, but it
+                    -- skips anything already past, so a fortnight of school-day
+                    -- routines suspended for the holidays sat in the Family and
+                    -- primary calendars for the whole break. Clear them off any
+                    -- calendar that isn't a Tentative one.
+                    OR (status = 'suspended' AND NOT EXISTS (
+                          SELECT 1 FROM personal.email_account a
+                          WHERE a.tentative_calendar_id = e.gcal_calendar_id))
                     -- gmail-sourced + gcal_event_id normally only happens from the old
                     -- bug this sweep was built to catch. source_email_id set means it's
                     -- the new, legitimate native-gmail-patch path instead — must NOT be
