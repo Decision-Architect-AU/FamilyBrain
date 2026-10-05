@@ -30,6 +30,8 @@ import os
 import time
 import ollama
 
+from .llm_caller import caller_client
+
 DB_URL = os.environ.get("DATABASE_URL")
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
@@ -378,7 +380,7 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
 
     # 8. Ambiguous — ask the LLM
     try:
-        client = ollama.Client(host=OLLAMA_URL)
+        client = caller_client("triage")
         resp = client.generate(
             model=TRIAGE_MODEL,
             prompt=_TRIAGE_PROMPT.format(

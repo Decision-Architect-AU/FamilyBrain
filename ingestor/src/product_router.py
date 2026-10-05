@@ -22,6 +22,8 @@ import re
 import json
 
 import ollama
+
+from .llm_caller import caller_client
 import psycopg2
 import psycopg2.extras
 
@@ -71,7 +73,7 @@ Text (first 1500 chars):
 def _classify_document(text: str) -> dict | None:
     prompt = _PRODUCT_CLASSIFY_PROMPT.format(text=text[:1500])
     try:
-        client = ollama.Client(host=OLLAMA_URL)
+        client = caller_client("product-routing")
         resp = client.chat(
             model=AGENT_MODEL,
             messages=[{"role": "user", "content": prompt}],

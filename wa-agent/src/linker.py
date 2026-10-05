@@ -22,6 +22,8 @@ import random
 import psycopg2
 import psycopg2.extras
 import requests
+
+from .llm_caller import caller_headers
 from datetime import datetime, timezone
 
 DB_URL      = os.environ.get("DATABASE_URL")
@@ -81,6 +83,7 @@ def _embed(text: str) -> list[float]:
         resp = requests.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": EMBED_MODEL, "prompt": text[:512]},
+            headers=caller_headers("linker-embed"),
             timeout=30,
         )
         if resp.status_code < 500:

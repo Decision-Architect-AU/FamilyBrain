@@ -15,6 +15,8 @@ import threading
 
 import ollama
 
+from .llm_caller import caller_client
+
 from .asset_classifier import classify_for_asset
 from .asset_writer import upsert_asset
 from .rule_watcher import trigger_rules_for_asset
@@ -74,7 +76,7 @@ def _extract_asset_fields(text: str) -> dict | None:
     """
     prompt = _ASSET_DETECT_PROMPT.format(text=text[:1500])
     try:
-        client = ollama.Client(host=OLLAMA_URL)
+        client = caller_client("asset-routing")
         resp = client.chat(
             model=AGENT_MODEL,
             messages=[{"role": "user", "content": prompt}],

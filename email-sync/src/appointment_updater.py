@@ -23,6 +23,8 @@ next_update_at rules:
 import os
 import re
 import requests
+
+from .llm_caller import caller_headers
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone, date, timedelta
@@ -69,6 +71,7 @@ def _graph_context_for_event(title: str, notes: str) -> str:
         resp = requests.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": os.environ.get("EMBED_MODEL", "nomic-embed-text"), "prompt": query},
+            headers=caller_headers("appt-embed"),
             timeout=15,
         )
         resp.raise_for_status()
@@ -123,6 +126,7 @@ DESCRIPTION: <description or blank>"""
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
                   "options": {"temperature": 0.1, "num_predict": 150}},
+            headers=caller_headers("appt-enrich"),
             timeout=30,
         )
         resp.raise_for_status()

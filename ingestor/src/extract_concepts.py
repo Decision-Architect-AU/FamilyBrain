@@ -9,6 +9,8 @@ import re
 import time
 import ollama
 
+from .llm_caller import caller_client
+
 OLLAMA_URL       = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 DEEPER_OLLAMA_URL = os.environ.get("DEEPER_OLLAMA_URL", "")  # e.g. http://172.23.96.1:11435 — blank = skip
 AGENT_MODEL      = os.environ.get("AGENT_MODEL", "qwen2.5:14b")
@@ -238,7 +240,7 @@ def _run_extraction(text: str, model: str, prompt_template: str, on_chunk=None, 
     """Core extraction loop: chunk text, run model, fire on_chunk callbacks."""
     url = ollama_url or OLLAMA_URL
     try:
-        client = ollama.Client(host=url)
+        client = caller_client("concepts", host=url)
         # Quick connectivity check
         client.list()
     except Exception as e:

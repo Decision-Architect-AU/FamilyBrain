@@ -10,18 +10,29 @@ type Sample = {
   queue_depth: number;
   in_flight: number;
   model: string | null;
+  caller?: string | null;
   running_s: number;
   oldest_wait_s: number;
 };
 
 type Recent = {
-  at: string; model: string; endpoint: string;
+  at: string; model: string; endpoint: string; caller: string;
   wait_s: number; infer_s: number; ok: boolean; error: string | null;
+};
+
+type Stat = {
+  started: number; completed: number; failed: number;
+  avg_wait_s: number | null; avg_infer_s: number | null;
+  // Absent when the running server predates GPU-share accounting — the page
+  // has to stay readable against an older build it cannot control.
+  gpu_s?: number; gpu_share?: number; last_at?: string | null;
 };
 
 type Event_ = {
   kind: string; at: string;
   depth?: number; model?: string; endpoint?: string; holding?: string; held_for?: string;
+  holding_caller?: string; queued_by_caller?: Record<string, number>;
+  caller?: string;
   lasted_s?: number; peak_depth?: number; running_s?: number; queue_depth?: number;
 };
 
@@ -43,13 +54,15 @@ type Metrics = {
   in_backlog?: boolean;
   backlog_since?: string | null;
   oldest_wait_s?: number;
-  current?: { model: string; endpoint: string; started_at: string; waited_s: number; running_s: number } | null;
+  current?: { model: string; endpoint: string; caller?: string; started_at: string; waited_s: number; running_s: number } | null;
   latency?: {
     sample: number;
     wait_p50: number | null; wait_p95: number | null;
     infer_p50: number | null; infer_p95: number | null;
   };
-  by_model?: Record<string, { started: number; completed: number; failed: number; avg_wait_s: number | null; avg_infer_s: number | null }>;
+  by_model?: Record<string, Stat>;
+  by_caller?: Record<string, Stat>;
+  queued_by_caller?: Record<string, number>;
   recent?: Recent[];
   history?: Sample[];
   events?: Event_[];
@@ -114,7 +127,7 @@ function QueueChart({ history, backlogDepth }: { history: Sample[]; backlogDepth
               key={i}
               className={`flex-1 min-w-[2px] ${colour} rounded-sm`}
               style={{ height: h }}
-              title={`${fmtTime(s.at)} — ${s.in_flight} running${s.model ? ` (${s.model}, ${s.running_s}s)` : ''}, ${s.queue_depth} queued${s.oldest_wait_s ? `, oldest waiting ${s.oldest_wait_s}s` : ''}`}
+              title={`${fmtTime(s.at)} — ${s.in_flight} running${s.model ? ` (${s.model}${s.caller ? ` for ${s.caller}` : ''}, ${s.running_s}s)` : ''}, ${s.queue_depth} queued${s.oldest_wait_s ? `, oldest waiting ${s.oldest_wait_s}s` : ''}`}
             />
           );
         })}
@@ -128,17 +141,69 @@ function QueueChart({ history, backlogDepth }: { history: Sample[]; backlogDepth
   );
 }
 
+function BreakdownTable({ rows, firstCol }: { rows: [string, Stat][]; firstCol: string }) {
+  if (rows.length === 0) return <p className="text-xs text-zinc-600">No calls yet.</p>;
+  const hasShare = rows.some(([, s]) => typeof s.gpu_share === 'number');
+  const maxShare = Math.max(...rows.map(([, s]) => s.gpu_share ?? 0), 1);
+  return (
+    <table className="w-full text-xs">
+      <thead className="text-[10px] uppercase text-zinc-600">
+        <tr className="text-left">
+          <th className="pb-1">{firstCol}</th>
+          {hasShare && <th className="pb-1">GPU share</th>}
+          <th className="pb-1">Calls</th>
+          <th className="pb-1">Failed</th>
+          <th className="pb-1">Avg wait</th>
+          <th className="pb-1">Avg infer</th>
+          <th className="pb-1">Last</th>
+        </tr>
+      </thead>
+      <tbody className="font-mono">
+        {rows.map(([name, s]) => (
+          <tr key={name} className="border-t border-zinc-900">
+            <td className="py-1 text-zinc-300 pr-2">{name}</td>
+            {hasShare && (
+              <td className="py-1 pr-2">
+                <div className="flex items-center gap-2">
+                  <div className="h-1.5 w-20 bg-zinc-900 rounded-sm overflow-hidden">
+                    <div className="h-full bg-sky-600"
+                         style={{ width: `${Math.round(((s.gpu_share ?? 0) / maxShare) * 100)}%` }} />
+                  </div>
+                  <span className="text-zinc-400">{s.gpu_share ?? 0}%</span>
+                  <span className="text-zinc-700 text-[10px]">{fmtDuration(s.gpu_s)}</span>
+                </div>
+              </td>
+            )}
+            <td className="py-1">{s.started}</td>
+            <td className={`py-1 ${s.failed ? 'text-red-400' : ''}`}>{s.failed}</td>
+            <td className={`py-1 ${(s.avg_wait_s ?? 0) > 30 ? 'text-amber-400' : ''}`}>
+              {fmtDuration(s.avg_wait_s)}
+            </td>
+            <td className="py-1">{fmtDuration(s.avg_infer_s)}</td>
+            <td className="py-1 text-zinc-600 text-[10px]">{fmtTime(s.last_at)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 function EventRow({ ev }: { ev: Event_ }) {
   const style = ev.kind === 'backlog_cleared'
     ? 'text-emerald-400'
     : ev.kind === 'backlog_started' ? 'text-amber-400' : 'text-red-400';
   let text = ev.kind;
   if (ev.kind === 'backlog_started') {
-    text = `Backlog started — ${ev.depth} waiting, ${ev.holding ?? 'nothing'} holding the model for ${ev.held_for ?? '?'}`;
+    const queued = Object.entries(ev.queued_by_caller ?? {})
+      .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(', ');
+    const holder = ev.holding_caller && ev.holding_caller !== 'none'
+      ? `${ev.holding_caller} (${ev.holding})` : (ev.holding ?? 'nothing');
+    text = `Backlog started — ${holder} held the model for ${ev.held_for ?? '?'}`
+      + (queued ? `, blocking ${queued}` : `, ${ev.depth} waiting`);
   } else if (ev.kind === 'backlog_cleared') {
     text = `Back on track — queue drained after ${fmtDuration(ev.lasted_s)}, peaked at ${ev.peak_depth} waiting`;
   } else if (ev.kind === 'generation_slow') {
-    text = `Slow generation — ${ev.model} still running after ${fmtDuration(ev.running_s)} (${ev.queue_depth} queued)`;
+    text = `Slow generation — ${ev.model}${ev.caller ? ` for ${ev.caller}` : ''} still running after ${fmtDuration(ev.running_s)} (${ev.queue_depth} queued)`;
   }
   return (
     <div className="flex items-start gap-3 text-xs py-1.5 border-b border-zinc-900 last:border-0">
@@ -154,7 +219,9 @@ export default function InferencePage() {
   const status = data?.status ?? 'loading';
   const style = STATUS_STYLE[status] ?? { label: status, cls: 'bg-zinc-800 text-zinc-300', blurb: '' };
   const lat = data?.latency;
-  const models = Object.entries(data?.by_model ?? {});
+  const models = Object.entries(data?.by_model ?? {}) as [string, Stat][];
+  const callers = Object.entries(data?.by_caller ?? {}) as [string, Stat][];
+  const queuedNow = Object.entries(data?.queued_by_caller ?? {});
 
   return (
     <main className="min-h-screen bg-black text-zinc-200 p-6 space-y-5">
@@ -213,7 +280,9 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
             <div className="border border-sky-900/60 bg-sky-950/20 rounded-lg p-3 text-xs space-y-1">
               <div className="text-sky-300 font-medium">
                 Now generating: {data.current.model}
-                <span className="text-zinc-500 font-normal"> via {data.current.endpoint}</span>
+                <span className="text-zinc-500 font-normal">
+                  {' '}for {data.current.caller ?? 'unattributed'} via {data.current.endpoint}
+                </span>
               </div>
               <div className="text-zinc-400">
                 running {fmtDuration(data.current.running_s)} · started {fmtTime(data.current.started_at)} ·
@@ -262,32 +331,39 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
           </div>
 
           <section className="border border-zinc-800 rounded-lg p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-white">By model</h2>
-            {models.length === 0 ? (
-              <p className="text-xs text-zinc-600">No calls yet.</p>
+            <div className="flex items-baseline justify-between gap-4 flex-wrap">
+              <h2 className="text-sm font-semibold text-white">Where queries come from</h2>
+              {queuedNow.length > 0 && (
+                <span className="text-[10px] text-amber-400">
+                  waiting right now: {queuedNow.map(([n, c]) => c > 1 ? `${n} ×${c}` : n).join(', ')}
+                </span>
+              )}
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Every service reaches this server through one gateway address, so callers label
+              themselves with a <span className="font-mono">service/purpose</span> header. Share is
+              of GPU time held, which is what actually causes a queue — not call count.
+            </p>
+            {data.by_caller === undefined ? (
+              <p className="text-xs text-amber-400">
+                The running server build does not report callers yet — restart it from{' '}
+                <span className="font-mono">openclaw/inference-server</span> to start attributing
+                requests.
+              </p>
             ) : (
-              <table className="w-full text-xs">
-                <thead className="text-[10px] uppercase text-zinc-600">
-                  <tr className="text-left">
-                    <th className="pb-1">Model</th><th className="pb-1">Started</th>
-                    <th className="pb-1">Done</th><th className="pb-1">Failed</th>
-                    <th className="pb-1">Avg wait</th><th className="pb-1">Avg infer</th>
-                  </tr>
-                </thead>
-                <tbody className="font-mono">
-                  {models.map(([name, s]) => (
-                    <tr key={name} className="border-t border-zinc-900">
-                      <td className="py-1 text-zinc-300">{name}</td>
-                      <td className="py-1">{s.started}</td>
-                      <td className="py-1">{s.completed}</td>
-                      <td className={`py-1 ${s.failed ? 'text-red-400' : ''}`}>{s.failed}</td>
-                      <td className="py-1">{fmtDuration(s.avg_wait_s)}</td>
-                      <td className="py-1">{fmtDuration(s.avg_infer_s)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <BreakdownTable rows={callers} firstCol="Caller" />
             )}
+            {callers.some(([name]) => name === 'unattributed') && (
+              <p className="text-[10px] text-zinc-600">
+                <span className="font-mono text-zinc-500">unattributed</span> means a caller that
+                sends no header yet — it still shows up, just unnamed.
+              </p>
+            )}
+          </section>
+
+          <section className="border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-white">By model</h2>
+            <BreakdownTable rows={models} firstCol="Model" />
           </section>
 
           <section className="border border-zinc-800 rounded-lg p-4 space-y-2">
@@ -302,6 +378,7 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
                     <span className={`w-14 shrink-0 ${r.ok ? 'text-emerald-500' : 'text-red-400'}`}>
                       {r.ok ? 'ok' : 'failed'}
                     </span>
+                    <span className="text-sky-300 font-mono truncate w-44 shrink-0">{r.caller}</span>
                     <span className="text-zinc-300 font-mono truncate">{r.model}</span>
                     <span className="text-zinc-600 truncate">{r.endpoint}</span>
                     <span className="ml-auto text-zinc-500 shrink-0 font-mono text-[10px]">

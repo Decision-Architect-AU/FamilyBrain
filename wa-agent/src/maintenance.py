@@ -27,6 +27,8 @@ import re
 import threading
 import concurrent.futures
 import requests
+
+from .llm_caller import caller_headers
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, date, timezone, timedelta
@@ -1610,6 +1612,7 @@ def _derive_asset_summary(name: str, asset_type: str, facts: dict) -> str | None
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": os.environ.get("AGENT_MODEL", "qwen2.5:3b"), "prompt": prompt, "stream": False},
+            headers=caller_headers("asset-summary"),
             timeout=60,
         )
         text = resp.json().get("response", "").strip().strip('"')

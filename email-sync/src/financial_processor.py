@@ -17,6 +17,8 @@ import psycopg2
 import psycopg2.extras
 import requests as req
 
+from .llm_caller import caller_headers
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -205,6 +207,7 @@ def _doc_label(subject: str, fname: str, pdf_snippet: str) -> str:
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
                   "options": {"temperature": 0.1, "num_predict": 20}},
+            headers=caller_headers("financial"),
             timeout=20,
         )
         label = resp.json().get("response", "").strip().strip('"').strip("'")
@@ -272,6 +275,7 @@ def _classify_entity(subject: str, body: str, from_addr: str,
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False},
+            headers=caller_headers("financial"),
             timeout=30,
         )
         slug = resp.json().get("response", "Personal").strip().split()[0]
@@ -611,6 +615,7 @@ def _embed(text: str) -> list[float] | None:
         resp = req.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": EMBED_MODEL, "prompt": text[:4000]},
+            headers=caller_headers("financial-embed"),
             timeout=30,
         )
         resp.raise_for_status()

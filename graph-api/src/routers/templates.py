@@ -1,5 +1,7 @@
 """Response template endpoints."""
 import os
+
+from ..llm_caller import caller_headers
 import uuid
 from typing import Any
 
@@ -150,6 +152,7 @@ def test_template(template_id: str):
             json={"model": last.get("model", "qwen2.5:14b"),
                   "prompt": last["query_text"],
                   "system": system, "stream": False},
+            headers=caller_headers("templates"),
             timeout=120,
         )
         resp.raise_for_status()

@@ -22,6 +22,7 @@ Backlog events survive a restart by appending to a JSONL file
 """
 import json
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -44,6 +45,31 @@ EVENT_LOG = os.environ.get(
 )
 
 
+# Callers identify themselves with an X-FB-Caller header, "service/purpose"
+# (e.g. "email-sync/triage"). Anything that doesn't is grouped under this, so
+# adding the header to a service is an improvement, never a requirement.
+UNATTRIBUTED = "unattributed"
+# How a caller label is allowed to look, so a stray header can't invent
+# thousands of series or smuggle control characters into the logs.
+_CALLER_RE = re.compile(r"[^A-Za-z0-9_.:/-]")
+CALLER_MAX_LEN = 48
+
+
+def clean_caller(raw: str | None) -> str:
+    """Normalise a caller label from an untrusted header."""
+    if not raw:
+        return UNATTRIBUTED
+    label = _CALLER_RE.sub("", raw.strip())[:CALLER_MAX_LEN]
+    return label or UNATTRIBUTED
+
+
+def _tally(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -57,8 +83,9 @@ def _pct(values: list[float], pct: float) -> float | None:
     return round(ordered[idx], 2)
 
 
-class _ModelStat:
-    __slots__ = ("started", "completed", "failed", "wait_s", "infer_s")
+class _Stat:
+    """Per-model and per-caller tallies. infer_s doubles as GPU time held."""
+    __slots__ = ("started", "completed", "failed", "wait_s", "infer_s", "last_at")
 
     def __init__(self):
         self.started = 0
@@ -66,6 +93,8 @@ class _ModelStat:
         self.failed = 0
         self.wait_s = 0.0
         self.infer_s = 0.0
+        self.last_at = None
+
 
 
 class InferenceMetrics:
@@ -85,8 +114,9 @@ class InferenceMetrics:
         self.rejected = 0                    # 404 / unknown model etc.
 
         self._current: dict | None = None
-        self._waiting: dict[int, float] = {}  # id -> enqueued_at
-        self._by_model: dict[str, _ModelStat] = {}
+        self._waiting: dict[int, dict] = {}   # thread id -> {at, caller, model}
+        self._by_model: dict[str, _Stat] = {}
+        self._by_caller: dict[str, _Stat] = {}
         self._recent: deque[dict] = deque(maxlen=RECENT_RETAIN)
         self._history: deque[dict] = deque(maxlen=SAMPLE_RETAIN)
         self._events: deque[dict] = deque(maxlen=EVENT_RETAIN)
@@ -123,8 +153,46 @@ class InferenceMetrics:
 
     # ── the instrumented slot ────────────────────────────────────────────────
 
-    def slot(self, model: str, endpoint: str):
-        return _Slot(self, model, endpoint)
+    def slot(self, model: str, endpoint: str, caller: str = UNATTRIBUTED):
+        """Queue for the model, hold it, and record both phases."""
+        return _Slot(self, model, endpoint, caller)
+
+    def observe(self, model: str, endpoint: str, caller: str = UNATTRIBUTED):
+        """Count and time a call that must NOT serialise on the generation lock.
+
+        Embeddings and reranks run on their own small models and were never
+        lock-held. Putting them behind the generation lock to get them counted
+        would make every embedding wait out whatever generation is in flight —
+        turning instrumentation into the very stall it is meant to reveal.
+        """
+        return _Slot(self, model, endpoint, caller, take_lock=False)
+
+    def _record_unlocked(self, model: str, endpoint: str, caller: str,
+                         elapsed: float, ok: bool, error: str | None) -> None:
+        """Tally a call that never took the generation lock (embeddings, rerank)."""
+        with self._m:
+            self.total += 1
+            if ok:
+                self.completed += 1
+            else:
+                self.failed += 1
+            for registry, key in ((self._by_model, model), (self._by_caller, caller)):
+                stat = registry.setdefault(key, _Stat())
+                stat.started += 1
+                if ok:
+                    stat.completed += 1
+                else:
+                    stat.failed += 1
+                stat.infer_s += elapsed
+                stat.last_at = _now_iso()
+            self._recent.append({
+                "at": _now_iso(), "model": model, "endpoint": endpoint, "caller": caller,
+                "wait_s": 0.0, "infer_s": round(elapsed, 2), "ok": ok, "error": error,
+            })
+        if not ok or elapsed > 5:
+            print(f"[metrics] {'done' if ok else 'FAILED'} {endpoint} {model} "
+                  f"caller={caller} — {elapsed:.1f}s (no lock)"
+                  + (f" ({error})" if error else ""), flush=True)
 
     def note_rejected(self, model: str) -> None:
         """A request refused before it ever queued (unknown model)."""
@@ -132,16 +200,19 @@ class InferenceMetrics:
             self.rejected += 1
         print(f"[metrics] rejected — model not loaded: {model}", flush=True)
 
-    def _enter_queue(self, token: int, model: str, endpoint: str) -> float:
+    def _enter_queue(self, token: int, model: str, endpoint: str, caller: str) -> float:
         enqueued = time.time()
         with self._m:
             self.total += 1
             self.queue_depth += 1
-            self._waiting[token] = enqueued
+            self._waiting[token] = {"at": enqueued, "caller": caller, "model": model}
             depth = self.queue_depth
             self.peak_queue_depth = max(self.peak_queue_depth, depth)
-            stat = self._by_model.setdefault(model, _ModelStat())
-            stat.started += 1
+            for registry, key in ((self._by_model, model), (self._by_caller, caller)):
+                stat = registry.setdefault(key, _Stat())
+                stat.started += 1
+                stat.last_at = _now_iso()
+            queued_by_caller = _tally(w["caller"] for w in self._waiting.values())
             became_backlogged = depth >= BACKLOG_DEPTH and not self._in_backlog
             if became_backlogged:
                 self._in_backlog = True
@@ -152,13 +223,18 @@ class InferenceMetrics:
             holder = dict(self._current) if self._current else None
         if became_backlogged:
             held = f"{time.time() - holder['started']:.0f}s" if holder else "idle"
+            # Who was in the queue matters more than how deep it was: it names
+            # the workload that caused the pile-up.
             self._record_event(
                 "backlog_started", depth=depth, endpoint=endpoint, model=model,
                 holding=(holder or {}).get("model", "none"), held_for=held,
+                holding_caller=(holder or {}).get("caller", "none"),
+                queued_by_caller=queued_by_caller,
             )
         return enqueued
 
-    def _start(self, token: int, model: str, endpoint: str, enqueued: float) -> float:
+    def _start(self, token: int, model: str, endpoint: str, caller: str,
+               enqueued: float) -> float:
         started = time.time()
         wait_s = started - enqueued
         with self._m:
@@ -166,17 +242,18 @@ class InferenceMetrics:
             self._waiting.pop(token, None)
             self.in_flight += 1
             self._current = {
-                "model": model, "endpoint": endpoint,
+                "model": model, "endpoint": endpoint, "caller": caller,
                 "started": started, "started_at": _now_iso(), "waited_s": round(wait_s, 2),
             }
-            self._by_model.setdefault(model, _ModelStat()).wait_s += wait_s
+            self._by_model.setdefault(model, _Stat()).wait_s += wait_s
+            self._by_caller.setdefault(caller, _Stat()).wait_s += wait_s
             depth = self.queue_depth
         if wait_s >= 1:
-            print(f"[metrics] start {endpoint} {model} — waited {wait_s:.1f}s, "
-                  f"{depth} still queued", flush=True)
+            print(f"[metrics] start {endpoint} {model} caller={caller} — "
+                  f"waited {wait_s:.1f}s, {depth} still queued", flush=True)
         return started
 
-    def _finish(self, token: int, model: str, endpoint: str,
+    def _finish(self, token: int, model: str, endpoint: str, caller: str,
                 enqueued: float, started: float | None, ok: bool,
                 error: str | None = None) -> None:
         ended = time.time()
@@ -189,16 +266,20 @@ class InferenceMetrics:
             else:
                 self.queue_depth -= 1
                 self._waiting.pop(token, None)
-            stat = self._by_model.setdefault(model, _ModelStat())
             if ok:
                 self.completed += 1
-                stat.completed += 1
             else:
                 self.failed += 1
-                stat.failed += 1
-            stat.infer_s += infer_s
+            for registry, key in ((self._by_model, model), (self._by_caller, caller)):
+                stat = registry.setdefault(key, _Stat())
+                if ok:
+                    stat.completed += 1
+                else:
+                    stat.failed += 1
+                stat.infer_s += infer_s
+                stat.last_at = _now_iso()
             self._recent.append({
-                "at": _now_iso(), "model": model, "endpoint": endpoint,
+                "at": _now_iso(), "model": model, "endpoint": endpoint, "caller": caller,
                 "wait_s": round(wait_s, 2), "infer_s": round(infer_s, 2),
                 "ok": ok, "error": error,
             })
@@ -208,8 +289,8 @@ class InferenceMetrics:
                 self._in_backlog = False
                 self._backlog_since = None
                 self._backlog_peak = 0
-        print(f"[metrics] {'done' if ok else 'FAILED'} {endpoint} {model} — "
-              f"wait {wait_s:.1f}s infer {infer_s:.1f}s"
+        print(f"[metrics] {'done' if ok else 'FAILED'} {endpoint} {model} "
+              f"caller={caller} — wait {wait_s:.1f}s infer {infer_s:.1f}s"
               + (f" ({error})" if error else ""), flush=True)
         if drained:
             self._record_event(
@@ -236,8 +317,9 @@ class InferenceMetrics:
                         "in_flight": self.in_flight,
                         "model": (current or {}).get("model"),
                         "running_s": round(time.time() - current["started"], 1) if current else 0,
+                        "caller": (current or {}).get("caller"),
                         "oldest_wait_s": round(
-                            time.time() - min(self._waiting.values()), 1
+                            time.time() - min(w["at"] for w in self._waiting.values()), 1
                         ) if self._waiting else 0,
                     }
                     self._history.append(sample)
@@ -247,8 +329,8 @@ class InferenceMetrics:
                     warned_for = current["started"]
                     self._record_event(
                         "generation_slow", model=current["model"],
-                        endpoint=current["endpoint"], running_s=sample["running_s"],
-                        queue_depth=sample["queue_depth"],
+                        endpoint=current["endpoint"], caller=current.get("caller"),
+                        running_s=sample["running_s"], queue_depth=sample["queue_depth"],
                     )
                 if not current:
                     warned_for = None
@@ -263,14 +345,23 @@ class InferenceMetrics:
             recent = list(self._recent)
             history = list(self._history)[-history_limit:]
             events = list(self._events)[-40:]
-            by_model = {
-                name: {
-                    "started": s.started, "completed": s.completed, "failed": s.failed,
-                    "avg_wait_s": round(s.wait_s / s.completed, 2) if s.completed else None,
-                    "avg_infer_s": round(s.infer_s / s.completed, 2) if s.completed else None,
+            def _fmt(registry: dict[str, _Stat]) -> dict:
+                total_gpu = sum(st.infer_s for st in registry.values()) or 1.0
+                return {
+                    name: {
+                        "started": st.started, "completed": st.completed, "failed": st.failed,
+                        "avg_wait_s": round(st.wait_s / st.completed, 2) if st.completed else None,
+                        "avg_infer_s": round(st.infer_s / st.completed, 2) if st.completed else None,
+                        "gpu_s": round(st.infer_s, 1),
+                        "gpu_share": round(100 * st.infer_s / total_gpu),
+                        "last_at": st.last_at,
+                    }
+                    for name, st in sorted(registry.items(), key=lambda kv: -kv[1].infer_s)
                 }
-                for name, s in self._by_model.items()
-            }
+
+            by_model = _fmt(self._by_model)
+            by_caller = _fmt(self._by_caller)
+            queued_now = _tally(w["caller"] for w in self._waiting.values())
             state = {
                 "queue_depth": self.queue_depth,
                 "in_flight": self.in_flight,
@@ -285,7 +376,7 @@ class InferenceMetrics:
                     .isoformat(timespec="seconds") if self._backlog_since else None
                 ),
                 "oldest_wait_s": round(
-                    time.time() - min(self._waiting.values()), 1
+                    time.time() - min(w["at"] for w in self._waiting.values()), 1
                 ) if self._waiting else 0,
             }
         if current:
@@ -306,6 +397,8 @@ class InferenceMetrics:
                 "infer_p50": _pct(infers, 50), "infer_p95": _pct(infers, 95),
             },
             "by_model": by_model,
+            "by_caller": by_caller,
+            "queued_by_caller": queued_now,
             "recent": recent[-25:],
             "history": history,
             "events": events,
@@ -317,29 +410,48 @@ class InferenceMetrics:
 class _Slot:
     """Context manager: queue for the model, hold it, record both phases."""
 
-    def __init__(self, metrics: InferenceMetrics, model: str, endpoint: str):
+    def __init__(self, metrics: InferenceMetrics, model: str, endpoint: str,
+                 caller: str = UNATTRIBUTED, take_lock: bool = True):
         self._metrics = metrics
         self._model = model
         self._endpoint = endpoint
+        self._caller = caller
+        self._take_lock = take_lock
         self._token = 0
         self._enqueued = 0.0
         self._started: float | None = None
 
     def __enter__(self):
         self._token = threading.get_ident()
-        self._enqueued = self._metrics._enter_queue(self._token, self._model, self._endpoint)
+        if not self._take_lock:
+            # Lock-free path: tally it, but stay out of queue_depth / in_flight
+            # / current entirely. Those describe contention for the generation
+            # lock, and an embedding neither waits for it nor holds it —
+            # counting it there would overwrite the real holder and inflate
+            # the backlog signal with calls that never queued.
+            self._started = time.time()
+            return self
+        self._enqueued = self._metrics._enter_queue(
+            self._token, self._model, self._endpoint, self._caller)
         self._metrics.generate_lock.acquire()
         self._started = self._metrics._start(
-            self._token, self._model, self._endpoint, self._enqueued)
+            self._token, self._model, self._endpoint, self._caller, self._enqueued)
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        error = f"{exc_type.__name__}: {exc}"[:200] if exc_type else None
+        if not self._take_lock:
+            self._metrics._record_unlocked(
+                self._model, self._endpoint, self._caller,
+                elapsed=time.time() - (self._started or time.time()),
+                ok=exc_type is None, error=error,
+            )
+            return False
         if self._started is not None:
             self._metrics.generate_lock.release()
         self._metrics._finish(
-            self._token, self._model, self._endpoint, self._enqueued, self._started,
-            ok=exc_type is None,
-            error=f"{exc_type.__name__}: {exc}"[:200] if exc_type else None,
+            self._token, self._model, self._endpoint, self._caller,
+            self._enqueued, self._started, ok=exc_type is None, error=error,
         )
         return False
 

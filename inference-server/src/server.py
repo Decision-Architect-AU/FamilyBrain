@@ -10,6 +10,11 @@ Endpoints implemented:
   POST /api/embeddings        — text embeddings
   GET  /                      — health check
   GET  /api/metrics           — queue depth, latency, backlog history/events
+
+Callers should identify themselves with an `X-FB-Caller: service/purpose`
+header (e.g. `email-sync/triage`); every service reaches this server through
+one NAT'd gateway address, so the source IP cannot tell them apart. Requests
+without the header are grouped as "unattributed".
 """
 import time
 import json
@@ -27,7 +32,7 @@ from src.model_registry import (
     embed_text, rerank_pairs, get_whisper_pipeline
 )
 from src.ovms_proxy import is_ovms_model, ovms_generate, ovms_chat, OVMSUnavailable
-from src.metrics import metrics
+from src.metrics import metrics, clean_caller
 
 # This checkpoint reasons (visible "Thinking Process:" preamble, multi-step
 # deconstruct/draft/check-constraints/refine cycle) regardless of the
@@ -74,7 +79,8 @@ async def log_requests(request: Request, call_next):
     if request.url.path in _QUIET_PATHS:
         return await call_next(request)
     body = await request.body()
-    caller = request.client.host if request.client else "?"
+    client_ip = request.client.host if request.client else "?"
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     model = "?"
     try:
         model = (json.loads(body).get("model") or "?") if body else "?"
@@ -83,7 +89,7 @@ async def log_requests(request: Request, call_next):
     started = time.time()
     response = await call_next(request)
     print(f"[http] {request.method} {request.url.path} model={model} "
-          f"caller={caller} bytes={len(body)} status={response.status_code} "
+          f"caller={caller} from={client_ip} bytes={len(body)} status={response.status_code} "
           f"total={time.time() - started:.1f}s queued={metrics.queue_depth}", flush=True)
     return response
 
@@ -133,7 +139,8 @@ class GenerateRequest(BaseModel):
     thinking: bool = False   # only meaningful for models with a chat-template tokenizer loaded
 
 @app.post("/api/generate")
-def generate(req: GenerateRequest):
+def generate(req: GenerateRequest, request: Request):
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     opts = req.options or {}
     max_tokens  = opts.get("num_predict", opts.get("max_new_tokens", 512))
     temperature = opts.get("temperature", 0.7)
@@ -154,7 +161,7 @@ def generate(req: GenerateRequest):
         messages.append({"role": "user", "content": req.prompt})
         prompt = _render_vlm_prompt(req.model, messages, req.thinking)
         start = time.time()
-        with metrics.slot(req.model, "generate:vlm"):
+        with metrics.slot(req.model, "generate:vlm", caller):
             result = vlm_pipe.generate(prompt, max_new_tokens=vlm_max_tokens, temperature=temperature)
         elapsed = time.time() - start
         # VLMPipeline.generate() returns a VLMDecodedResults object, not a
@@ -176,7 +183,7 @@ def generate(req: GenerateRequest):
         # implements that wiring correctly).
         try:
             start = time.time()
-            with metrics.slot(req.model, "generate:ovms"):
+            with metrics.slot(req.model, "generate:ovms", caller):
                 response = ovms_generate(req.model, req.prompt, req.system, max_tokens, temperature)
             elapsed = time.time() - start
         except OVMSUnavailable as e:
@@ -203,7 +210,7 @@ def generate(req: GenerateRequest):
         prompt = f"{req.system}\n\n{prompt}"
 
     start = time.time()
-    with metrics.slot(req.model, "generate"):
+    with metrics.slot(req.model, "generate", caller):
         response = pipe.generate(prompt, config)
     elapsed = time.time() - start
 
@@ -230,7 +237,8 @@ class ChatRequest(BaseModel):
     thinking: bool = False
 
 @app.post("/api/chat")
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, request: Request):
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     history = [{"role": m.role, "content": m.content} for m in req.messages]
 
     opts = req.options or {}
@@ -242,7 +250,7 @@ def chat(req: ChatRequest):
         vlm_max_tokens = max(max_tokens, _VLM_MIN_MAX_TOKENS)
         prompt = _render_vlm_prompt(req.model, history, req.thinking)
         start = time.time()
-        with metrics.slot(req.model, "chat:vlm"):
+        with metrics.slot(req.model, "chat:vlm", caller):
             result = vlm_pipe.generate(prompt, max_new_tokens=vlm_max_tokens, temperature=temperature)
         elapsed = time.time() - start
         response = result.texts[0] if hasattr(result, "texts") else str(result)
@@ -256,7 +264,7 @@ def chat(req: ChatRequest):
     if is_ovms_model(req.model):
         try:
             start = time.time()
-            with metrics.slot(req.model, "chat:ovms"):
+            with metrics.slot(req.model, "chat:ovms", caller):
                 response = ovms_chat(req.model, history, max_tokens, temperature)
             elapsed = time.time() - start
         except OVMSUnavailable as e:
@@ -290,7 +298,7 @@ def chat(req: ChatRequest):
     prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in history)
 
     start = time.time()
-    with metrics.slot(req.model, "chat"):
+    with metrics.slot(req.model, "chat", caller):
         response = pipe.generate(prompt, config)
     elapsed = time.time() - start
 
@@ -309,9 +317,11 @@ class EmbedRequest(BaseModel):
     prompt: str
 
 @app.post("/api/embeddings")
-def embeddings(req: EmbedRequest):
+def embeddings(req: EmbedRequest, request: Request):
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     try:
-        vec = embed_text(req.model, req.prompt)
+        with metrics.observe(req.model, "embeddings", caller):
+            vec = embed_text(req.model, req.prompt)
         return {"embedding": vec}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -330,9 +340,11 @@ class RerankRequest(BaseModel):
     passages: list[str]
 
 @app.post("/api/rerank")
-def rerank(req: RerankRequest):
+def rerank(req: RerankRequest, request: Request):
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     try:
-        scores = rerank_pairs(req.model, req.query, req.passages)
+        with metrics.observe(req.model, "rerank", caller):
+            scores = rerank_pairs(req.model, req.query, req.passages)
         return {"scores": scores}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -342,11 +354,13 @@ def rerank(req: RerankRequest):
 
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
+    request: Request,
     file: UploadFile = File(...),
     model: str = Form("whisper-small"),
     language: Optional[str] = Form(None),
     response_format: Optional[str] = Form("json"),
 ):
+    caller = clean_caller(request.headers.get("x-fb-caller"))
     pipe = get_whisper_pipeline(model)
     if pipe is None:
         raise HTTPException(status_code=404, detail="No whisper model loaded")
@@ -360,7 +374,7 @@ async def transcribe(
         config = ov_genai.WhisperGenerateConfig()
         if language:
             config.language = f"<|{language}|>"
-        with metrics.slot(model, "transcribe"):
+        with metrics.slot(model, "transcribe", caller):
             result = pipe.generate(tmp_path, config)
     finally:
         os.unlink(tmp_path)

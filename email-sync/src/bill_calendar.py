@@ -14,6 +14,8 @@ import psycopg2
 import psycopg2.extras
 import requests as req
 
+from .llm_caller import caller_headers
+
 from datetime import datetime, timedelta, timezone
 
 DB_URL      = os.environ["DATABASE_URL"]
@@ -207,6 +209,7 @@ def _classify_and_extract(subject: str, body: str, received_date: str) -> list[d
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False},
+            headers=caller_headers("bill-calendar"),
             timeout=90,
         )
         raw = resp.json().get("response", "")

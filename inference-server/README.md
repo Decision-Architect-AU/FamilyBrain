@@ -105,6 +105,7 @@ So `src/metrics.py` measures **the wait separately from the inference**:
 | `queue_depth` | callers parked on the lock right now |
 | `in_flight` / `current` | what holds the model, and for how long |
 | `wait_s` | time a request spent queued before it started |
+| `caller` | which service/workload asked (see below) |
 | `infer_s` | time the model itself took |
 | `oldest_wait_s` | longest-waiting caller still queued |
 
@@ -122,6 +123,39 @@ Returns the counters above plus `latency` (wait/infer p50 and p95 over the last
 the server is saturated — if even this times out, the process is wedged rather
 than merely backlogged.
 
+### Who is asking — caller attribution
+
+Every service reaches this server through the same WSL2 gateway address, so the
+source IP is identical for all of them and cannot attribute anything. Callers
+therefore label themselves:
+
+```
+X-FB-Caller: service/purpose     e.g. email-sync/triage, ingestor/concepts
+```
+
+`purpose` is the workload, not the function name — what the request is *for*,
+in the terms you'd use when deciding what to throttle. Each service has a small
+`llm_caller.py` (`caller_headers(purpose)`, and `caller_client(purpose)` where
+the `ollama` client is used) and takes its service name from `FB_SERVICE`.
+
+The header is advisory: anything that doesn't send one is grouped as
+`unattributed` and still counted, so adding it to a service is an improvement
+rather than a requirement. Labels are sanitised server-side (character
+allow-list, 48 chars) so a stray header can't invent endless series or inject
+control characters into the logs.
+
+`by_caller` reports GPU time held and its share, not just call counts — a
+caller making few slow 14B calls can own the queue while another makes hundreds
+of fast ones. `queued_by_caller` names who is waiting right now, and
+`backlog_started` records both the holder and everyone stuck behind it, which
+is the question worth answering after the fact: *whose workload caused this.*
+
+Note that embeddings and reranks are counted through a lock-free path
+(`metrics.observe`), since they run on their own small models and never
+serialised on the generation lock. Putting them behind it merely to count them
+would make every embedding wait out whatever generation is in flight — turning
+the instrumentation into the stall it is meant to reveal.
+
 **Events** answer "when did it get backlogged, and when did it come good":
 
 - `backlog_started` — `queue_depth` reached `INFERENCE_BACKLOG_DEPTH`, recording
@@ -130,6 +164,9 @@ than merely backlogged.
   its peak depth
 - `generation_slow` — one generation has held the model past
   `INFERENCE_STUCK_SECS` (the caller has long since timed out)
+
+Each event names the caller involved, so the log reads "ingestor/concepts held
+the model for 120s, blocking email-sync/triage ×2" rather than just a depth.
 
 Events append to `inference_events.jsonl` and are reloaded at startup, so the
 history survives a restart. They also print to the console as `[metrics] ...`

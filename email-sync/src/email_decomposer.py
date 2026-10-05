@@ -18,6 +18,8 @@ import psycopg2
 import psycopg2.extras
 import requests as req
 
+from .llm_caller import caller_headers
+
 from datetime import datetime, timezone, date, timedelta
 
 # Pre-extract meeting links from raw email body before any truncation or stripping.
@@ -225,6 +227,7 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
                   "options": {"num_predict": 2048 + extra_tokens}},
+            headers=caller_headers("decompose"),
             timeout=180,
         )
         raw = resp.json().get("response", "")
@@ -531,6 +534,7 @@ def _compose_evidence_note(product: dict, reason: str, evidence: dict) -> str:
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.3}},
+            headers=caller_headers("decompose"),
             timeout=60,
         )
         resp.raise_for_status()
@@ -628,6 +632,7 @@ def _extract_missing_field(body: str, field_name: str):
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": AGENT_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.0}},
+            headers=caller_headers("decompose"),
             timeout=60,
         )
         resp.raise_for_status()
