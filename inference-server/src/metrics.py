@@ -300,6 +300,25 @@ class InferenceMetrics:
 
     # ── sampler ──────────────────────────────────────────────────────────────
 
+    def note_startup(self) -> None:
+        """Mark the process start in the event log.
+
+        Events outlive the process, so a backlog that was still open when the
+        server was killed leaves a `backlog_started` with no `backlog_cleared`
+        after it — the timeline then reads as though it never recovered. A
+        restart marker says what actually happened, and notes whether a
+        backlog was open at the time.
+        """
+        unresolved = None
+        for event in reversed(self._events):
+            if event.get("kind") in ("backlog_started", "backlog_cleared"):
+                unresolved = event.get("at") if event["kind"] == "backlog_started" else None
+                break
+        self._record_event(
+            "server_started",
+            interrupted_backlog_from=unresolved,
+        )
+
     def start_sampler(self) -> None:
         threading.Thread(target=self._sample_loop, name="metrics-sampler",
                          daemon=True).start()

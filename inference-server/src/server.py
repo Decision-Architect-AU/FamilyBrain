@@ -97,6 +97,7 @@ async def log_requests(request: Request, call_next):
 @app.on_event("startup")
 def startup():
     load_registry()
+    metrics.note_startup()
     metrics.start_sampler()
 
 

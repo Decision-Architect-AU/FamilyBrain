@@ -34,6 +34,7 @@ type Event_ = {
   holding_caller?: string; queued_by_caller?: Record<string, number>;
   caller?: string;
   lasted_s?: number; peak_depth?: number; running_s?: number; queue_depth?: number;
+  interrupted_backlog_from?: string | null;
 };
 
 type Metrics = {
@@ -78,6 +79,9 @@ function fmtTime(iso: string | undefined | null) {
 
 function fmtDuration(secs: number | undefined | null) {
   if (secs === undefined || secs === null) return '—';
+  // Sub-second values are the whole point for the fast models — rounding a
+  // 0.25s triage call to "0s" reads as though it took no time at all.
+  if (secs > 0 && secs < 10) return `${secs.toFixed(1)}s`;
   if (secs < 60) return `${Math.round(secs)}s`;
   const m = Math.floor(secs / 60);
   if (m < 60) return `${m}m ${Math.round(secs % 60)}s`;
@@ -191,7 +195,8 @@ function BreakdownTable({ rows, firstCol }: { rows: [string, Stat][]; firstCol: 
 function EventRow({ ev }: { ev: Event_ }) {
   const style = ev.kind === 'backlog_cleared'
     ? 'text-emerald-400'
-    : ev.kind === 'backlog_started' ? 'text-amber-400' : 'text-red-400';
+    : ev.kind === 'backlog_started' ? 'text-amber-400'
+    : ev.kind === 'server_started' ? 'text-zinc-400' : 'text-red-400';
   let text = ev.kind;
   if (ev.kind === 'backlog_started') {
     const queued = Object.entries(ev.queued_by_caller ?? {})
@@ -202,6 +207,10 @@ function EventRow({ ev }: { ev: Event_ }) {
       + (queued ? `, blocking ${queued}` : `, ${ev.depth} waiting`);
   } else if (ev.kind === 'backlog_cleared') {
     text = `Back on track — queue drained after ${fmtDuration(ev.lasted_s)}, peaked at ${ev.peak_depth} waiting`;
+  } else if (ev.kind === 'server_started') {
+    text = ev.interrupted_backlog_from
+      ? `Server restarted — counters reset, and the backlog open since ${fmtTime(ev.interrupted_backlog_from)} ended here`
+      : 'Server restarted — counters reset';
   } else if (ev.kind === 'generation_slow') {
     text = `Slow generation — ${ev.model}${ev.caller ? ` for ${ev.caller}` : ''} still running after ${fmtDuration(ev.running_s)} (${ev.queue_depth} queued)`;
   }

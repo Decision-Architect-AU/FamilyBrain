@@ -164,6 +164,10 @@ the instrumentation into the stall it is meant to reveal.
   its peak depth
 - `generation_slow` — one generation has held the model past
   `INFERENCE_STUCK_SECS` (the caller has long since timed out)
+- `server_started` — the process restarted and the counters reset, noting
+  whether a backlog was still open at the time. Without it, a backlog that was
+  open when the server was killed leaves a `backlog_started` with nothing after
+  it, and the timeline reads as though it never recovered.
 
 Each event names the caller involved, so the log reads "ingestor/concepts held
 the model for 120s, blocking email-sync/triage ×2" rather than just a depth.
