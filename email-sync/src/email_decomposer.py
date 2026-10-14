@@ -48,7 +48,83 @@ _BATCH = 20   # emails per run
 
 
 class DecomposeUnavailable(Exception):
-    """The extraction LLM couldn't run — the email must stay queued, not be marked done."""
+    """The extraction LLM couldn't run — the email must stay queued, not be marked done.
+
+    `spent_capacity` separates the two reasons that look identical from here:
+      - False: nothing ran (connection refused, model not loaded). Retrying is
+        free, and an outage must never use up an email's attempt budget.
+      - True: the model ran and the work was thrown away (read timeout, output
+        we couldn't parse). Retrying costs the full timeout of GPU time every
+        cycle, so these attempts are counted and eventually abandoned.
+    """
+
+    def __init__(self, message: str, spent_capacity: bool = False):
+        super().__init__(message)
+        self.spent_capacity = spent_capacity
+
+
+# Failed attempts (where the model actually ran) before an email is abandoned.
+DECOMPOSE_MAX_ATTEMPTS = int(os.environ.get("DECOMPOSE_MAX_ATTEMPTS", "3"))
+
+# Cheap first pass. Extraction on the 14B model costs 30-50s; this gate costs a
+# fraction of a second on the small model and keeps most of that cost off the
+# GPU entirely.
+TRIAGE_MODEL = os.environ.get("MODEL_PARSER_1ST", "qwen2.5:3b")
+
+_RELEVANCE_PROMPT = """Does this email contain anything to put in a family calendar or keep as a record?
+
+YES if it contains any of: an appointment, booking, meeting or event with a date;
+a bill, invoice, payment or amount owing; a deadline or date to act by; a school
+or medical notice about a specific child or person; a tenancy, property or legal
+document with dates.
+
+NO if it is: a newsletter or marketing, general advice or an article, a
+notification with no date or amount of its own ("your statement is ready", "new
+sign-in"), a social or automated message, or anything where there is nothing
+specific to diarise or file.
+
+Answer with exactly one word: YES or NO.
+
+From: {from_address}
+Subject: {subject}
+Body: {body}
+
+Answer:"""
+
+
+def _worth_extracting(subject: str, body: str, from_address: str) -> bool:
+    """Cheap gate before the expensive extraction pass.
+
+    Most email that reaches this stage has nothing to diarise — a law firm's
+    newsletter was re-extracted every five minutes for weeks, each attempt
+    holding the single GPU pipeline for its full 180s timeout, which is what
+    made quarter-second triage calls wait minutes. Asking a small model one
+    yes/no question first takes that cost off the GPU.
+
+    Raises DecomposeUnavailable if the gate itself can't run, so the email
+    stays queued rather than being dropped on an outage.
+    """
+    try:
+        resp = req.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": TRIAGE_MODEL,
+                  "prompt": _RELEVANCE_PROMPT.format(
+                      from_address=from_address or "(unknown)",
+                      subject=subject or "(no subject)",
+                      body=body[:1500].replace("\n", " ")),
+                  "stream": False,
+                  "options": {"temperature": 0.0, "num_predict": 4}},
+            headers=caller_headers("relevance-gate"),
+            timeout=(5, 60),
+        )
+        resp.raise_for_status()
+        word = re.sub(r"[^a-z]", "", resp.json().get("response", "").strip().lower()[:6])
+    except Exception as e:
+        spent = not isinstance(e, req.exceptions.ConnectionError)
+        raise DecomposeUnavailable(f"relevance gate: {e}", spent_capacity=spent) from e
+    # Fail toward extracting: an unexpected answer must not silently drop an
+    # email that might hold a real appointment.
+    return word != "no"
 
 
 def _extract_meeting_url(body: str) -> str | None:
@@ -258,15 +334,20 @@ def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
                 items = []
         except Exception as e:
             print(f"[decompose] LLM retry failed: {e}")
-            raise DecomposeUnavailable(str(e)) from e
+            raise DecomposeUnavailable(str(e), spent_capacity=True) from e
     except Exception as e:
         # An unreachable or erroring LLM is not "this email has no items": the
         # caller marks the email decomposed and never looks at it again, which
         # is how a urology appointment ("Appointment Date: 29th September
         # 2026") was lost while Ollama was down. Signal it instead so the
         # email stays queued for the next cycle.
-        print(f"[decompose] LLM unavailable, will retry: {e}")
-        raise DecomposeUnavailable(str(e)) from e
+        #
+        # A read timeout is different from an outage: the model ran and we threw
+        # the answer away, so that attempt is counted against the email's budget
+        # (see DECOMPOSE_MAX_ATTEMPTS) instead of being retried forever.
+        spent = not isinstance(e, req.exceptions.ConnectionError)
+        print(f"[decompose] LLM {'timed out' if spent else 'unavailable'}, will retry: {e}")
+        raise DecomposeUnavailable(str(e), spent_capacity=spent) from e
 
     return _ensure_annotation_date_captured(items, subject, body, received_date)
 
@@ -1475,6 +1556,63 @@ def _store_note_body(email_id: int, body: str) -> int:
     return note_id
 
 
+def _finish_decompose(email_id: int, reason: str | None = None) -> None:
+    """Mark an email done, recording why if it was never extracted."""
+    try:
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.email_message
+                          SET email_decomposed = true,
+                              ingest_error = COALESCE(%s, ingest_error)
+                        WHERE id = %s""",
+                    (f"decompose skipped: {reason}" if reason else None, email_id),
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"[decompose] could not mark email {email_id} done: {e}")
+
+
+def _note_failed_attempt(email_id: int, error: str) -> bool:
+    """Count an attempt where the model ran. Returns True if we're giving up.
+
+    Retrying an email whose extraction reliably times out costs the full
+    timeout of exclusive GPU time every cycle, forever — two emails doing this
+    were enough to starve everything else on the box.
+    """
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.email_message
+                          SET decompose_attempts = decompose_attempts + 1
+                        WHERE id = %s
+                    RETURNING decompose_attempts""",
+                    (email_id,),
+                )
+                row = cur.fetchone()
+                attempts = row["decompose_attempts"] if row else 0
+                give_up = attempts >= DECOMPOSE_MAX_ATTEMPTS
+                if give_up:
+                    cur.execute(
+                        """UPDATE personal.email_message
+                              SET email_decomposed = true,
+                                  ingest_error = %s
+                            WHERE id = %s""",
+                        (f"decompose abandoned after {attempts} attempts: {error[:160]}", email_id),
+                    )
+            conn.commit()
+        if give_up:
+            print(f"[decompose] email {email_id} abandoned after {attempts} failed attempts "
+                  f"— it will not be retried again")
+        else:
+            print(f"[decompose] email {email_id} attempt {attempts}/{DECOMPOSE_MAX_ATTEMPTS} failed")
+        return give_up
+    except Exception as e:
+        print(f"[decompose] could not record attempt for email {email_id}: {e}")
+        return False
+
+
 def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) -> list[int]:
     """
     Decompose a single already-fetched email row (as returned by the SELECT in
@@ -1520,11 +1658,27 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                 _store_note_body(email_id, att_text)
                 body = att_text
 
+    # Nothing to read means nothing to extract. These used to go to the model
+    # anyway — three "Statement Notification" emails with empty bodies were
+    # re-sent every cycle — and an empty prompt invites a long, useless answer.
+    if not body.strip():
+        print(f"[decompose] email {email_id} '{subject[:40]}' has no body or attachment text "
+              f"— nothing to extract")
+        _finish_decompose(email_id, reason="no body to extract from")
+        return []
+
     title_to_event_id: dict = {}
     try:
         # Pre-extract meeting URL from raw body before truncation — used as fallback
         # if the LLM misses it or the link is buried below the 3000-char prompt window.
         pre_meeting_url = _extract_meeting_url(body)
+
+        # Cheap gate before the expensive pass: most of what reaches here has
+        # nothing to diarise, and extraction costs 30-50s of exclusive GPU.
+        if not _worth_extracting(subject, body, email.get("from_address") or ""):
+            print(f"[decompose] '{subject[:50]}' has nothing to diarise — skipping extraction")
+            _finish_decompose(email_id, reason="no calendar/record content")
+            return []
 
         items = _extract_items(subject, body, received_at)
 
@@ -1582,7 +1736,9 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
         with psycopg2.connect(DB_URL) as wconn:
             with wconn.cursor() as wcur:
                 wcur.execute(
-                    "UPDATE personal.email_message SET email_decomposed = true WHERE id = %s",
+                    """UPDATE personal.email_message
+                          SET email_decomposed = true, decompose_attempts = 0
+                        WHERE id = %s""",
                     (email_id,),
                 )
             wconn.commit()
@@ -1600,6 +1756,11 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
         print(f"[decompose] {'transient failure, will retry' if is_transient else 'failed'} "
               f"for email {email_id} '{subject[:40]}': {e!r}")
         traceback.print_exc()
+        # An attempt that actually used the GPU counts against the budget, so a
+        # permanently-failing email stops being retried. An outage does not.
+        if is_transient and getattr(e, "spent_capacity", False):
+            if _note_failed_attempt(email_id, str(e)):
+                return list(title_to_event_id.values())
         if not is_transient:
             # Only mark done for non-network failures (parse errors, malformed content)
             try:

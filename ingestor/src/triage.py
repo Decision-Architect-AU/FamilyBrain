@@ -158,6 +158,32 @@ _INGEST_SUBJECT_KW = re.compile(
     re.I,
 )
 
+# ── Body keywords → ingest ───────────────────────────────────────────────────
+# The subject list above cannot be used on body text: it contains bare nouns
+# ("court", "policy", "claim", "lease", "gp") that appear in any newsletter
+# discussing the topic. A law firm's marketing email was ingested for five
+# weeks because it said "the Family Court decides", and each pass then spent
+# minutes of GPU time trying to extract calendar events from it.
+#
+# This list is deliberately transactional: phrases that only appear when a
+# document is doing something to you — a date, an amount, a reference.
+_INGEST_BODY_KW = re.compile(
+    r'\b('
+    r'appointment (?:date|time|with)|your appointment|'
+    r'tax invoice|invoice (?:number|no|#|date|total)|amount (?:due|payable)|'
+    r'balance (?:due|outstanding)|total due|payment (?:due|received|of)|'
+    r'due date|direct debit|bpay|biller code|reference number|'
+    r'policy number|claim number|membership number|account number|'
+    r'statement period|statement date|closing balance|'
+    r'admission (?:date|time)|pre[- ]?admission|theatre (?:time|list)|'
+    r'referral (?:to|for|number)|prescription (?:for|number)|'
+    r'rent (?:due|payment|increase)|lease (?:commence|expire|term)|'
+    r'settlement (?:date|figure)|vacate (?:by|date)|'
+    r'please (?:pay|remit|sign and return)'
+    r')\b',
+    re.I,
+)
+
 # ── Subject/body patterns → marketing ────────────────────────────────────────
 _MARKETING_BODY_KW = re.compile(
     r'unsubscribe|opt.out|you.re receiving this|click here to unsubscribe|'
@@ -332,6 +358,10 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     """Returns 'ingest', 'marketing', or 'skip'."""
     subj   = subject or ""
     body   = body_text[:1200]
+    # An unsubscribe footer is the single most reliable newsletter signal, and
+    # it sits at the END of the email — outside the slice above. Check both
+    # ends, or every long newsletter reads as un-marked.
+    body_edges = body_text[:1200] + "\n" + body_text[-800:]
     sender = from_address.lower()
 
     # 0. Household-internal forward — deterministic gate, ahead of every
@@ -361,8 +391,10 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     if _INGEST_SUBJECT_KW.search(subj):
         return "ingest"
 
-    # 5. Check first 400 chars of body for financial/medical keywords
-    if _INGEST_SUBJECT_KW.search(body[:400]):
+    # 5. Check the body for transactional phrasing — a real document whose
+    # subject says nothing ("Dr Neil Smith", whose body carried the actual
+    # appointment date). Uses the tight body list, not the subject list.
+    if _INGEST_BODY_KW.search(body):
         return "ingest"
 
     # 6. Forwarded email with a dated personal annotation above the quoted
@@ -375,7 +407,7 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     # 7. Clear marketing signals
     if _MARKETING_SUBJECT_KW.search(subj):
         return "marketing"
-    if _MARKETING_BODY_KW.search(body):
+    if _MARKETING_BODY_KW.search(body_edges):
         return "marketing"
 
     # 8. Ambiguous — ask the LLM
