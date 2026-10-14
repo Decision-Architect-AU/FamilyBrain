@@ -233,122 +233,244 @@ def _ensure_annotation_date_captured(items: list, subject: str, body: str,
     return items
 
 
-def _extract_items(subject: str, body: str, received_date: str) -> list[dict]:
-    """
-    LLM: decompose an email into typed items.
-    Returns list of dicts, each with 'type' and type-specific fields.
-    """
-    prompt = (
-        "Parse this email and extract ALL distinct actionable or notable items. "
-        "An email might have zero items worth capturing, or several — return only real items.\n"
-        "Reply with ONLY valid JSON — no prose, no markdown.\n\n"
+
+
+_ROUTE_PROMPT = """What does this email carry? Reply with the matching words from this list, comma separated.
+
+calendar - something happening at a date or time: an appointment, booking, meeting, event, or a deadline to act by
+money - an invoice, bill, statement with an amount, payment request or receipt
+task - it explicitly asks the reader to do something specific (sign and return, submit a form, book a time)
+record - a fact worth keeping with no date and no amount: a policy change, a confirmation of something already done
+
+Use several words only if the email genuinely carries several (a bill that also
+confirms a meeting is "calendar, money"). Use the fewest that fit.
+
+From: {from_address}
+Subject: {subject}
+Body: {body}
+
+Words:"""
+
+# One focused extractor per route. The single kitchen-sink prompt asked for all
+# four item types at once under ~40 lines of rules, so it needed a 2048-token
+# answer (4096 on retry) — routinely more than the model could produce inside
+# the timeout, which meant the work was done and then thrown away. A prompt
+# with one job answers in a few hundred tokens and finishes.
+_COMMON_FIELDS = (
+    '  "title": short descriptive title (max 80 chars)\n'
+    '  "detail": full context — what/who/where/how much/reference numbers\n'
+    '  "date": YYYY-MM-DD of the actual event/due date. '
+    'Use {anchor} as the anchor for relative expressions ("in 6 weeks", "next Monday") '
+    'and calculate the absolute date. Must NOT be the email received date ({anchor}) '
+    'unless it genuinely falls that day. Null only if there is no date reference at all.\n'
+    '  "time": HH:MM (24h) if a specific time is given, else null\n'
+    '  "relative_to": title of the parent event this date hangs off, else null\n'
+    '  "relative_offset_days": integer days after the parent event, else null\n'
+    '  "relative_anchor": human description of the dependency, else null\n'
+)
+
+_GUARDRAILS = (
+    "- Copy the day exactly as stated: \"the 21st\" means day 21. Never shift it.\n"
+    "- Do NOT invent, infer or guess any value. If it is not in the email, use null.\n"
+    "- Ignore marketing copy, unsubscribe footers and auto-replies.\n"
+)
+
+# The original all-types prompt, kept for emails the router cannot place.
+# Expensive (2048 tokens) but complete, so an unusual email still gets read.
+_FALLBACK_PROMPT = (
+    "Parse this email and extract ALL distinct actionable or notable items. "
+    "An email might have zero items worth capturing, or several — return only real items.\n"
+    'Return JSON: {{"items": [...]}}\n'
+    "Each item has:\n"
+    '  "type": one of "calendar_event" | "payment" | "observation" | "task"\n'
+    + _COMMON_FIELDS +
+    "  -- extra fields for specific types:\n"
+    '  calendar_event: "end_date" (only if it genuinely runs multiple days), "location", "meeting_url"\n'
+    '  payment: "amount" exactly as written or null, "biller", "reference" or null\n'
+    '  task: "priority": "high"|"normal"\n\n'
+    "Type selection rules:\n"
+    "- calendar_event: a booked appointment, meeting, deadline, or any document with a\n"
+    "  date — one event per distinct date. An offer to meet, a booking link, a time still\n"
+    "  being negotiated, or a meeting that already happened are NOT events: use observation.\n"
+    "  An email re-confirming or changing an appointment describes the SAME meeting.\n"
+    "- payment: an unpaid invoice, bill or explicit payment request with a real amount.\n"
+    "  Not booking confirmations or receipts without a 'please pay'.\n"
+    "- observation: a fact worth remembering — confirmations, receipts, policy updates.\n"
+    "- task: an explicit ask of the reader ('please sign and return'), not general info.\n\n"
+    "General rules:\n"
+    "- Weigh the first 1-2 lines heavily: a short human note above forwarded content\n"
+    "  (\"Loganholme to vacate on 28/10/2026\") is often the most important fact in the\n"
+    "  email and must produce a calendar_event with that exact date, whatever the\n"
+    "  boilerplate below it looks like. A vacate notice is an event, not 'review notice'.\n"
+    "- A payment reminder and a meeting invite in one email are two separate items.\n"
+    "- A plan with multiple dated steps is one calendar_event per step.\n"
+    + _GUARDRAILS +
+    '- If nothing is worth capturing: return {{"items": []}}'
+)
+
+
+_ROUTE_PROMPTS = {
+    "calendar": (
+        'Extract every dated thing in this email as JSON: {{"items": [...]}}\n'
+        'Each item has "type": "calendar_event", plus:\n'
+        + _COMMON_FIELDS +
+        '  "end_date": YYYY-MM-DD only if it genuinely runs multiple days, else null\n'
+        '  "location": string or null\n'
+        '  "meeting_url": full video join URL if present, else null\n'
+        "\nRules:\n"
+        "- One item per distinct date. A document listing four dated steps is four items.\n"
+        "- A booking already confirmed, a deadline, or a notice with a date all count.\n"
+        "- An offer to meet, a booking link, or a time still being negotiated is NOT an\n"
+        "  event. Neither is a meeting that already happened.\n"
+        "- An end_date must be supported by the text saying it runs that long.\n"
+        + _GUARDRAILS,
+        700,
+    ),
+    "money": (
+        'Extract every amount owed or paid in this email as JSON: {{"items": [...]}}\n'
+        'Each item has "type": "payment", plus:\n'
+        + _COMMON_FIELDS +
+        '  "amount": exact dollar amount as written, or null\n'
+        '  "biller": who is to be paid, or null\n'
+        '  "reference": invoice/reference number as written, or null\n'
+        "\nRules:\n"
+        "- Use the due date as \"date\" when there is one.\n"
+        "- Leave amount, biller and reference null when not stated — never guess them.\n"
+        "- A receipt or paid confirmation is still an item; say so in \"detail\".\n"
+        + _GUARDRAILS,
+        500,
+    ),
+    "task": (
+        'Extract what this email asks the reader to do, as JSON: {{"items": [...]}}\n'
+        'Each item has "type": "task", plus:\n'
+        + _COMMON_FIELDS +
+        '  "priority": "high" or "normal"\n'
+        "\nRules:\n"
+        "- Only an explicit ask: \"please sign and return\", \"submit by Friday\".\n"
+        "- General information, greetings and passive reminders are not tasks.\n"
+        "- Use the by-when as \"date\" if one is given.\n"
+        + _GUARDRAILS,
+        500,
+    ),
+    "record": (
+        'Extract the facts worth keeping from this email as JSON: {{"items": [...]}}\n'
+        'Each item has "type": "observation", plus:\n'
+        + _COMMON_FIELDS +
+        "\nRules:\n"
+        "- One item per distinct fact: a policy change, a confirmation of something\n"
+        "  already done, a reference number issued, a decision recorded.\n"
+        "- Leave \"date\" null unless the fact itself is dated.\n"
+        "- If there is nothing worth keeping, return an empty list.\n"
+        + _GUARDRAILS,
+        500,
+    ),
+}
+
+
+def _prompt_header(subject: str, body: str, received_date: str) -> str:
+    return (
         f"Email received: {received_date[:10]}\n"
         f"Subject: {subject}\n"
         f"Body (first 3000 chars):\n{body[:3000]}\n\n"
-        'Return JSON: {"items": [...]}\n'
-        "Each item has:\n"
-        '  "type": one of "calendar_event" | "payment" | "observation" | "task"\n'
-        '  "title": short descriptive title (max 80 chars)\n'
-        '  "detail": full context — what/who/where/how much/reference numbers etc.\n'
-        '  "date": YYYY-MM-DD of the actual event/due date. '
-        f'Use {received_date[:10]} as the anchor date to resolve relative expressions '
-        f'like "+ 4 weeks", "in 6 weeks", "next Monday", "review in 3 months" — calculate the absolute date. '
-        f'Must NOT be the email received date ({received_date[:10]}) unless the event genuinely falls on that day. '
-        'Null only if there is truly no date reference at all in the content.\n'
-        '  "time": HH:MM (24h) if a specific time is mentioned, else null\n'
-        '  "relative_to": title of the parent event this date is relative to (e.g. "Initial Session"), or null if it is an anchor event\n'
-        '  "relative_offset_days": integer number of days after the parent event, or null if not relative\n'
-        '  "relative_anchor": human-readable description of the dependency (e.g. "4 weeks after initial session"), or null\n'
-        "  -- extra fields for specific types:\n"
-        '  calendar_event: "end_date": YYYY-MM-DD if multi-day, "location": string or null, "meeting_url": the full video/conference join URL (Zoom/Teams/Meet/Webex etc.) if present in the email, else null\n'
-        '  payment: "amount": exact dollar amount as it appears in the email or null, "biller": who to pay, "reference": invoice/ref number as it appears or null\n'
-        '  task: "priority": "high"|"normal"\n\n'
-        "Type selection rules:\n"
-        "- calendar_event: a scheduled appointment, meeting, booking, deadline, or ANY document/script/plan "
-        "  that references a date — including relative dates like '+ 4 weeks', 'review in 6 weeks', 'next session'. "
-        "  Each distinct date in a document becomes its own calendar_event.\n"
-        "  A meeting must be actually booked/agreed with a date. NOT calendar_events: an offer to meet, "
-        "  'book a time using this link', a proposed time awaiting a reply, or a meeting that already "
-        "  happened ('thanks for your time yesterday') — use observation for those.\n"
-        "  An email that re-confirms or changes logistics of an appointment (assistant confirming the "
-        "  booking, 'switching to Zoom') describes the SAME meeting: use exactly the day and time it "
-        "  states — 'the 21st' means day 21 — never shift it.\n"
-        "- payment: ONLY use when the email is an unpaid invoice, bill, or explicit payment request "
-        "  with a real amount and biller stated in the email body. "
-        "  Do NOT use for booking confirmations (payment already made), receipts, or anything without a clear 'please pay' instruction. "
-        "  Leave amount/reference/biller null if not explicitly stated — never guess or infer them.\n"
-        "- observation: a fact, decision, or piece of information worth remembering. "
-        "  Use this for: booking confirmations, receipts, birthday/anniversary mentions, policy updates, notifications, "
-        "  confirmations of things already done, and anything informational with no action required\n"
-        "- task: ONLY use when the email explicitly asks YOU to do something specific and actionable "
-        "  (e.g. 'please sign and return', 'action required: renew by Friday'). "
-        "  Do NOT create tasks for birthday greetings, passive reminders, or general information.\n\n"
-        "General rules:\n"
-        "- Pay close attention to the first 1-2 lines of the body — often a short "
-        "human-written note added above forwarded/quoted content (e.g. \"Loganholme to "
-        "vacate on 28/10/2026\"). That note is frequently the single most important fact "
-        "in the email and must produce a calendar_event with its exact date, even if the "
-        "forwarded content below it reads as a generic legal notice or document. "
-        "A 'Notice to Leave' / vacate notice with a vacate-by date is a calendar_event for "
-        "that date — not a vague task like 'review notice'.\n"
-        "- Only extract real items — skip marketing, unsubscribe footers, auto-replies\n"
-        "- A payment reminder and a meeting invite in the same email = two separate items\n"
-        "- A therapy script or medical plan with multiple dated steps = one calendar_event per step\n"
-        "- CRITICAL: Do NOT invent, infer, or guess any field values. Only use values explicitly present in the email text. "
-        "  If a field value is not in the email, set it to null — never substitute a placeholder.\n"
-        "- If nothing worth capturing: return {\"items\": []}"
+        "Reply with ONLY valid JSON — no prose, no markdown.\n\n"
     )
-    def _call_llm(extra_tokens: int = 0) -> list:
+
+
+def _ask_for_items(prompt: str, num_predict: int, purpose: str,
+                   model: str | None = None) -> list:
+    """One model call that must answer with {"items": [...]}.
+
+    Raises DecomposeUnavailable with spent_capacity set, so the caller can tell
+    an outage (free to retry) from a timeout (the model ran and we discarded
+    the answer, which costs the full timeout of exclusive GPU every retry).
+    """
+    try:
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
-                  "options": {"num_predict": 2048 + extra_tokens}},
-            headers=caller_headers("decompose"),
+            json={"model": model or AGENT_MODEL, "prompt": prompt, "stream": False,
+                  "options": {"num_predict": num_predict}},
+            headers=caller_headers(purpose),
             timeout=180,
         )
+        resp.raise_for_status()
         raw = resp.json().get("response", "")
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            return []
-        text = m.group()
-        try:
-            return json.loads(text).get("items", [])
-        except json.JSONDecodeError:
-            # Truncated JSON — try patching the tail so partial items aren't lost
-            patched = re.sub(r',\s*\{[^}]*$', '', text).rstrip(",") + "]}"
-            try:
-                return json.loads(patched).get("items", [])
-            except json.JSONDecodeError:
-                raise
-
-    try:
-        items = _call_llm()
-        if not isinstance(items, list):
-            items = []
-    except json.JSONDecodeError:
-        # Response was cut off — retry with more tokens
-        try:
-            print(f"[decompose] JSON truncated, retrying with more tokens")
-            items = _call_llm(extra_tokens=2048)
-            if not isinstance(items, list):
-                items = []
-        except Exception as e:
-            print(f"[decompose] LLM retry failed: {e}")
-            raise DecomposeUnavailable(str(e), spent_capacity=True) from e
     except Exception as e:
-        # An unreachable or erroring LLM is not "this email has no items": the
-        # caller marks the email decomposed and never looks at it again, which
-        # is how a urology appointment ("Appointment Date: 29th September
-        # 2026") was lost while Ollama was down. Signal it instead so the
-        # email stays queued for the next cycle.
-        #
-        # A read timeout is different from an outage: the model ran and we threw
-        # the answer away, so that attempt is counted against the email's budget
-        # (see DECOMPOSE_MAX_ATTEMPTS) instead of being retried forever.
         spent = not isinstance(e, req.exceptions.ConnectionError)
-        print(f"[decompose] LLM {'timed out' if spent else 'unavailable'}, will retry: {e}")
-        raise DecomposeUnavailable(str(e), spent_capacity=spent) from e
+        raise DecomposeUnavailable(f"{purpose}: {e}", spent_capacity=spent) from e
 
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return []
+    text = m.group()
+    try:
+        return json.loads(text).get("items", [])
+    except json.JSONDecodeError:
+        # Truncated JSON — patch the tail so complete items aren't lost
+        patched = re.sub(r',\s*\{[^}]*$', '', text).rstrip(",") + "]}"
+        try:
+            return json.loads(patched).get("items", [])
+        except json.JSONDecodeError as e:
+            raise DecomposeUnavailable(
+                f"{purpose}: unparseable answer", spent_capacity=True) from e
+
+
+def _route_email(subject: str, body: str, from_address: str) -> list[str]:
+    """Which focused extractors should run. Empty list means "use the fallback".
+
+    One small-model call. Routing costs a fraction of a second and lets each
+    extractor ask for one thing in a few hundred tokens instead of one prompt
+    asking for everything in 2048.
+    """
+    try:
+        resp = req.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": TRIAGE_MODEL,
+                  "prompt": _ROUTE_PROMPT.format(
+                      from_address=from_address or "(unknown)",
+                      subject=subject or "(no subject)",
+                      body=body[:1500].replace("\n", " ")),
+                  "stream": False,
+                  "options": {"temperature": 0.0, "num_predict": 16}},
+            headers=caller_headers("decompose-route"),
+            timeout=(5, 60),
+        )
+        resp.raise_for_status()
+        answer = resp.json().get("response", "").lower()
+    except Exception as e:
+        spent = not isinstance(e, req.exceptions.ConnectionError)
+        raise DecomposeUnavailable(f"router: {e}", spent_capacity=spent) from e
+
+    routes = [r for r in ("calendar", "money", "task", "record") if r in answer]
+    # Everything at once is the router saying "I don't know" — the fallback
+    # prompt handles those better than four narrow passes would.
+    return [] if len(routes) == len(_ROUTE_PROMPTS) else routes
+
+
+def _extract_items(subject: str, body: str, received_date: str,
+                   from_address: str = "") -> list[dict]:
+    """
+    Decompose an email into typed items.
+
+    Routes first, then runs only the extractors that apply. Falls back to the
+    single all-types prompt when the router can't place the email, so nothing
+    is lost on an unusual one.
+    """
+    header = _prompt_header(subject, body, received_date)
+    routes = _route_email(subject, body, from_address)
+
+    items: list[dict] = []
+    if routes:
+        print(f"[decompose] routed to: {', '.join(routes)}")
+        for route in routes:
+            template, budget = _ROUTE_PROMPTS[route]
+            prompt = header + template.format(anchor=received_date[:10])
+            items.extend(_ask_for_items(prompt, budget, f"decompose:{route}"))
+    else:
+        items = _ask_for_items(
+            header + _FALLBACK_PROMPT.format(anchor=received_date[:10]),
+            2048, "decompose:all-types")
+
+    items = [i for i in items if isinstance(i, dict) and i.get("title")]
     return _ensure_annotation_date_captured(items, subject, body, received_date)
 
 
@@ -1680,7 +1802,8 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
             _finish_decompose(email_id, reason="no calendar/record content")
             return []
 
-        items = _extract_items(subject, body, received_at)
+        items = _extract_items(subject, body, received_at,
+                               email.get("from_address") or "")
 
         if items:
             print(f"[decompose] '{subject[:60]}': {len(items)} item(s)")
