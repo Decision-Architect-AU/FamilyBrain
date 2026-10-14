@@ -31,6 +31,35 @@ INGEST_TIMEOUT = (
 RETRY_BATCH = int(os.environ.get("EMAIL_RETRY_BATCH", "20"))
 
 
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+# Queued callers at which optional model work should stand down.
+INFERENCE_BUSY_DEPTH = int(os.environ.get("INFERENCE_BUSY_DEPTH", "2"))
+
+
+def inference_busy(url: str | None = None) -> bool:
+    """Is the inference server already under load?
+
+    Used to stand down from *optional* model work (title enrichment, backfills)
+    so it never piles onto a saturated GPU. This matters beyond latency: at
+    100% GPU the host's network connection drops, so optional work competing
+    for the GPU can take the whole box off the network.
+
+    /api/metrics takes no lock, so it answers even while the server is busy.
+    Fails open (False) when the server reports nothing — an older build with no
+    metrics endpoint, or none running at all, should not silently disable
+    enrichment forever; the normal timeouts still bound the damage.
+    """
+    try:
+        resp = requests.get(f"{url or OLLAMA_URL}/api/metrics", timeout=3)
+        if not resp.ok:
+            return False
+        data = resp.json()
+        return (data.get("status") == "backlogged"
+                or (data.get("queue_depth") or 0) >= INFERENCE_BUSY_DEPTH)
+    except Exception:
+        return False
+
+
 def ingestor_ready(ingestor_url: str, timeout: float = 5.0) -> bool:
     """Is the ingestor accepting connections right now?
 

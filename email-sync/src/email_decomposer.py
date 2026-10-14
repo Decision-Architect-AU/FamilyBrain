@@ -19,6 +19,7 @@ import psycopg2.extras
 import requests as req
 
 from .llm_caller import caller_headers
+from .ingest_client import inference_busy
 
 from datetime import datetime, timezone, date, timedelta
 
@@ -1932,6 +1933,14 @@ def decompose_emails(accounts: list[dict]) -> int:
     Process a batch of ingested emails that haven't been decomposed yet.
     Returns number of emails processed.
     """
+    # Extraction is the most expensive thing this service asks of the GPU, and
+    # at 100% GPU this host drops its network connection. If the model is
+    # already backed up, wait for the next cycle instead of adding to it —
+    # nothing is lost, the emails stay queued.
+    if inference_busy():
+        print("[decompose] inference server is backed up — deferring this batch")
+        return 0
+
     gmail_acct = next((a for a in accounts if a["provider"] == "gmail"), None)
     # Use a neutral source so appointment_updater picks these up and writes them to GCal.
     # (gmail:... source is skipped by the updater as it assumes those events already exist in GCal)

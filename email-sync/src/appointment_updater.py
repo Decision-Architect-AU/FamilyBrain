@@ -24,6 +24,8 @@ import os
 import re
 import requests
 
+from .ingest_client import inference_busy
+
 from .llm_caller import caller_headers
 import psycopg2
 import psycopg2.extras
@@ -151,17 +153,51 @@ DESCRIPTION: <description or blank>"""
         return title, notes
 
 
+# A title that already carries specifics — a time, a street number, a
+# practitioner ("with Amy"), or a " - " qualifier — is not thin, whatever
+# keyword it contains. Without this, "Physio - Centre of Movement - Olivia
+# (8:00am)" was sent off for enrichment purely because it says "physio".
+_SPECIFIC_SIGNAL = re.compile(r'\d|\bwith\b|\s-\s|,|@')
+_THIN_MAX_LEN = 40
+
+# Enrichment depends on the title, its notes and the graph — not on the date.
+# A weekly routine generates the same title for years ("Olivia Physio" x44,
+# "Olivia Speech therapy" x22), and each occurrence was paying for its own
+# embedding plus a 14B generation. One answer serves all of them.
+_enrich_cache: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _looks_thin(title: str) -> bool:
+    return (bool(_THIN_TITLE.search(title))
+            and len(title) <= _THIN_MAX_LEN
+            and not _SPECIFIC_SIGNAL.search(title))
+
+
 def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
     """
     If the title looks thin, attempt graph-backed LLM enrichment.
     Returns (title, notes) — possibly unchanged.
     """
-    if not _THIN_TITLE.search(title):
+    if not _looks_thin(title):
         return title, notes
+
+    key = (title, (notes or "")[:200])
+    if key in _enrich_cache:
+        return _enrich_cache[key]
+
+    # Enrichment is a nicety, not the job. At 100% GPU this host loses its
+    # network connection, so optional work must stand down when the model is
+    # already under load rather than adding to it.
+    if inference_busy():
+        print(f"[appt] inference busy — leaving '{title[:40]}' unenriched this cycle")
+        return title, notes
+
     context = _graph_context_for_event(title, notes)
     if not context:
         return title, notes
-    return _llm_enrich(title, notes, context, starts_at)
+    result = _llm_enrich(title, notes, context, starts_at)
+    _enrich_cache[key] = result
+    return result
 
 
 def _load_people() -> dict[int, str]:
