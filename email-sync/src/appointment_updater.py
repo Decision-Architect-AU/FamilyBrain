@@ -21,6 +21,7 @@ next_update_at rules:
   - Bill event with no amount                        → tomorrow (retry enrichment)
 """
 import os
+import hashlib
 import re
 import requests
 
@@ -47,6 +48,9 @@ from .calendar_router import (
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
+# Enrichment is mostly "pull the practitioner and clinic out of this context",
+# which the small model handles. The large one is a fallback, not the default.
+SMALL_MODEL = os.environ.get("MODEL_PARSER_1ST", "qwen2.5:3b")
 _BATCH      = 50
 
 _PARTNER_NAMES = [n.strip().lower() for n in os.environ.get("PARTNER_NAMES", "").split(",") if n.strip()]
@@ -98,59 +102,158 @@ def _graph_context_for_event(title: str, notes: str) -> str:
         return ""
 
 
-def _llm_enrich(title: str, notes: str, context: str, starts_at) -> tuple[str, str]:
+def _normalise_title_key(title: str) -> str:
+    """Key a routine by its title, which is what actually repeats."""
+    return re.sub(r'\s+', ' ', (title or "").strip().lower()).rstrip(" .-:")
+
+
+def _invents_numbers(output: str, source: str) -> bool:
+    """True if the model produced a number that appears nowhere in its input.
+
+    Enrichment writes the title people read off their phone, so a hallucinated
+    suite number or time is worse than no enrichment at all. Cheap and
+    deterministic, which is what lets the small model be trusted first.
     """
-    Use LLM to suggest an enriched title and description for a thin appointment.
-    Returns (enriched_title, enriched_description). Falls back to originals on error.
-    """
-    date_str = starts_at.strftime("%A %d %B %Y") if hasattr(starts_at, "strftime") else str(starts_at)
-    prompt = f"""You are enriching a calendar appointment using information from a personal knowledge graph.
+    allowed = set(re.findall(r'\d+', source))
+    return any(n not in allowed for n in re.findall(r'\d+', output))
+
+
+def _parse_enrichment(text: str, title: str, notes: str, context: str) -> tuple[str, str] | None:
+    """Pull TITLE/DESCRIPTION out of a reply, or None if it isn't usable."""
+    new_title, new_desc = None, ""
+    for line in text.splitlines():
+        if line.upper().startswith("TITLE:"):
+            candidate = line[6:].strip().strip('"')
+            if candidate and len(candidate) <= 80:
+                new_title = candidate
+        elif line.upper().startswith("DESCRIPTION:"):
+            new_desc = line[12:].strip()
+    if not new_title:
+        return None
+    source = f"{title}\n{notes}\n{context}"
+    if _invents_numbers(new_title, source) or _invents_numbers(new_desc, source):
+        print(f"[appt] rejected enrichment for '{title[:40]}' — invented a number")
+        return None
+    return new_title, new_desc[:600]
+
+
+_ENRICH_PROMPT = """You are improving a recurring calendar appointment's title and description using a personal knowledge graph.
 
 Appointment: "{title}"
-Date: {date_str}
-Current notes: {notes or "(none)"}
+Current notes: {notes}
 
 Relevant context from knowledge graph:
-{context or "(none)"}
+{context}
 
-Task: Write an enriched calendar title and description using the context above.
-- Title: specific and informative (include person name, practitioner name, clinic if known). Max 60 chars.
-- Description: 1-3 sentences with useful details (location, what to bring, purpose). Leave blank if nothing useful to add.
-- Only include information you are confident about from the context. Do not invent details.
-- If context has nothing relevant, keep the original title and leave description blank.
+Write a title and description that are true of EVERY occurrence of this
+appointment, not one particular day.
+- Title: specific and informative — person, practitioner, clinic if known. Max 60 chars.
+- Description: 1-3 sentences of useful standing detail (location, what to bring, purpose). Blank if there is nothing useful to add.
+- Never mention a date, a day of the week or a time. The calendar already knows when it is.
+- Use only what the context states. Do not invent names, numbers or addresses.
+- If the context adds nothing, repeat the original title and leave the description blank.
 
 Reply in this exact format:
-TITLE: <enriched title>
+TITLE: <title>
 DESCRIPTION: <description or blank>"""
 
+
+def _ask_enrich(model: str, title: str, notes: str, context: str) -> tuple[str, str] | None:
     try:
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
+            json={"model": model,
+                  "prompt": _ENRICH_PROMPT.format(
+                      title=title, notes=notes or "(none)", context=context or "(none)"),
+                  "stream": False,
                   "options": {"temperature": 0.1, "num_predict": 150}},
             headers=caller_headers("appt-enrich"),
-            timeout=30,
+            timeout=(5, 120),
         )
         resp.raise_for_status()
-        text = resp.json().get("response", "").strip()
-        new_title = title
-        new_desc  = notes
-        # Preserve any meeting join links from the original notes
-        join_links = _JOIN_LINK_RE.findall(notes)
-        for line in text.splitlines():
-            if line.upper().startswith("TITLE:"):
-                t = line[6:].strip()
-                if t and len(t) <= 80:
-                    new_title = t
-            elif line.upper().startswith("DESCRIPTION:"):
-                new_desc = line[12:].strip()
-        if join_links:
-            link_block = "\n".join(join_links)
-            new_desc = f"{new_desc}\n\n{link_block}".strip() if new_desc else link_block
-        return new_title, new_desc
+        return _parse_enrichment(resp.json().get("response", "").strip(), title, notes, context)
     except Exception as e:
-        print(f"[appt] LLM enrich failed: {e}")
+        print(f"[appt] enrich call failed on {model}: {e}")
+        return None
+
+
+def _llm_enrich(title: str, notes: str, context: str, starts_at=None) -> tuple[str, str]:
+    """
+    Produce generic enrichment for this appointment title — valid for every
+    occurrence, so one answer serves the whole series.
+
+    Tries the small model first and only escalates to the large one when the
+    small model's answer fails validation, because most of these are a matter
+    of pulling a practitioner and clinic out of the supplied context rather
+    than anything that needs a 14B model. `starts_at` is accepted and ignored:
+    the generic text must not depend on the date.
+    """
+    result = _ask_enrich(SMALL_MODEL, title, notes, context)
+    model_used = SMALL_MODEL
+    if result is None and AGENT_MODEL != SMALL_MODEL:
+        print(f"[appt] escalating enrichment of '{title[:40]}' to {AGENT_MODEL}")
+        result = _ask_enrich(AGENT_MODEL, title, notes, context)
+        model_used = AGENT_MODEL
+    if result is None:
         return title, notes
+
+    new_title, new_desc = result
+    # Keep any meeting join links that were already on the event
+    join_links = _JOIN_LINK_RE.findall(notes or "")
+    if join_links:
+        link_block = "\n".join(join_links)
+        new_desc = f"{new_desc}\n\n{link_block}".strip() if new_desc else link_block
+    _store_enrichment(title, context, new_title, new_desc, model_used)
+    return new_title, new_desc
+
+
+def _load_enrichment(title: str, context: str) -> tuple[str, str] | None:
+    """Reuse the stored answer for this title unless its context has changed."""
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.appointment_enrichment
+                          SET applied_count = applied_count + 1
+                        WHERE title_key = %s AND context_hash = %s
+                    RETURNING enriched_title, description""",
+                    (_normalise_title_key(title), _context_hash(context)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row and row["enriched_title"]:
+            return row["enriched_title"], row["description"] or ""
+    except Exception as e:
+        print(f"[appt] enrichment lookup failed for '{title[:40]}': {e}")
+    return None
+
+
+def _store_enrichment(title: str, context: str, new_title: str, new_desc: str,
+                      model: str) -> None:
+    try:
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.appointment_enrichment
+                           (title_key, source_title, enriched_title, description,
+                            context_hash, model, applied_count)
+                       VALUES (%s, %s, %s, %s, %s, %s, 1)
+                       ON CONFLICT (title_key) DO UPDATE
+                           SET enriched_title = EXCLUDED.enriched_title,
+                               description    = EXCLUDED.description,
+                               context_hash   = EXCLUDED.context_hash,
+                               model          = EXCLUDED.model,
+                               updated_at     = now()""",
+                    (_normalise_title_key(title), title, new_title, new_desc,
+                     _context_hash(context), model),
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"[appt] could not store enrichment for '{title[:40]}': {e}")
+
+
+def _context_hash(context: str) -> str:
+    return hashlib.sha256((context or "").encode("utf-8")).hexdigest()[:32]
 
 
 # A title that already carries specifics — a time, a street number, a
@@ -185,6 +288,19 @@ def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
     if key in _enrich_cache:
         return _enrich_cache[key]
 
+    # The graph context is a cheap DB/embedding lookup and decides whether
+    # there is anything to say at all.
+    context = _graph_context_for_event(title, notes)
+    if not context:
+        return title, notes
+
+    # A title's enrichment is generic, so the stored answer serves every
+    # occurrence — no model call, no matter how many times this recurs.
+    stored = _load_enrichment(title, context)
+    if stored:
+        _enrich_cache[key] = stored
+        return stored
+
     # Enrichment is a nicety, not the job. At 100% GPU this host loses its
     # network connection, so optional work must stand down when the model is
     # already under load rather than adding to it.
@@ -192,9 +308,6 @@ def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
         print(f"[appt] inference busy — leaving '{title[:40]}' unenriched this cycle")
         return title, notes
 
-    context = _graph_context_for_event(title, notes)
-    if not context:
-        return title, notes
     result = _llm_enrich(title, notes, context, starts_at)
     _enrich_cache[key] = result
     return result
