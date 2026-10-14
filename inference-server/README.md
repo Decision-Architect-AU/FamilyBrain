@@ -181,6 +181,23 @@ The dashboard renders all of this at **/inference** (queue-over-time chart,
 backlog events, wait-vs-infer percentiles, per-model and recent calls), reading
 it through `dashboard/src/app/api/inference/route.ts`.
 
+### Pacing: never sit at 100%
+
+Caller-side back-pressure only stops services *adding* to a queue; it cannot
+stop a single request pinning the GPU on its own. On this host a GPU at 100%
+drops the network connection, so throughput is not the binding constraint —
+staying below saturation is.
+
+`INFERENCE_COOLDOWN_SECS` (default 5) holds the GPU deliberately idle for that
+long between generations. The pause is taken **while holding the generation
+lock**, so nothing slips in during it, and it is recorded as `paced_s` rather
+than as queue wait — otherwise every call on an idle system would report a
+multi-second "wait" and the queue signal would be meaningless. `paced_s_total`
+is the running total, shown on the dashboard as "Paced".
+
+Embeddings and reranks are not paced: they never take the generation lock, and
+they are small and short.
+
 ### Tuning
 
 | Env var | Default | Purpose |
@@ -190,3 +207,4 @@ it through `dashboard/src/app/api/inference/route.ts`.
 | `INFERENCE_SAMPLE_SECS` | `10` | history sampling cadence |
 | `INFERENCE_SAMPLE_RETAIN` | `2160` | samples kept (6h at 10s) |
 | `INFERENCE_EVENT_LOG` | `inference_events.jsonl` | backlog event log path |
+| `INFERENCE_COOLDOWN_SECS` | `5` | forced idle gap between generations; `0` disables |

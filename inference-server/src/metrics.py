@@ -36,6 +36,12 @@ BACKLOG_DEPTH = int(os.environ.get("INFERENCE_BACKLOG_DEPTH", "3"))
 STUCK_SECS = float(os.environ.get("INFERENCE_STUCK_SECS", "300"))
 # Sampling cadence and retention for the history series.
 SAMPLE_SECS = float(os.environ.get("INFERENCE_SAMPLE_SECS", "10"))
+# Deliberate idle gap between generations. Back-pressure from callers only
+# stops them ADDING to a queue — it can't stop one request pinning the GPU on
+# its own, and on this host a GPU at 100% drops the network connection. A
+# forced pause between generations trades throughput for never sitting at
+# full load. Set to 0 to disable.
+COOLDOWN_SECS = float(os.environ.get("INFERENCE_COOLDOWN_SECS", "5"))
 SAMPLE_RETAIN = int(os.environ.get("INFERENCE_SAMPLE_RETAIN", "2160"))  # 6h @ 10s
 RECENT_RETAIN = int(os.environ.get("INFERENCE_RECENT_RETAIN", "200"))
 EVENT_RETAIN = int(os.environ.get("INFERENCE_EVENT_RETAIN", "200"))
@@ -102,6 +108,9 @@ class InferenceMetrics:
 
     def __init__(self):
         self.generate_lock = threading.Lock()
+        # When the last generation let go of the GPU, for cooldown pacing.
+        self._last_release = 0.0
+        self.paced_s_total = 0.0
         self._m = threading.Lock()          # guards the counters below
         self.started_at = time.time()
 
@@ -233,32 +242,58 @@ class InferenceMetrics:
             )
         return enqueued
 
+    def cool_down(self) -> float:
+        """Hold the GPU idle for the remainder of the cooldown. Returns seconds slept.
+
+        Called with the generation lock held, so nothing else can slip in
+        during the pause — that is the point: the GPU is deliberately idle.
+        """
+        if COOLDOWN_SECS <= 0 or not self._last_release:
+            return 0.0
+        gap = COOLDOWN_SECS - (time.time() - self._last_release)
+        if gap <= 0:
+            return 0.0
+        time.sleep(gap)
+        with self._m:
+            self.paced_s_total += gap
+        return gap
+
+    def note_release(self) -> None:
+        """Mark the GPU as free, starting the cooldown clock."""
+        self._last_release = time.time()
+
     def _start(self, token: int, model: str, endpoint: str, caller: str,
-               enqueued: float) -> float:
+               enqueued: float, paced_s: float = 0.0) -> float:
         started = time.time()
-        wait_s = started - enqueued
+        # Pacing is our own doing, so keep it out of wait_s — otherwise every
+        # idle-system call reports a multi-second "wait" and the queue signal
+        # becomes meaningless.
+        wait_s = max(0.0, started - enqueued - paced_s)
         with self._m:
             self.queue_depth -= 1
             self._waiting.pop(token, None)
             self.in_flight += 1
             self._current = {
                 "model": model, "endpoint": endpoint, "caller": caller,
-                "started": started, "started_at": _now_iso(), "waited_s": round(wait_s, 2),
+                "started": started, "started_at": _now_iso(),
+                "waited_s": round(wait_s, 2), "paced_s": round(paced_s, 2),
             }
             self._by_model.setdefault(model, _Stat()).wait_s += wait_s
             self._by_caller.setdefault(caller, _Stat()).wait_s += wait_s
             depth = self.queue_depth
-        if wait_s >= 1:
+        if wait_s >= 1 or paced_s >= 1:
             print(f"[metrics] start {endpoint} {model} caller={caller} — "
-                  f"waited {wait_s:.1f}s, {depth} still queued", flush=True)
+                  f"waited {wait_s:.1f}s"
+                  + (f" (+{paced_s:.1f}s cooldown)" if paced_s else "")
+                  + f", {depth} still queued", flush=True)
         return started
 
     def _finish(self, token: int, model: str, endpoint: str, caller: str,
                 enqueued: float, started: float | None, ok: bool,
-                error: str | None = None) -> None:
+                error: str | None = None, paced_s: float = 0.0) -> None:
         ended = time.time()
         infer_s = (ended - started) if started else 0.0
-        wait_s = (started - enqueued) if started else (ended - enqueued)
+        wait_s = max(0.0, (started - enqueued if started else ended - enqueued) - paced_s)
         with self._m:
             if started:
                 self.in_flight -= 1
@@ -281,7 +316,7 @@ class InferenceMetrics:
             self._recent.append({
                 "at": _now_iso(), "model": model, "endpoint": endpoint, "caller": caller,
                 "wait_s": round(wait_s, 2), "infer_s": round(infer_s, 2),
-                "ok": ok, "error": error,
+                "paced_s": round(paced_s, 2), "ok": ok, "error": error,
             })
             drained = self._in_backlog and self.queue_depth == 0
             if drained:
@@ -421,8 +456,9 @@ class InferenceMetrics:
             "recent": recent[-25:],
             "history": history,
             "events": events,
+            "paced_s_total": round(self.paced_s_total, 1),
             "thresholds": {"backlog_depth": BACKLOG_DEPTH, "stuck_secs": STUCK_SECS,
-                           "sample_secs": SAMPLE_SECS},
+                           "sample_secs": SAMPLE_SECS, "cooldown_secs": COOLDOWN_SECS},
         }
 
 
@@ -439,6 +475,7 @@ class _Slot:
         self._token = 0
         self._enqueued = 0.0
         self._started: float | None = None
+        self._paced = 0.0
 
     def __enter__(self):
         self._token = threading.get_ident()
@@ -453,8 +490,13 @@ class _Slot:
         self._enqueued = self._metrics._enter_queue(
             self._token, self._model, self._endpoint, self._caller)
         self._metrics.generate_lock.acquire()
+        # Deliberate idle gap, taken while holding the lock so the GPU really
+        # is unused for it. Without this the server will happily run back-to-back
+        # generations at full load, which takes this host off the network.
+        self._paced = self._metrics.cool_down()
         self._started = self._metrics._start(
-            self._token, self._model, self._endpoint, self._caller, self._enqueued)
+            self._token, self._model, self._endpoint, self._caller, self._enqueued,
+            paced_s=self._paced)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -467,10 +509,14 @@ class _Slot:
             )
             return False
         if self._started is not None:
+            # Start the cooldown clock before letting the next caller in, so
+            # the gap is measured from when the GPU actually went idle.
+            self._metrics.note_release()
             self._metrics.generate_lock.release()
         self._metrics._finish(
             self._token, self._model, self._endpoint, self._caller,
             self._enqueued, self._started, ok=exc_type is None, error=error,
+            paced_s=self._paced,
         )
         return False
 

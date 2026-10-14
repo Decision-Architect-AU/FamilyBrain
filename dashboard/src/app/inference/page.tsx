@@ -17,7 +17,7 @@ type Sample = {
 
 type Recent = {
   at: string; model: string; endpoint: string; caller: string;
-  wait_s: number; infer_s: number; ok: boolean; error: string | null;
+  wait_s: number; infer_s: number; paced_s?: number; ok: boolean; error: string | null;
 };
 
 type Stat = {
@@ -55,7 +55,8 @@ type Metrics = {
   in_backlog?: boolean;
   backlog_since?: string | null;
   oldest_wait_s?: number;
-  current?: { model: string; endpoint: string; caller?: string; started_at: string; waited_s: number; running_s: number } | null;
+  current?: { model: string; endpoint: string; caller?: string; started_at: string; waited_s: number; running_s: number; paced_s?: number } | null;
+  paced_s_total?: number;
   latency?: {
     sample: number;
     wait_p50: number | null; wait_p95: number | null;
@@ -67,7 +68,7 @@ type Metrics = {
   recent?: Recent[];
   history?: Sample[];
   events?: Event_[];
-  thresholds?: { backlog_depth: number; stuck_secs: number; sample_secs: number };
+  thresholds?: { backlog_depth: number; stuck_secs: number; sample_secs: number; cooldown_secs?: number };
 };
 
 function fmtTime(iso: string | undefined | null) {
@@ -283,6 +284,11 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
             <Stat label="Threads" value={String(data.threads ?? 0)}
                   hint={`up ${fmtDuration(data.uptime_s)}`}
                   tone={(data.threads ?? 0) > 60 ? 'text-amber-400' : 'text-white'} />
+            {data.thresholds?.cooldown_secs ? (
+              <Stat label="Paced" value={fmtDuration(data.paced_s_total)}
+                    hint={`${data.thresholds.cooldown_secs}s idle between runs`}
+                    tone="text-zinc-300" />
+            ) : null}
           </div>
 
           {data.current && (
@@ -328,6 +334,9 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
               <p className="text-[10px] text-zinc-600">
                 Last {lat?.sample ?? 0} successful calls. Wait is queueing; infer is the model itself —
                 a big gap between them means the queue is the problem, not the model.
+                {data.thresholds?.cooldown_secs
+                  ? ` The deliberate ${data.thresholds.cooldown_secs}s gap between runs is counted separately, so it never shows up as queueing.`
+                  : ''}
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <Stat label="Wait p50" value={fmtDuration(lat?.wait_p50)} />
@@ -392,6 +401,7 @@ python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
                     <span className="text-zinc-600 truncate">{r.endpoint}</span>
                     <span className="ml-auto text-zinc-500 shrink-0 font-mono text-[10px]">
                       wait {r.wait_s}s · infer {r.infer_s}s
+                      {r.paced_s ? <span className="text-zinc-700"> · paced {r.paced_s}s</span> : null}
                     </span>
                   </div>
                 ))
