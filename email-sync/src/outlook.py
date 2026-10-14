@@ -19,6 +19,7 @@ import requests
 from . import db
 from .filters import should_ingest, reset_cache as reset_filter_cache
 from .ingest_client import INGEST_TIMEOUT, RETRY_BATCH, ingestor_ready
+from .routine_match import link_event_to_routine
 
 TENANT_ID     = os.environ.get("MICROSOFT_TENANT_ID", "consumers")  # 'consumers' for personal MSA
 CLIENT_ID     = os.environ["MICROSOFT_CLIENT_ID"]
@@ -662,6 +663,13 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     notes=description,
                     ingestor_url=ingestor_url,
                 )
+
+                # A recurring appointment imported from a provider calendar
+                # belongs to the routine that already models it — without this
+                # it became a second, parallel series next to the one the rule
+                # generates (67 "Olivia Physio" imports beside 19 generated).
+                if event_id:
+                    link_event_to_routine(event_id)
 
                 # No direct calendar-to-calendar mirroring here.
                 # All events flow: ingest → personal.event → appointment_updater → GCal/Outlook.

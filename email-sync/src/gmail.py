@@ -22,6 +22,7 @@ from googleapiclient.errors import HttpError
 from . import db
 from .filters import should_ingest, reset_cache as reset_filter_cache
 from .ingest_client import INGEST_TIMEOUT, RETRY_BATCH, ingestor_ready
+from .routine_match import link_event_to_routine
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",   # read + label + send (excludes permanent delete)
@@ -700,6 +701,11 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                 notes=description[:500],
                 ingestor_url=ingestor_url,
             )
+
+            # Same reason as outlook.py: an imported recurring appointment
+            # belongs to the routine that already models it, not beside it.
+            if event_id:
+                link_event_to_routine(event_id)
 
             if target_cal_id_stored:
                 # No mirror needed but store target_cal_provider_id if we just created/updated it
