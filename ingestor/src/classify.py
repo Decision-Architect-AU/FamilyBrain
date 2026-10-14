@@ -2,6 +2,8 @@
 import os
 import ollama
 
+from .llm_caller import caller_client
+
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
 
@@ -22,7 +24,7 @@ Schema:"""
 def classify(text: str) -> str:
     """Return 'personal', 'property', or 'decision'. Falls back to 'decision' on error."""
     excerpt = text[:1500]
-    client = ollama.Client(host=OLLAMA_URL)
+    client = caller_client("classify")
     try:
         resp = client.generate(model=AGENT_MODEL, prompt=PROMPT.format(excerpt=excerpt))
         result = resp["response"].strip().lower()

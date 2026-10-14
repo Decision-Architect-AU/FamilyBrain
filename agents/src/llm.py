@@ -2,6 +2,8 @@ import os
 import ollama as _ollama
 from crewai import LLM
 
+from .llm_caller import caller_headers
+
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 AGENT_MODEL  = os.environ.get("AGENT_MODEL", "qwen2.5:32b")
 EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")
@@ -15,6 +17,6 @@ def get_llm() -> LLM:
 
 def embed(text: str) -> list[float]:
     """Generate an embedding vector via Ollama."""
-    client = _ollama.Client(host=OLLAMA_URL)
+    client = _ollama.Client(host=OLLAMA_URL, headers=caller_headers("embed"))
     resp = client.embeddings(model=EMBED_MODEL, prompt=text)
     return resp["embedding"]

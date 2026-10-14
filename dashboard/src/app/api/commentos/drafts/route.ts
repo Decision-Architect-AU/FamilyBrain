@@ -51,7 +51,26 @@ export async function POST(req: NextRequest) {
   const signals = await q(`
     SELECT s.id, s.signal_type, s.canonical_text FROM decision_os.co_signal s
     JOIN decision_os.co_signal_source ss ON ss.signal_id=s.id WHERE ss.comment_id=$1`, [b.comment_id]);
-  const grounding: any = { concepts, signals };
+  // Translation map: foreign-framework vocabulary detected near this comment,
+  // bridged to ED concepts (ed_core confirmed mappings + knowledge crosswalk).
+  const synonyms = await q(`
+    SELECT t.label AS their_term, f.name AS their_framework, c.name AS ed_concept,
+           tm.fidelity, round((1-(t.embedding <=> $1::vector))::numeric,2) AS sim
+    FROM ed_core.term t
+    JOIN ed_core.framework f ON f.id=t.framework_id AND NOT f.is_ed
+    JOIN ed_core.term_meaning tm ON tm.term_id=t.id AND tm.confidence > 0
+    JOIN ed_core.concept c ON c.id=tm.concept_id
+    WHERE t.embedding IS NOT NULL AND (t.embedding <=> $1::vector) < 0.45
+    UNION ALL
+    SELECT ec.term, ec.domain, ce.name, 'partial',
+           round((1-(ec.embedding <=> $1::vector))::numeric,2)
+    FROM decision_os.external_concept ec
+    JOIN LATERAL (SELECT cw.graph_node_id FROM decision_os.concept_crosswalk cw
+                  WHERE cw.external_id=ec.id ORDER BY cw.score DESC LIMIT 1) best ON true
+    JOIN decision_os.concept_embedding ce ON ce.graph_node_id=best.graph_node_id
+    WHERE ec.embedding IS NOT NULL AND (ec.embedding <=> $1::vector) < 0.42
+    ORDER BY sim DESC LIMIT 6`, [vec]);
+  const grounding: any = { concepts, signals, synonyms };
 
   // Layer 1: try the typed ED path — an argument beats a concept list.
   let edPath: any = null;
@@ -79,6 +98,28 @@ export async function POST(req: NextRequest) {
     `${t.is_own ? 'GLENN' : (t.author_name || 'commenter')}: ${t.body}`).join('\n');
 
   const conceptLines = concepts.map((c: any) => `- ${c.name}: ${c.description || ''}`).join('\n');
+  // "link to other related ideas": second-order expansion — neighbors of the
+  // best-matched concept, distinct from the direct matches.
+  let related: any[] = [];
+  if (concepts[0]?.graph_node_id) {
+    related = await q(`
+      SELECT ce2.name, ce2.description
+      FROM decision_os.concept_embedding ce1
+      JOIN decision_os.concept_embedding ce2 ON ce2.graph_node_id != ce1.graph_node_id
+      WHERE ce1.graph_node_id = $1 AND ce1.embedding IS NOT NULL AND ce2.embedding IS NOT NULL
+        AND ce2.graph_node_id != ALL($2)
+      ORDER BY ce1.embedding <=> ce2.embedding LIMIT 3`,
+      [concepts[0].graph_node_id, concepts.map((c: any) => c.graph_node_id)]);
+    grounding.related = related;
+  }
+  const synBlock = synonyms.length
+    ? 'TRANSLATION MAP — the commenter\'s world speaks these terms; ED speaks the right column. Reason in ED, but you may echo THEIR term once to meet them where they are:\n'
+      + synonyms.map((sy: any) => `- "${sy.their_term}" (${sy.their_framework}) -> ED: ${sy.ed_concept}${sy.fidelity !== 'exact' ? ` [${sy.fidelity} match — the ED concept is sharper]` : ''}`).join('\n') + '\n'
+    : '';
+  const relatedLine = related.length
+    ? 'RELATED ED IDEAS this connects to (pick ONE if it adds a concern they haven\'t seen): '
+      + related.map((r: any) => `${r.name}${r.description ? ` (${r.description.slice(0, 80)})` : ''}`).join(' | ') + '\n'
+    : '';
   const results = [];
   for (const [label, strategy] of STRATEGIES) {
     try {
@@ -94,6 +135,8 @@ ${transcript}
 Your reply must continue THIS conversation — build on what Glenn already said, don't repeat it, and respond to how the discussion has evolved.
 A LinkedIn user named "${author}" wrote the latest comment${cm.is_reply ? " (it is a reply to Glenn's earlier comment — if it starts with the name \"Glenn West\", that is an @-mention addressing Glenn, NOT the author's name)" : ''}:
 "${cm.body.slice(0, 800)}"
+${synBlock}HOW TO THINK (do this silently, output only the reply): 1) restate their point to yourself in ED terms using the map; 2) name what is actually failing (a decision function, a trust/maturity/scope/impact gap); 3) follow the links — which related ED ideas below does this connect to, and what concern do they surface that the commenter hasn't seen yet; 4) write the reply in plain conversational language carrying that logic, with a LIGHT touch of ED — at most one ED idea named explicitly, the rest carried as reasoning, translating back toward their vocabulary where it helps them hear it.
+${relatedLine}
 You are writing GLENN'S reply TO ${author}. Address them directly as "you" — never use their name or refer to them in the third person, and never address, thank, or refer to Glenn (Glenn is the writer). Do not open with thanks or praise ("Thank you for...", "Great point...") — go straight to substance. NEVER open by naming a framework or chart ("Given the Effective Decision framework...", "The maturity-trust chart shows...") — the concepts ground your thinking, but the reply speaks plainly, like a sharp practitioner talking, and only names a framework if it genuinely earns a mention mid-thought.
 ${campaign ? `Campaign tone (${campaign.name}): ${campaign.tone}` : ''}
 Strategy: ${strategy}
@@ -103,8 +146,7 @@ ${edPath ? `THE ARGUMENT (a confirmed ED reasoning path — render THIS, in orde
 3. Why it persists / what ED does about it: ${edPath.path.concept.name} — ${edPath.path.concept.definition}
 ${campaign?.id === 'seed' && edPath.path.evidence ? `4. Where this comes from (soft mention): ${edPath.path.evidence.title}` : ''}
 Do NOT state the outcome measure — that is deliberately withheld in comments.
-Supporting concepts (context only): ${conceptLines.split('
-').slice(0,2).join('; ')}` : `Ground ONLY in these ED concepts (do not invent framework claims):
+Supporting concepts (context only): ${conceptLines.split('\n').slice(0, 2).join('; ')}` : `Ground ONLY in these ED concepts (do not invent framework claims):
 ${conceptLines}`}
 ${b.steering ? `
 MOST IMPORTANT — GLENN'S OWN ANGLE. The reply's central point must be this idea, expressed naturally in the reply's own words as part of the conversation. It is an instruction TO you, not text for the reply — never quote, repeat, or paraphrase the instruction itself:

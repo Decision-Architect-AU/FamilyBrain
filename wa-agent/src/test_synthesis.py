@@ -130,6 +130,32 @@ def test_empty_section_header_rejected():
     print("✓ empty-section-header (present but blank) rejected")
 
 
+NONE_PLACEHOLDER_OUTPUT = """##ANSWER##
+Nothing due this week.
+
+##ATTENTION##
+None
+
+##OUTSTANDING##
+N/A
+
+##REFS##
+[]
+"""
+
+
+def test_none_placeholder_rejected():
+    """Confirmed live: the model sometimes writes a bare "None"/"N/A" as a
+    section's content instead of omitting the section — technically
+    non-empty text, but exactly the "header with nothing under it" the
+    omission rule forbids."""
+    parsed = synthesis.parse_response(NONE_PLACEHOLDER_OUTPUT)
+    violations = synthesis.validate(parsed, STEPS)
+    assert any("ATTENTION" in v for v in violations), f"expected an ATTENTION placeholder violation, got: {violations}"
+    assert any("OUTSTANDING" in v for v in violations), f"expected an OUTSTANDING placeholder violation, got: {violations}"
+    print("✓ bare 'None'/'N/A' placeholder content rejected (must be omitted, not stubbed)")
+
+
 UNKNOWN_REF_OUTPUT = """##ANSWER##
 One thing to note.
 
@@ -268,6 +294,7 @@ def run() -> None:
     print("── Synthesis response contract test suite ──\n")
     test_golden_valid_output()
     test_empty_section_header_rejected()
+    test_none_placeholder_rejected()
     test_unknown_ref_rejected()
     test_fabricated_date_caught()
     test_fabricated_amount_caught()

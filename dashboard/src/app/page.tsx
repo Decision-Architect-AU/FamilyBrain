@@ -85,6 +85,9 @@ export default function Home() {
           <Link href="/maintenance" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Maintenance
           </Link>
+          <Link href="/inference" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            Inference
+          </Link>
           <Link href="/graph" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Graph explorer →
           </Link>

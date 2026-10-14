@@ -19,11 +19,20 @@ function ReplyPane({ comment, postUrl, brand, platform, onClose }: { comment: an
   const [text, setText] = useState('');
   const [msg, setMsg] = useState('');
 
+  const { data: settings } = useSWR('/api/commentos/settings', fetcher);
   const generate = async () => {
     setBusy(true); setMsg('');
     const r = await fetch('/api/commentos/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ comment_id: comment.id, steering: angle || undefined, campaign_id: campaign }) }).then((x) => x.json());
-    if (r.variants?.length) { setDraft(r.variants[0]); setText(r.variants[0].text); }
+    if (r.variants?.length) {
+      setDraft(r.variants[0]);
+      // link back to the brand hashtags — deterministic append, editable before posting
+      const tags = (settings?.brand_hashtags?.[brand || 'personal'] || []).join(' ');
+      const base = r.variants[0].text;
+      setText(tags && (!isX || (base.length + tags.length + 2) <= 280) ? `${base}
+
+${tags}` : base);
+    }
     else setMsg(r.error || 'generation failed');
     setBusy(false);
   };
@@ -156,6 +165,7 @@ export default function RadarPage() {
   const [sel, setSel] = useState<number | null>(null);
   const [replyTo, setReplyTo] = useState<any>(null);
   const [channel, setChannel] = useState<string | null>(null);
+  const [newOnly, setNewOnly] = useState(false);
   const { data: captures, mutate: mutList } = useSWR('/api/commentos/captures', fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
 
@@ -188,8 +198,24 @@ export default function RadarPage() {
     return <div className="text-center py-24 text-gray-500"><div className="text-5xl mb-4">📡</div>
       <p>No captures yet — run a scrape or recheck from the bridge.</p></div>;
 
-  const shown = captures.filter((c: any) => !channel || c.platform === channel);
-  const platforms = ['linkedin', 'x', 'facebook', 'blog'];
+  const CHANNEL_TYPE: Record<string, string> = {
+    linkedin: 'Social', x: 'Social', facebook: 'Social',
+    blog: 'Website', website: 'Website',
+    amazon: 'Reviews', goodreads: 'Reviews', 'barnes-noble': 'Reviews', kobo: 'Reviews',
+  };
+  const isNew = (c: any) =>
+    c.first_seen_at && Date.now() - new Date(c.first_seen_at).getTime() < 48 * 3600e3;
+  let shown = captures.filter((c: any) => !channel || c.platform === channel);
+  if (newOnly)
+    shown = shown.filter(isNew).sort((a: any, b: any) =>
+      +new Date(b.first_seen_at) - +new Date(a.first_seen_at));
+  const newCount = captures.filter(isNew).length;
+  const platforms = Array.from(new Set(captures.map((c: any) => c.platform))) as string[];
+  const groups: Record<string, string[]> = {};
+  for (const pf of platforms) {
+    const g = CHANNEL_TYPE[pf] || 'Other';
+    (groups[g] = groups[g] || []).push(pf);
+  }
 
   const openFocus = (captureId: number, comment: any) => {
     setSel(captureId);
@@ -199,13 +225,21 @@ export default function RadarPage() {
   return (
     <div>
       <FocusStrip onOpen={openFocus} />
-      <div className="flex gap-2 mb-3">
+      <div className="flex gap-3 mb-3 items-center flex-wrap">
         <button onClick={() => setChannel(null)}
-          className={`px-3 py-1 rounded-full text-xs border ${!channel ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>All channels</button>
-        {platforms.map((p) => (
-          <button key={p} onClick={() => setChannel(p)}
-            className={`px-3 py-1 rounded-full text-xs border ${channel === p ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>
-            {p === 'x' ? '𝕏' : p === 'linkedin' ? 'in LinkedIn' : p}</button>
+          className={`px-3 py-1 rounded-full text-xs border ${!channel ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>All</button>
+        <button onClick={() => setNewOnly(!newOnly)}
+          title="threads first seen in the last 48h, newest first"
+          className={`px-3 py-1 rounded-full text-xs border ${newOnly ? 'border-emerald-500 text-emerald-300 bg-gray-800' : 'border-gray-700 text-emerald-400'}`}>
+          🆕 {newCount} new</button>
+        {Object.entries(groups).map(([g, pfs]) => (
+          <span key={g} className="flex gap-1.5 items-center">
+            <span className="text-[10px] text-gray-600 uppercase">{g}</span>
+            {pfs.map((p) => (
+              <button key={p} onClick={() => setChannel(p)}
+                className={`px-3 py-1 rounded-full text-xs border ${channel === p ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>
+                {p === 'x' ? '𝕏' : p === 'linkedin' ? 'in' : p}</button>))}
+          </span>
         ))}
       </div>
     <div className={`grid gap-4 ${replyTo ? 'grid-cols-[280px_1fr_360px]' : 'grid-cols-[300px_1fr]'}`}>
@@ -216,8 +250,10 @@ export default function RadarPage() {
             className={`w-full text-left p-3 rounded-lg border ${sel === c.id ? 'border-cyan-500 bg-gray-900' : 'border-gray-800 bg-gray-900/50 hover:border-gray-600'}`}>
             <div className="flex justify-between items-center text-xs text-gray-500 mb-1">
               <span>{c.brand === 'decision-architect' ? 'DA' : 'personal'} · {c.platform === 'x' ? '𝕏' : c.platform}
-                {c.run_id && <span className="text-amber-400" title={`from scrape run #${c.run_id}`}> ⚡run</span>}</span>
-              <span className="flex items-center gap-2">{timeAgo(c.captured_at)}
+                {c.run_id && <span className="text-amber-400" title={`from scrape run #${c.run_id}`}> ⚡run</span>}
+                {isNew(c) &&
+                  <span className="text-emerald-400 font-semibold" title={`first seen ${timeAgo(c.first_seen_at)}`}> 🆕</span>}</span>
+              <span className="flex items-center gap-2">{timeAgo(c.first_seen_at || c.captured_at)}
                 <span role="button" title="Delete thread" onClick={async (e) => {
                   e.stopPropagation();
                   await fetch('/api/commentos/captures', { method: 'PATCH',

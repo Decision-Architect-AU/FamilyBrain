@@ -21,8 +21,13 @@ next_update_at rules:
   - Bill event with no amount                        → tomorrow (retry enrichment)
 """
 import os
+import hashlib
 import re
 import requests
+
+from .ingest_client import inference_busy
+
+from .llm_caller import caller_headers
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone, date, timedelta
@@ -43,6 +48,9 @@ from .calendar_router import (
 DB_URL      = os.environ["DATABASE_URL"]
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://172.23.96.1:11434")
 AGENT_MODEL = os.environ.get("MODEL_PARSER_2ND", os.environ.get("AGENT_MODEL", "qwen2.5:14b"))
+# Enrichment is mostly "pull the practitioner and clinic out of this context",
+# which the small model handles. The large one is a fallback, not the default.
+SMALL_MODEL = os.environ.get("MODEL_PARSER_1ST", "qwen2.5:3b")
 _BATCH      = 50
 
 _PARTNER_NAMES = [n.strip().lower() for n in os.environ.get("PARTNER_NAMES", "").split(",") if n.strip()]
@@ -69,6 +77,7 @@ def _graph_context_for_event(title: str, notes: str) -> str:
         resp = requests.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": os.environ.get("EMBED_MODEL", "nomic-embed-text"), "prompt": query},
+            headers=caller_headers("appt-embed"),
             timeout=15,
         )
         resp.raise_for_status()
@@ -93,58 +102,178 @@ def _graph_context_for_event(title: str, notes: str) -> str:
         return ""
 
 
-def _llm_enrich(title: str, notes: str, context: str, starts_at) -> tuple[str, str]:
+def _normalise_title_key(title: str) -> str:
+    """Key a routine by its title, which is what actually repeats."""
+    return re.sub(r'\s+', ' ', (title or "").strip().lower()).rstrip(" .-:")
+
+
+def _invents_numbers(output: str, source: str) -> bool:
+    """True if the model produced a number that appears nowhere in its input.
+
+    Enrichment writes the title people read off their phone, so a hallucinated
+    suite number or time is worse than no enrichment at all. Cheap and
+    deterministic, which is what lets the small model be trusted first.
     """
-    Use LLM to suggest an enriched title and description for a thin appointment.
-    Returns (enriched_title, enriched_description). Falls back to originals on error.
-    """
-    date_str = starts_at.strftime("%A %d %B %Y") if hasattr(starts_at, "strftime") else str(starts_at)
-    prompt = f"""You are enriching a calendar appointment using information from a personal knowledge graph.
+    allowed = set(re.findall(r'\d+', source))
+    return any(n not in allowed for n in re.findall(r'\d+', output))
+
+
+def _parse_enrichment(text: str, title: str, notes: str, context: str) -> tuple[str, str] | None:
+    """Pull TITLE/DESCRIPTION out of a reply, or None if it isn't usable."""
+    new_title, new_desc = None, ""
+    for line in text.splitlines():
+        if line.upper().startswith("TITLE:"):
+            candidate = line[6:].strip().strip('"')
+            if candidate and len(candidate) <= 80:
+                new_title = candidate
+        elif line.upper().startswith("DESCRIPTION:"):
+            new_desc = line[12:].strip()
+    if not new_title:
+        return None
+    source = f"{title}\n{notes}\n{context}"
+    if _invents_numbers(new_title, source) or _invents_numbers(new_desc, source):
+        print(f"[appt] rejected enrichment for '{title[:40]}' — invented a number")
+        return None
+    return new_title, new_desc[:600]
+
+
+_ENRICH_PROMPT = """You are improving a recurring calendar appointment's title and description using a personal knowledge graph.
 
 Appointment: "{title}"
-Date: {date_str}
-Current notes: {notes or "(none)"}
+Current notes: {notes}
 
 Relevant context from knowledge graph:
-{context or "(none)"}
+{context}
 
-Task: Write an enriched calendar title and description using the context above.
-- Title: specific and informative (include person name, practitioner name, clinic if known). Max 60 chars.
-- Description: 1-3 sentences with useful details (location, what to bring, purpose). Leave blank if nothing useful to add.
-- Only include information you are confident about from the context. Do not invent details.
-- If context has nothing relevant, keep the original title and leave description blank.
+Write a title and description that are true of EVERY occurrence of this
+appointment, not one particular day.
+- Title: specific and informative — person, practitioner, clinic if known. Max 60 chars.
+- Description: 1-3 sentences of useful standing detail (location, what to bring, purpose). Blank if there is nothing useful to add.
+- Never mention a date, a day of the week or a time. The calendar already knows when it is.
+- Use only what the context states. Do not invent names, numbers or addresses.
+- If the context adds nothing, repeat the original title and leave the description blank.
 
 Reply in this exact format:
-TITLE: <enriched title>
+TITLE: <title>
 DESCRIPTION: <description or blank>"""
 
+
+def _ask_enrich(model: str, title: str, notes: str, context: str) -> tuple[str, str] | None:
     try:
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": AGENT_MODEL, "prompt": prompt, "stream": False,
+            json={"model": model,
+                  "prompt": _ENRICH_PROMPT.format(
+                      title=title, notes=notes or "(none)", context=context or "(none)"),
+                  "stream": False,
                   "options": {"temperature": 0.1, "num_predict": 150}},
-            timeout=30,
+            headers=caller_headers("appt-enrich"),
+            timeout=(5, 120),
         )
         resp.raise_for_status()
-        text = resp.json().get("response", "").strip()
-        new_title = title
-        new_desc  = notes
-        # Preserve any meeting join links from the original notes
-        join_links = _JOIN_LINK_RE.findall(notes)
-        for line in text.splitlines():
-            if line.upper().startswith("TITLE:"):
-                t = line[6:].strip()
-                if t and len(t) <= 80:
-                    new_title = t
-            elif line.upper().startswith("DESCRIPTION:"):
-                new_desc = line[12:].strip()
-        if join_links:
-            link_block = "\n".join(join_links)
-            new_desc = f"{new_desc}\n\n{link_block}".strip() if new_desc else link_block
-        return new_title, new_desc
+        return _parse_enrichment(resp.json().get("response", "").strip(), title, notes, context)
     except Exception as e:
-        print(f"[appt] LLM enrich failed: {e}")
+        print(f"[appt] enrich call failed on {model}: {e}")
+        return None
+
+
+def _llm_enrich(title: str, notes: str, context: str, starts_at=None) -> tuple[str, str]:
+    """
+    Produce generic enrichment for this appointment title — valid for every
+    occurrence, so one answer serves the whole series.
+
+    Tries the small model first and only escalates to the large one when the
+    small model's answer fails validation, because most of these are a matter
+    of pulling a practitioner and clinic out of the supplied context rather
+    than anything that needs a 14B model. `starts_at` is accepted and ignored:
+    the generic text must not depend on the date.
+    """
+    result = _ask_enrich(SMALL_MODEL, title, notes, context)
+    model_used = SMALL_MODEL
+    if result is None and AGENT_MODEL != SMALL_MODEL:
+        print(f"[appt] escalating enrichment of '{title[:40]}' to {AGENT_MODEL}")
+        result = _ask_enrich(AGENT_MODEL, title, notes, context)
+        model_used = AGENT_MODEL
+    if result is None:
         return title, notes
+
+    new_title, new_desc = result
+    # Keep any meeting join links that were already on the event
+    join_links = _JOIN_LINK_RE.findall(notes or "")
+    if join_links:
+        link_block = "\n".join(join_links)
+        new_desc = f"{new_desc}\n\n{link_block}".strip() if new_desc else link_block
+    _store_enrichment(title, context, new_title, new_desc, model_used)
+    return new_title, new_desc
+
+
+def _load_enrichment(title: str, context: str) -> tuple[str, str] | None:
+    """Reuse the stored answer for this title unless its context has changed."""
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.appointment_enrichment
+                          SET applied_count = applied_count + 1
+                        WHERE title_key = %s AND context_hash = %s
+                    RETURNING enriched_title, description""",
+                    (_normalise_title_key(title), _context_hash(context)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row and row["enriched_title"]:
+            return row["enriched_title"], row["description"] or ""
+    except Exception as e:
+        print(f"[appt] enrichment lookup failed for '{title[:40]}': {e}")
+    return None
+
+
+def _store_enrichment(title: str, context: str, new_title: str, new_desc: str,
+                      model: str) -> None:
+    try:
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.appointment_enrichment
+                           (title_key, source_title, enriched_title, description,
+                            context_hash, model, applied_count)
+                       VALUES (%s, %s, %s, %s, %s, %s, 1)
+                       ON CONFLICT (title_key) DO UPDATE
+                           SET enriched_title = EXCLUDED.enriched_title,
+                               description    = EXCLUDED.description,
+                               context_hash   = EXCLUDED.context_hash,
+                               model          = EXCLUDED.model,
+                               updated_at     = now()""",
+                    (_normalise_title_key(title), title, new_title, new_desc,
+                     _context_hash(context), model),
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"[appt] could not store enrichment for '{title[:40]}': {e}")
+
+
+def _context_hash(context: str) -> str:
+    return hashlib.sha256((context or "").encode("utf-8")).hexdigest()[:32]
+
+
+# A title that already carries specifics — a time, a street number, a
+# practitioner ("with Amy"), or a " - " qualifier — is not thin, whatever
+# keyword it contains. Without this, "Physio - Centre of Movement - Olivia
+# (8:00am)" was sent off for enrichment purely because it says "physio".
+_SPECIFIC_SIGNAL = re.compile(r'\d|\bwith\b|\s-\s|,|@')
+_THIN_MAX_LEN = 40
+
+# Enrichment depends on the title, its notes and the graph — not on the date.
+# A weekly routine generates the same title for years ("Olivia Physio" x44,
+# "Olivia Speech therapy" x22), and each occurrence was paying for its own
+# embedding plus a 14B generation. One answer serves all of them.
+_enrich_cache: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _looks_thin(title: str) -> bool:
+    return (bool(_THIN_TITLE.search(title))
+            and len(title) <= _THIN_MAX_LEN
+            and not _SPECIFIC_SIGNAL.search(title))
 
 
 def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
@@ -152,12 +281,36 @@ def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
     If the title looks thin, attempt graph-backed LLM enrichment.
     Returns (title, notes) — possibly unchanged.
     """
-    if not _THIN_TITLE.search(title):
+    if not _looks_thin(title):
         return title, notes
+
+    key = (title, (notes or "")[:200])
+    if key in _enrich_cache:
+        return _enrich_cache[key]
+
+    # The graph context is a cheap DB/embedding lookup and decides whether
+    # there is anything to say at all.
     context = _graph_context_for_event(title, notes)
     if not context:
         return title, notes
-    return _llm_enrich(title, notes, context, starts_at)
+
+    # A title's enrichment is generic, so the stored answer serves every
+    # occurrence — no model call, no matter how many times this recurs.
+    stored = _load_enrichment(title, context)
+    if stored:
+        _enrich_cache[key] = stored
+        return stored
+
+    # Enrichment is a nicety, not the job. At 100% GPU this host loses its
+    # network connection, so optional work must stand down when the model is
+    # already under load rather than adding to it.
+    if inference_busy():
+        print(f"[appt] inference busy — leaving '{title[:40]}' unenriched this cycle")
+        return title, notes
+
+    result = _llm_enrich(title, notes, context, starts_at)
+    _enrich_cache[key] = result
+    return result
 
 
 def _load_people() -> dict[int, str]:
@@ -549,15 +702,58 @@ def _gcal_tag(ev: dict, title: str) -> str:
     return f"#familybrain/{person}/{category}"
 
 
-def _build_gcal_description(ev: dict, title: str, notes: str, writer: str = "appointment_updater") -> str:
-    """Combine notes with FamilyBrain management tags."""
+def _fetch_child_tasks(event_id: int | None) -> list[dict]:
+    """
+    Increment 5 — parent-card reflection. A task can optionally be linked to
+    a parent appointment via the existing parent_event_id column (same FK
+    already used for relative-event linking and Increment 4's
+    investigation->maintenance-event link — no new column). Confirmed live
+    before building this: no ENRICHES edge or "nightly enrich sweep" exists
+    anywhere in the codebase to extend, despite README/spec references — this
+    is genuinely new logic, not an extension of existing infrastructure.
+    """
+    if not event_id:
+        return []
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, title, task_status FROM personal.event
+                       WHERE parent_event_id = %s AND event_type = 'task'
+                       ORDER BY created_at ASC""",
+                    (event_id,),
+                )
+                return list(cur.fetchall())
+    except Exception as e:
+        print(f"[appt] child-task lookup failed for event {event_id}: {e}")
+        return []
+
+
+def _build_gcal_description(ev: dict, title: str, notes: str, writer: str = "appointment_updater",
+                             child_tasks: list[dict] | None = None) -> str:
+    """Combine notes with FamilyBrain management tags.
+
+    child_tasks (Increment 5) renders as a checkbox line per linked task,
+    appended after notes and before the FamilyBrain tag lines — additive, so
+    an event with no child tasks (the None/empty default) renders
+    byte-identical to before this was added.
+    """
     from datetime import timezone
     category_tag = _gcal_tag(ev, title)
     updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     updated_tag = f"#familybrain/updated/{updated_at}/{writer}"
     tags = f"{category_tag}\n{updated_tag}"
-    if notes:
-        return f"{notes}\n\n{tags}"
+
+    body_parts = [notes] if notes else []
+    if child_tasks:
+        checklist = "\n".join(
+            f"{'✅' if t.get('task_status') == 'done' else '☐'} {t['title']}"
+            for t in child_tasks
+        )
+        body_parts.append(checklist)
+
+    if body_parts:
+        return f"{chr(10).join(body_parts)}\n\n{tags}"
     return tags
 
 
@@ -676,7 +872,8 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
     title  = ev["title"]
     fb_id  = _tracking_id(ev)
 
-    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    description = _build_gcal_description(ev, title, ev.get("notes") or "",
+                                            child_tasks=_fetch_child_tasks(ev_id))
     if fb_id:
         description = _gcal_description_with_debug(description, fb_id)
 
@@ -736,7 +933,8 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
     title  = ev["title"]
     fb_id  = _tracking_id(ev)
 
-    description = _build_gcal_description(ev, title, ev.get("notes") or "")
+    description = _build_gcal_description(ev, title, ev.get("notes") or "",
+                                            child_tasks=_fetch_child_tasks(ev.get("id")))
     if fb_id:
         description = _gcal_description_with_debug(description, fb_id)
 
@@ -887,10 +1085,33 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     -- for obligations that were given an explicit due date in the
                     -- first place, so a dateless obligation's next_update_at stays
                     -- NULL forever and this branch never fires for it either.
-                    (event_type <> 'obligation' AND (gcal_event_id IS NULL OR updated_at > calendar_written_at))
+                    --
+                    -- Same invariant applies to 'maintenance_request'/'investigation'
+                    -- (Increment 4, email_decomposer.py's _check_product_investigation)
+                    -- — both are direct, non-calendar-facing INSERTs with starts_at
+                    -- always NULL, purely internal bookkeeping for the completeness-
+                    -- gap lifecycle. Never eligible via next_update_at either since
+                    -- nothing ever sets it for these two event types.
+                    --
+                    -- 'task' (Increment 5) is excluded for a different reason: it has
+                    -- its own channel (Google Tasks, task_sync.py) and its own
+                    -- next_update_at set via channel_resolver.materialise() same as
+                    -- obligations — it must never take the bare push path either,
+                    -- since that would send it to Google Calendar instead of Tasks.
+                    (event_type NOT IN ('obligation', 'maintenance_request', 'investigation', 'task')
+                     AND (gcal_event_id IS NULL OR updated_at > calendar_written_at))
                     OR (next_update_at IS NOT NULL AND next_update_at <= %s)
                 )
                 AND status NOT IN ('cancelled', 'superseded', 'ingested')
+                -- Blanket exclusion, not just the first OR-branch above: a task WITH a
+                -- due date (starts_at/effective_date set) would otherwise still match
+                -- the second OR-branch (next_update_at <= now(), which channel_resolver
+                -- sets for every task same as obligations) and the starts_at >= now()-1h
+                -- guard below wouldn't stop it, since a real future due-date satisfies
+                -- that comparison fine — unlike dateless obligation/maintenance_request/
+                -- investigation rows, which that guard excludes incidentally via NULL.
+                -- Confirmed live this gap exists before adding this line.
+                AND event_type != 'task'
                 -- Ordinarily gmail-sourced events came from Google's own "Events from
                 -- Gmail" auto-detection and are skipped entirely (Google already put
                 -- them on the calendar, writing again would duplicate). The exception:
@@ -915,10 +1136,19 @@ def run_appointment_updater(accounts: list[dict]) -> int:
         with rconn.cursor() as cur:
             cur.execute("""
                 SELECT id, gcal_event_id, gcal_calendar_id
-                FROM personal.event
+                FROM personal.event e
                 WHERE gcal_event_id IS NOT NULL
                   AND (
                     status IN ('cancelled', 'superseded')
+                    -- A suspended occurrence belongs on Tentative and nowhere
+                    -- else. The write path below reroutes future ones, but it
+                    -- skips anything already past, so a fortnight of school-day
+                    -- routines suspended for the holidays sat in the Family and
+                    -- primary calendars for the whole break. Clear them off any
+                    -- calendar that isn't a Tentative one.
+                    OR (status = 'suspended' AND NOT EXISTS (
+                          SELECT 1 FROM personal.email_account a
+                          WHERE a.tentative_calendar_id = e.gcal_calendar_id))
                     -- gmail-sourced + gcal_event_id normally only happens from the old
                     -- bug this sweep was built to catch. source_email_id set means it's
                     -- the new, legitimate native-gmail-patch path instead — must NOT be

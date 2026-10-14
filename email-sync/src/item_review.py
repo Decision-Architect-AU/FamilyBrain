@@ -22,6 +22,7 @@ import requests as req
 
 from . import gmail as gmail_mod
 from .filters import should_ingest, reset_cache as reset_filter_cache
+from .ingest_client import INGEST_TIMEOUT
 from .email_decomposer import decompose_email_by_id
 
 
@@ -209,7 +210,7 @@ def _ingest_candidate(msg: dict, account: dict, flag_id: int) -> int | None:
             return None
 
     parsed["account_id"] = account["id"]
-    resp = req.post(f"{INGESTOR_URL}/ingest/email", json=parsed, timeout=60)
+    resp = req.post(f"{INGESTOR_URL}/ingest/email", json=parsed, timeout=INGEST_TIMEOUT)
     if not resp.ok:
         return None
     result = resp.json()

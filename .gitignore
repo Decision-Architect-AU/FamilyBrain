@@ -22,3 +22,6 @@ dashboard/.next/cache/webpack/
 *.backup
 graph-api/explorer-dist/
 C:/DataFiles/
+
+# Inference server runtime event log
+inference-server/inference_events.jsonl
