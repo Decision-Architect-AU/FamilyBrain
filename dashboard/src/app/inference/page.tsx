@@ -261,8 +261,12 @@ export default function InferencePage() {
             Restart it from <span className="font-mono text-zinc-300">openclaw/inference-server</span>:
           </p>
           <pre className="text-[11px] bg-black/60 border border-zinc-800 rounded p-2 overflow-x-auto text-zinc-300">
-python -m uvicorn src.server:app --host 0.0.0.0 --port 11434 --workers 1
+start.bat
           </pre>
+          <p className="text-[10px] text-zinc-600">
+            Use the batch file, not uvicorn directly — it sources oneAPI setvars and sets
+            GPU_QUEUE_THROTTLE, which the server needs to reach the GPU.
+          </p>
         </div>
       )}
 
