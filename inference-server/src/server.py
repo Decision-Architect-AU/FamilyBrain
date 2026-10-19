@@ -32,7 +32,7 @@ from src.model_registry import (
     embed_text, rerank_pairs, get_whisper_pipeline
 )
 from src.ovms_proxy import is_ovms_model, ovms_generate, ovms_chat, OVMSUnavailable
-from src.metrics import metrics, clean_caller
+from src.metrics import metrics, clean_caller, RETRY_AFTER_SECS
 
 # This checkpoint reasons (visible "Thinking Process:" preamble, multi-step
 # deconstruct/draft/check-constraints/refine cycle) regardless of the
@@ -142,6 +142,12 @@ class GenerateRequest(BaseModel):
 @app.post("/api/generate")
 def generate(req: GenerateRequest, request: Request):
     caller = clean_caller(request.headers.get("x-fb-caller"))
+    refusal = metrics.admission_check(caller, "generate")
+    if refusal:
+        # 429 so callers back off instead of piling on. Nothing was queued or
+        # counted against them — this request cost the GPU nothing.
+        raise HTTPException(status_code=429, detail=refusal,
+                            headers={"Retry-After": str(RETRY_AFTER_SECS)})
     opts = req.options or {}
     max_tokens  = opts.get("num_predict", opts.get("max_new_tokens", 512))
     temperature = opts.get("temperature", 0.7)
@@ -240,6 +246,12 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request):
     caller = clean_caller(request.headers.get("x-fb-caller"))
+    refusal = metrics.admission_check(caller, "chat")
+    if refusal:
+        # 429 so callers back off instead of piling on. Nothing was queued or
+        # counted against them — this request cost the GPU nothing.
+        raise HTTPException(status_code=429, detail=refusal,
+                            headers={"Retry-After": str(RETRY_AFTER_SECS)})
     history = [{"role": m.role, "content": m.content} for m in req.messages]
 
     opts = req.options or {}

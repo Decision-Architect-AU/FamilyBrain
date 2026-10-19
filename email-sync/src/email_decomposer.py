@@ -48,6 +48,20 @@ GRAPH_API_URL = os.environ.get("GRAPH_API_URL", "http://graph-api:4003")
 _BATCH = 20   # emails per run
 
 
+def _spent_gpu(e: Exception) -> bool:
+    """Did this failure actually use inference capacity?
+
+    A refusal (HTTP 429 from the server's admission control) and a connection
+    error both mean nothing ran, so neither may count against an email's
+    attempt budget — otherwise a busy server would exhaust the budget of every
+    queued email and we would abandon mail that was never even read.
+    """
+    if isinstance(e, req.exceptions.ConnectionError):
+        return False
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return status not in (429, 503)
+
+
 class DecomposeUnavailable(Exception):
     """The extraction LLM couldn't run — the email must stay queued, not be marked done.
 
@@ -121,7 +135,7 @@ def _worth_extracting(subject: str, body: str, from_address: str) -> bool:
         resp.raise_for_status()
         word = re.sub(r"[^a-z]", "", resp.json().get("response", "").strip().lower()[:6])
     except Exception as e:
-        spent = not isinstance(e, req.exceptions.ConnectionError)
+        spent = _spent_gpu(e)
         raise DecomposeUnavailable(f"relevance gate: {e}", spent_capacity=spent) from e
     # Fail toward extracting: an unexpected answer must not silently drop an
     # email that might hold a real appointment.
@@ -396,7 +410,7 @@ def _ask_for_items(prompt: str, num_predict: int, purpose: str,
         resp.raise_for_status()
         raw = resp.json().get("response", "")
     except Exception as e:
-        spent = not isinstance(e, req.exceptions.ConnectionError)
+        spent = _spent_gpu(e)
         raise DecomposeUnavailable(f"{purpose}: {e}", spent_capacity=spent) from e
 
     m = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -438,7 +452,7 @@ def _route_email(subject: str, body: str, from_address: str) -> list[str]:
         resp.raise_for_status()
         answer = resp.json().get("response", "").lower()
     except Exception as e:
-        spent = not isinstance(e, req.exceptions.ConnectionError)
+        spent = _spent_gpu(e)
         raise DecomposeUnavailable(f"router: {e}", spent_capacity=spent) from e
 
     routes = [r for r in ("calendar", "money", "task", "record") if r in answer]

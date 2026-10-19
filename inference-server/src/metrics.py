@@ -42,6 +42,37 @@ SAMPLE_SECS = float(os.environ.get("INFERENCE_SAMPLE_SECS", "10"))
 # forced pause between generations trades throughput for never sitting at
 # full load. Set to 0 to disable.
 COOLDOWN_SECS = float(os.environ.get("INFERENCE_COOLDOWN_SECS", "5"))
+
+# Admission control. Asking each caller to check before sending does not hold:
+# one service that forgets undoes it for everyone, and that is what happened —
+# the queue reached 39 while the only guarded service was email-sync, with
+# CommentOS and the dashboard calling straight through. Every request passes
+# here, so this is the one place a limit can actually be enforced.
+#
+# SHED: optional work is refused beyond this depth. HARD: nothing new is
+# accepted beyond this, whoever is asking — the box must stay usable.
+SHED_QUEUE = int(os.environ.get("INFERENCE_SHED_QUEUE", "4"))
+HARD_QUEUE = int(os.environ.get("INFERENCE_HARD_QUEUE", "12"))
+RETRY_AFTER_SECS = int(os.environ.get("INFERENCE_RETRY_AFTER_SECS", "60"))
+
+# Work that must get through: the family's mail being read and sorted. Matched
+# against the caller's purpose (the part after the "/").
+ESSENTIAL_PURPOSES = {
+    p.strip() for p in os.environ.get(
+        "INFERENCE_ESSENTIAL_PURPOSES",
+        "triage,relevance-gate,decompose,decompose-route,decompose:calendar,"
+        "decompose:money,decompose:task,decompose:record,decompose:all-types,"
+        "categorise,classify,ingest",
+    ).split(",") if p.strip()
+}
+
+
+def _is_essential(caller: str) -> bool:
+    """Unattributed callers are never essential — identify yourself to get priority."""
+    if not caller or caller == UNATTRIBUTED:
+        return False
+    purpose = caller.split("/", 1)[1] if "/" in caller else caller
+    return purpose in ESSENTIAL_PURPOSES
 SAMPLE_RETAIN = int(os.environ.get("INFERENCE_SAMPLE_RETAIN", "2160"))  # 6h @ 10s
 RECENT_RETAIN = int(os.environ.get("INFERENCE_RECENT_RETAIN", "200"))
 EVENT_RETAIN = int(os.environ.get("INFERENCE_EVENT_RETAIN", "200"))
@@ -133,6 +164,10 @@ class InferenceMetrics:
         self._in_backlog = False
         self._backlog_since: float | None = None
         self._backlog_peak = 0
+        self._backlog_announced_at = 0   # depth the last deepening event reported
+        self.shed_total = 0
+        self._shed_by_caller: dict[str, int] = {}
+        self._shed_announced = False
         self._load_events()
 
     # ── event log ────────────────────────────────────────────────────────────
@@ -203,6 +238,35 @@ class InferenceMetrics:
                   f"caller={caller} — {elapsed:.1f}s (no lock)"
                   + (f" ({error})" if error else ""), flush=True)
 
+    def admission_check(self, caller: str, endpoint: str) -> str | None:
+        """Return a refusal reason if this request should not be queued.
+
+        Called before anything is counted or queued, so a refused request costs
+        nothing. Optional work is refused first; past the hard cap nothing new
+        is accepted at all.
+        """
+        with self._m:
+            depth = self.queue_depth
+            shed_count = self.shed_total
+        if depth >= HARD_QUEUE:
+            reason = f"queue is {depth} deep (hard limit {HARD_QUEUE})"
+        elif depth >= SHED_QUEUE and not _is_essential(caller):
+            reason = f"queue is {depth} deep; {caller} is not essential work"
+        else:
+            return None
+        with self._m:
+            self.shed_total += 1
+            by_caller = self._shed_by_caller
+            by_caller[caller] = by_caller.get(caller, 0) + 1
+        # One event per backlog episode, so a shedding storm doesn't flood the
+        # log — the counters carry the volume.
+        if shed_count == 0 or not self._shed_announced:
+            self._shed_announced = True
+            self._record_event("load_shed", depth=depth, caller=caller,
+                               endpoint=endpoint, reason=reason)
+        print(f"[metrics] refused {endpoint} for {caller} — {reason}", flush=True)
+        return reason
+
     def note_rejected(self, model: str) -> None:
         """A request refused before it ever queued (unknown model)."""
         with self._m:
@@ -230,7 +294,24 @@ class InferenceMetrics:
             elif self._in_backlog:
                 self._backlog_peak = max(self._backlog_peak, depth)
             holder = dict(self._current) if self._current else None
+            # A backlog that never clears used to record nothing after the
+            # first event: the queue reached 39 in silence because the "are we
+            # in a backlog" flag was already set. Report each doubling, so a
+            # deepening queue is visible while it is happening.
+            deepened = (self._in_backlog and not became_backlogged
+                        and depth >= max(2 * BACKLOG_DEPTH, 2 * self._backlog_announced_at))
+            if deepened:
+                self._backlog_announced_at = depth
+        if deepened:
+            self._record_event(
+                "backlog_deepened", depth=depth,
+                since=datetime.fromtimestamp(self._backlog_since or enqueued, timezone.utc)
+                .isoformat(timespec="seconds"),
+                holding_caller=(holder or {}).get("caller", "none"),
+                queued_by_caller=queued_by_caller,
+            )
         if became_backlogged:
+            self._backlog_announced_at = depth
             held = f"{time.time() - holder['started']:.0f}s" if holder else "idle"
             # Who was in the queue matters more than how deep it was: it names
             # the workload that caused the pile-up.
@@ -324,6 +405,8 @@ class InferenceMetrics:
                 self._in_backlog = False
                 self._backlog_since = None
                 self._backlog_peak = 0
+                self._backlog_announced_at = 0
+                self._shed_announced = False
         print(f"[metrics] {'done' if ok else 'FAILED'} {endpoint} {model} "
               f"caller={caller} — wait {wait_s:.1f}s infer {infer_s:.1f}s"
               + (f" ({error})" if error else ""), flush=True)
@@ -457,8 +540,11 @@ class InferenceMetrics:
             "history": history,
             "events": events,
             "paced_s_total": round(self.paced_s_total, 1),
+            "shed_total": self.shed_total,
+            "shed_by_caller": dict(sorted(self._shed_by_caller.items(), key=lambda kv: -kv[1])),
             "thresholds": {"backlog_depth": BACKLOG_DEPTH, "stuck_secs": STUCK_SECS,
-                           "sample_secs": SAMPLE_SECS, "cooldown_secs": COOLDOWN_SECS},
+                           "sample_secs": SAMPLE_SECS, "cooldown_secs": COOLDOWN_SECS,
+                           "shed_queue": SHED_QUEUE, "hard_queue": HARD_QUEUE},
         }
 
 

@@ -162,6 +162,10 @@ the instrumentation into the stall it is meant to reveal.
   what was holding the model and for how long
 - `backlog_cleared` — the queue drained, with how long the backlog lasted and
   its peak depth
+- `backlog_deepened` — the queue doubled while already backlogged. Without
+  this a backlog that never cleared recorded nothing after its first event,
+  which is how the queue reached 39 in silence
+- `load_shed` — the first refusal of a backlog episode, naming the caller
 - `generation_slow` — one generation has held the model past
   `INFERENCE_STUCK_SECS` (the caller has long since timed out)
 - `server_started` — the process restarted and the counters reset, noting
@@ -180,6 +184,32 @@ status, total time and the queue depth at completion.
 The dashboard renders all of this at **/inference** (queue-over-time chart,
 backlog events, wait-vs-infer percentiles, per-model and recent calls), reading
 it through `dashboard/src/app/api/inference/route.ts`.
+
+### Admission control: the only limit that holds
+
+Asking each caller to check before sending does not work. One service that
+forgets undoes it for everyone, and that is what happened: the queue reached
+**39 deep** while the only guarded service was email-sync, with CommentOS and
+the dashboard calling straight through — the dashboard without even a caller
+header, so it was invisible as well as unguarded.
+
+Every request passes through this server, so this is the one place a limit can
+be enforced. Beyond `INFERENCE_SHED_QUEUE` queued callers, work that is not
+essential is refused with **429 and a `Retry-After`**; beyond
+`INFERENCE_HARD_QUEUE`, nothing new is accepted at all, whoever is asking,
+because the box has to stay usable. A refusal costs the GPU nothing: it
+happens before the request is queued or counted.
+
+"Essential" is the family's mail being read and sorted — triage, the relevance
+gate, routing, extraction, categorisation (`INFERENCE_ESSENTIAL_PURPOSES`).
+Enrichment, asset summaries, CommentOS pipelines and backfills are not.
+**An unattributed caller is never essential**: identify yourself to get
+priority. `shed_total` and `shed_by_caller` report what was refused.
+
+Callers must treat a 429 as "come back later", not as a failure — in
+particular it must not count against an email's decomposition attempt budget,
+or a busy server would exhaust the budget of every queued email and abandon
+mail that was never read.
 
 ### Pacing: never sit at 100%
 
@@ -208,3 +238,7 @@ they are small and short.
 | `INFERENCE_SAMPLE_RETAIN` | `2160` | samples kept (6h at 10s) |
 | `INFERENCE_EVENT_LOG` | `inference_events.jsonl` | backlog event log path |
 | `INFERENCE_COOLDOWN_SECS` | `5` | forced idle gap between generations; `0` disables |
+| `INFERENCE_SHED_QUEUE` | `4` | queued callers beyond which optional work is refused |
+| `INFERENCE_HARD_QUEUE` | `12` | queued callers beyond which nothing is accepted |
+| `INFERENCE_ESSENTIAL_PURPOSES` | triage, gate, routing, extraction… | caller purposes exempt from shedding |
+| `INFERENCE_RETRY_AFTER_SECS` | `60` | `Retry-After` sent with a refusal |
