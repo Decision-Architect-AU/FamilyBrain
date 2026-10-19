@@ -1,6 +1,6 @@
 'use client';
 import useSWR from 'swr';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { fetcher, timeAgo } from '@/components/commentos/ui';
 
 const BRIDGE = 'http://localhost:8765';
@@ -9,6 +9,7 @@ export default function ChannelsPage() {
   const { data: channels, mutate: mutCh } = useSWR('/api/commentos/channels', fetcher, { refreshInterval: 15000 });
   const { data: keywords, mutate: mutKw } = useSWR('/api/commentos/keywords', fetcher);
   const { data: runs, mutate: mutRuns } = useSWR('/api/commentos/runs', fetcher, { refreshInterval: 5000 });
+  const { data: suggestions, mutate: mutSug } = useSWR('/api/commentos/keywords?suggest=1', fetcher);
   const [selCh, setSelCh] = useState<number | null>(null);
   const [runKw, setRunKw] = useState<number[]>([]);
   const [cap, setCap] = useState(50);
@@ -30,6 +31,13 @@ export default function ChannelsPage() {
 
   const ch = (channels || []).find((c: any) => c.id === selCh) || (channels || [])[0];
   const chKw = (keywords || []).filter((k: any) => ch && k.channel_id === ch.id);
+  // top-5 popular keywords pre-selected — a run is one click on the cap
+  useEffect(() => {
+    if (!ch || !keywords) return;
+    setRunKw((keywords as any[])
+      .filter((k) => k.channel_id === ch.id && k.active)
+      .slice(0, 5).map((k) => k.id));
+  }, [ch?.id, keywords]);
   const activeRuns = (runs || []).filter((r: any) => ['queued', 'running', 'paused'].includes(r.status));
 
   const createRun = async () => {
@@ -48,9 +56,12 @@ export default function ChannelsPage() {
   return (
     <div className="space-y-5">
       {msg && <p className="text-red-400 text-sm">{msg}</p>}
-      {/* channel cards */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-        {channels.map((c: any) => (
+      {/* channel cards, grouped by type */}
+      {['social', 'website', 'reviews'].map((tp) => (
+        <div key={tp}>
+          <div className="text-xs text-gray-500 uppercase mb-1.5">{tp === 'social' ? 'Social - scrape runs & replies' : tp === 'website' ? 'Website - your content' : 'Reviews - book listings'}</div>
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+        {channels.filter((c: any) => (c.channel_type || 'social') === tp).map((c: any) => (
           <div key={c.id} onClick={() => setSelCh(c.id)}
             className={`border rounded-lg p-3 cursor-pointer ${ch?.id === c.id ? 'border-cyan-500' : 'border-gray-800'} bg-gray-900/50`}>
             <div className="flex items-center justify-between">
@@ -62,15 +73,32 @@ export default function ChannelsPage() {
               </button>
             </div>
             <div className="text-xs text-gray-500 mt-2 space-y-0.5">
-              <div>session: {c.session_ok === null ? 'unprobed' : c.session_ok ?
-                <span className="text-green-400">logged in</span> : <span className="text-red-400">logged out</span>}
-                {c.session_checked_at && ` · ${timeAgo(c.session_checked_at)}`}</div>
-              <div>today: {c.runs_today}/{c.pacing?.max_runs_per_day ?? 4} runs · {c.threads_today} threads</div>
-              <div>{c.active_keywords} active keywords{c.adapter_version ? ` · ${c.adapter_version}` : ''}</div>
+              {c.channel_type === 'social' ? (<>
+                <div>session: {c.session_ok === null ? 'unprobed' : c.session_ok ?
+                  <span className="text-green-400">logged in</span> : <span className="text-red-400">logged out</span>}
+                  {c.session_checked_at && ` · ${timeAgo(c.session_checked_at)}`}</div>
+                <div>today: {c.runs_today}/{c.pacing?.max_runs_per_day ?? 4} runs · {c.threads_today} threads</div>
+                <div>{c.active_keywords} active keywords{c.adapter_version ? ` · ${c.adapter_version}` : ''}</div>
+                <div className="text-cyan-600 truncate" title="top keywords by value (signal yield x impact)">
+                  {(keywords || []).filter((k: any) => k.channel_id === c.id && k.active)
+                    .slice(0, 3).map((k: any) => k.phrase).join(' · ') || 'no keywords'}</div>
+              </>) : (<>
+                <div>{c.captures} captures · {c.total_comments} comments</div>
+                <div>last check: {c.last_capture ? timeAgo(c.last_capture) : 'never'}</div>
+                <button onClick={(e) => { e.stopPropagation();
+                  const ep = c.channel_type === 'reviews' ? '/check-reviews'
+                    : c.slug === 'blog' ? '/ingest-blog' : '/ingest-website';
+                  fetch(`${BRIDGE}${ep}`, { method: 'POST', body: '{}' })
+                    .then(() => setMsg(`OK - ${c.display_name} check started`))
+                    .catch(() => setMsg('bridge offline'));
+                }} className="mt-1 px-2 py-0.5 bg-gray-800 hover:bg-gray-700 rounded text-xs text-cyan-300">Check now</button>
+              </>)}
             </div>
           </div>
         ))}
-      </div>
+          </div>
+        </div>
+      ))}
 
       {ch && (
         <div className="grid grid-cols-[1fr_380px] gap-5">
@@ -79,11 +107,12 @@ export default function ChannelsPage() {
             <div className="text-xs text-gray-500 uppercase mb-2">{ch.display_name} keywords — yield tells you which earn their budget</div>
             <table className="w-full text-sm">
               <thead><tr className="text-left text-gray-600 text-xs uppercase">
-                <th className="p-1.5 w-6"></th><th>Phrase</th><th>Brand</th><th>Pri</th><th>Last run</th><th>Found</th><th>New</th><th>Signals</th><th></th></tr></thead>
-              <tbody>{chKw.map((k: any) => (
-                <tr key={k.id} className={`border-t border-gray-800 ${!k.active ? 'opacity-40' : ''}`}>
+                <th className="p-1.5 w-6"></th><th>#</th><th>Phrase</th><th>Brand</th><th>Pri</th><th>Last run</th><th>Found</th><th>New</th><th>Signals</th><th></th></tr></thead>
+              <tbody>{chKw.map((k: any, ki: number) => (
+                <tr key={k.id} className={`border-t border-gray-800 ${!k.active ? 'opacity-40' : ki < 5 ? 'bg-cyan-950/20' : ''}`}>
                   <td className="p-1.5"><input type="checkbox" checked={runKw.includes(k.id)} disabled={!k.active}
                     onChange={(e) => setRunKw(e.target.checked ? [...runKw, k.id] : runKw.filter((x) => x !== k.id))} /></td>
+                  <td className={ki < 5 && k.active ? 'text-cyan-400 font-bold' : 'text-gray-600'}>{ki + 1}</td>
                   <td>{k.phrase}</td>
                   <td><span className={k.brand === 'decision-architect' ? 'text-amber-400' : 'text-gray-500'}>{k.brand === 'decision-architect' ? 'DA' : 'pers'}</span></td>
                   <td>{k.priority}</td>
@@ -95,6 +124,19 @@ export default function ChannelsPage() {
                 </tr>))}
               </tbody>
             </table>
+            {(suggestions || []).length > 0 && (
+              <div className="mt-3">
+                <div className="text-xs text-gray-500 uppercase mb-1">Suggested — topical terms earning impact in your captures</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(suggestions || []).map((sg: any) => (
+                    <button key={sg.phrase} title={`seen ${sg.occurrences}× · avg impact ${sg.avg_impact} — click to add`}
+                      onClick={async () => { await post('/api/commentos/keywords',
+                        { channel_id: ch.id, phrase: sg.phrase.replace(/_/g, ' '), brand: 'personal', priority: 3 });
+                        mutKw(); mutSug(); }}
+                      className="px-2 py-0.5 rounded-full text-xs border border-purple-800 text-purple-300 hover:bg-purple-950">
+                      ＋ {sg.phrase}</button>))}
+                </div>
+              </div>)}
             <div className="flex gap-2 mt-3">
               <input value={newKw} onChange={(e) => setNewKw(e.target.value)} placeholder="Add keyword…"
                 className="flex-1 bg-gray-900 border border-gray-700 rounded p-1.5 text-sm" />

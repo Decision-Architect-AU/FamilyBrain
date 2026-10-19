@@ -112,7 +112,7 @@ The pipeline is split into three layers: **inbound channels**, a **centralised k
 │  gcal_holidays ──► Holidays + daily expansion           │
 │  gcal_primary ──► Primary calendar                      │
 │  outlook ──► Hotmail calendar (mirror only)             │
-│  task_list ──► notes (tagged task)                      │
+│  gtask_primary ──► Google Tasks (FamilyBrain list)      │
 │  observations ──► notes (daily batch)                   │
 └─────────────────────────────────────────────────────────┘
 
@@ -1071,6 +1071,14 @@ Runs five sequential stages after each email poll:
 | **Bill calendar** | Creates/enriches Google Calendar events for financial notes |
 | **Appointment updater** | Polls `next_update_at <= now()` → writes all pending events to Google Calendar |
 
+Alongside these, `main.py` runs independent loops on their own intervals — calendar (15 min), **tasks** (15 min), financial (5 min), item review (90 s) and a weekly digest check (hourly, fires Mondays) — each behind a heartbeat watchdog that force-exits the process if a loop goes quiet for four cycles, so Docker's restart policy can recover a hang it would otherwise never observe.
+
+**Google Tasks channel:**
+
+`event_type = 'task'` rows sync bidirectionally with a dedicated **FamilyBrain** list in Google Tasks, kept separate from the account's default list for the same reason Bills/Family/Holidays are their own calendars. `task_sync.py` runs three flows per pass: outbound push (new, due or changed tasks), inbound add (tasks created by hand in Google Tasks become `personal.event` rows with `provenance = 'google_tasks'`), and inbound completion. Completion is **Google → FamilyBrain only** — marking a task done in FamilyBrain does not yet push back.
+
+Task state lives in `personal.event.task_status` (`open` / `done`), deliberately not the shared `status` column, whose CHECK constraint is calendar-lifecycle-specific. The mapping between an event and its Google task goes through `personal.calendar_sync_map` under `channel = 'gtask_primary'` — that table was generalised from calendar-mirror-only to channel-discriminated rather than adding a parallel table. The older `task_list` channel (tasks as tagged notes) is superseded and disabled in `personal.channel`.
+
 **Calendar routing:**
 - Bills → Bills calendar (3 days before due, day-of reminder)
 - Family events → Family calendar (Child1/Child2 colour-coded) — configure names via `CHILD1_NAMES`/`CHILD2_NAMES` in `.env`
@@ -1081,14 +1089,17 @@ Runs five sequential stages after each email poll:
 
 | Table | Purpose |
 |---|---|
-| `personal.email_account` | One row per inbox; holds OAuth tokens, `sync_cursor`, `sent_sync_cursor`, `calendar_sync_cursor` |
+| `personal.email_account` | One row per inbox; holds OAuth tokens, `sync_cursor`, `sent_sync_cursor`, `calendar_sync_cursor`, plus `last_sync_error`/`last_sync_error_at` |
 | `personal.email_message` | Dedup + ingestion state per message |
-| `personal.event` | All calendar events; `effective_date` (local date), `next_update_at`, `gcal_event_id` |
-| `personal.calendar_sync_map` | Source→target event ID mapping for bidirectional sync |
+| `personal.event` | All calendar events; `effective_date` (local date), `next_update_at`, `gcal_event_id`, `task_status` |
+| `personal.calendar_sync_map` | Our event ↔ one external resource per `channel` (`gcal_mirror`, `gtask_primary`) |
+| `personal.product` | Products owned under an asset — warranty window, vendor, investigation lifecycle |
 | `personal.channel` | Channel registry (inbound + outbound) |
 | `personal.channel_rule` | Scheduling + routing rules per channel |
 | `personal.financial_domain` | Trusted financial sender domains; `entity_slug=NULL` = multi-entity LLM mode |
 | `personal.email_filter` | Block/allow rules (domain, sender, keyword) |
+
+**Sync health.** Every sync failure is caught per account and written to `email_account.last_sync_error` / `last_sync_error_at`, then cleared automatically on the next success. This exists because a revoked Gmail refresh token failed on every attempt for over two weeks with the only trace in container logs — `last_synced_at` said the account was stale but never why. The dashboard's `/accounts` page reads this, so a dead token shows up as a broken account instead of as silently missing data. A refresh token is invalidated by password changes, revoking access in the Google account, ~6 months of disuse, and — easy to miss — **any change to the requested OAuth scopes**: adding the Tasks scope means re-running the auth helper and replacing the stored token for every affected account.
 
 ### Ingestor (`ingestor:4001`)
 
@@ -1128,7 +1139,7 @@ DASHBOARD_DB_PASSWORD=<required>
 AUDIT_DB_PASSWORD=<required>
 CURATOR_DB_PASSWORD=<required>
 
-# Google OAuth2 (Gmail + Calendar)
+# Google OAuth2 (Gmail + Calendar + Tasks)
 GOOGLE_CLIENT_ID=<required>
 GOOGLE_CLIENT_SECRET=<required>
 
@@ -1158,6 +1169,10 @@ CALENDAR_MIRROR_PARTNER_EMAIL=<email>
 # Poll intervals
 EMAIL_POLL_INTERVAL_SECS=300
 CALENDAR_POLL_INTERVAL_SECS=900
+TASKS_POLL_INTERVAL_SECS=900
+FINANCIAL_POLL_INTERVAL_SECS=300
+REVIEW_POLL_INTERVAL_SECS=90
+DIGEST_CHECK_INTERVAL_SECS=3600
 ```
 
 ---
@@ -1179,6 +1194,7 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `Event` | `event_key`, `title`, `starts_at`, `ends_at`, `effective_date`, `event_type`, `gcal_event_id`, `next_update_at`, `fact_*`, `ref` |
 | `Bill` | `bill_id`, `payee`, `amount`, `due_date`, `status`, `reference`, `resolved_at` |
 | `Asset` | `ref`, `name`, `asset_type`, `subtype`, `status`, `fact_*`/`factsrc_*`, `fact_summary`/`factsrc_summary`, `facts_updated_at` |
+| `Product` | `ref`, `product_id`, `name`, `category`, `tier` — a product owned under an `Asset`; `tier` drives dashboard suppression so Asset stays the default-view entity |
 
 `fact_*` properties on `Event` and other nodes are open-ended — extracted fields such as `fact_provider`, `fact_location`, `fact_notes`, `fact_cost`, `fact_duration` are written by the enrichment pipeline and are never truncated. The `ref` field on each node is a hydration handle (`"schema.table:id"`) for resolving back to the full Postgres row.
 
@@ -1199,6 +1215,7 @@ CALENDAR_POLL_INTERVAL_SECS=900
 | `HAS_ASSET` | Person → Asset | links person to their assets (medications, therapy, subscriptions) |
 | `WORKS_AT` | Person → Organisation | resolved practitioner → provider org |
 | `PROVIDES` | Person → Asset (routine) | resolved practitioner → the routine/service they provide |
+| `INSTALLED_AT` | Product → Asset | product resolved to the asset it belongs to; both live in `personal_graph` so the edge is graph-native |
 
 Every edge in `personal_graph` carries `confidence INT` (0–100, same scale as events) plus, once suppressed, `zeroed_by` / `zeroed_at` / `zero_reason` / `zero_prev_confidence`. Retrieval, enrichment, and the dossier all filter `confidence > 0` by default — see [Asset Dossier & Suppression](#asset-dossier--suppression).
 

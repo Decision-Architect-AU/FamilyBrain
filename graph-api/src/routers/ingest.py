@@ -1,6 +1,8 @@
 """Natural language ingestor endpoints."""
 import json
 import os
+
+from ..llm_caller import caller_headers
 import time
 import uuid
 from typing import Any
@@ -156,6 +158,7 @@ def extract(req: ExtractRequest):
         resp = httpx.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": EXTRACT_MODEL, "prompt": prompt, "system": system, "stream": False},
+            headers=caller_headers("ingest"),
             timeout=120,
         )
         resp.raise_for_status()
@@ -200,8 +203,11 @@ def commit(req: CommitRequest):
                 props_json = json.dumps(match_props)
                 set_parts = ", ".join(f"n.{k} = {json.dumps(v)}" for k, v in node.properties.items())
                 if set_parts:
+                    # AGE has no ON CREATE SET / ON MATCH SET — it is a syntax
+                    # error there. Since both branches set the same properties
+                    # anyway, a plain SET is equivalent and actually parses.
                     cypher = (f"MERGE (n:{node.label} {props_json}) "
-                              f"ON CREATE SET {set_parts} ON MATCH SET {set_parts} RETURN n")
+                              f"SET {set_parts} RETURN n")
                 else:
                     cypher = f"MERGE (n:{node.label} {props_json}) RETURN n"
                 result = db.cypher_query(cypher)

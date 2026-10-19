@@ -20,11 +20,25 @@ export async function GET(req: NextRequest) {
 }
 
 // POST create {channel_id, keyword_ids[], cap, since_days?}
+// or {channel_id, cap, auto: true} — server picks 5 active keywords, rotating
+// least-recently-run first so successive auto cycles cover the watchlist
+// instead of re-searching the same top phrases (and re-finding the same posts)
 export async function POST(req: NextRequest) {
   const b = await req.json();
   if (![25, 50, 100].includes(b.cap)) return NextResponse.json({ error: 'cap must be 25/50/100' }, { status: 422 });
   const [ch] = await q(`SELECT * FROM decision_os.co_channel WHERE id=$1`, [b.channel_id]);
   if (!ch?.enabled) return NextResponse.json({ error: 'channel disabled (kill switch)' }, { status: 422 });
+  if (b.auto && !(b.keyword_ids?.length)) {
+    const picked = await q(`
+      SELECT k.id FROM decision_os.co_keyword k
+      WHERE k.channel_id=$1 AND k.active
+      ORDER BY (SELECT max(r.created_at) FROM decision_os.co_run r
+                WHERE k.id = ANY(r.keyword_ids)) ASC NULLS FIRST,
+               k.priority DESC
+      LIMIT 5`, [b.channel_id]);
+    b.keyword_ids = picked.map((r: { id: number }) => r.id);
+  }
+  if (!b.keyword_ids?.length) return NextResponse.json({ error: 'no keywords' }, { status: 422 });
   const maxRuns = ch.pacing?.max_runs_per_day ?? 4;
   const [{ n }] = await q(`SELECT count(*)::int AS n FROM decision_os.co_run
     WHERE channel_id=$1 AND created_at > now() - interval '24 hours'`, [b.channel_id]);

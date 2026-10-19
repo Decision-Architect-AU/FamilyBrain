@@ -126,8 +126,19 @@ def _extract_docx(path: pathlib.Path) -> str:
 def _extract_image(path: pathlib.Path) -> str:
     try:
         import pytesseract
-        from PIL import Image
-        img  = Image.open(str(path))
+        from PIL import Image, ImageOps
+        img = Image.open(str(path))
+        # Phone photos store pixels in the sensor's raw orientation plus an
+        # EXIF Orientation tag telling viewers how to rotate/flip for
+        # display. PIL.Image.open() does not apply that tag — a viewer that
+        # respects it (confirmed live: this repo's own image viewer) shows
+        # the photo upright while Tesseract still OCRs the raw sideways
+        # pixels, producing garbled text with the right characters in the
+        # wrong order (a birthday invite photographed on its side came out
+        # as "avos 21100 AW" instead of "1:00 pm"). exif_transpose()
+        # physically rotates/flips the pixel data to match the tag before
+        # OCR ever sees it; a no-op if the tag is absent or already upright.
+        img = ImageOps.exif_transpose(img)
         text = pytesseract.image_to_string(img).strip()
         if text:
             return f"[Image: {path.name}]\n\n{text}"

@@ -1,5 +1,7 @@
 """Response Quality Lab endpoints."""
 import os
+
+from ..llm_caller import caller_headers
 import time
 import uuid
 from typing import Any
@@ -178,6 +180,7 @@ def replay(log_id: str):
             f"{OLLAMA_URL}/api/generate",
             json={"model": row.get("model", "qwen2.5:14b"), "prompt": prompt,
                   "system": system, "stream": False},
+            headers=caller_headers("quality"),
             timeout=120,
         )
         resp.raise_for_status()

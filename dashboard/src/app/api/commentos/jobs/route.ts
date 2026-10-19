@@ -20,11 +20,12 @@ export async function POST(req: NextRequest) {
   }
   if (steps.includes('extract')) {
     const todo = await q(`SELECT id FROM decision_os.co_comment WHERE triage='relevant' AND NOT extracted ORDER BY id LIMIT $1`, [limit]);
-    let signals = 0, errors = 0;
+    let signals = 0, errors = 0, lastError: string | null = null;
     for (const c of todo) {
-      try { signals += await extractSignals(c.id); } catch { errors++; }
+      try { signals += await extractSignals(c.id); }
+      catch (e: any) { errors++; lastError = `comment ${c.id}: ${e.message}`; }
     }
-    report.extract = { comments: todo.length, signals, errors };
+    report.extract = { comments: todo.length, signals, errors, last_error: lastError };
   }
   if (steps.includes('cluster')) {
     try { report.cluster = { changes: await clusterSignals() }; }

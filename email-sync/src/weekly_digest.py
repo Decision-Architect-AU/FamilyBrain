@@ -537,6 +537,6 @@ def send_weekly_digest(account: dict) -> str | None:
     """Builds and saves the digest as a Gmail draft in `account`'s own mailbox."""
     subject, text_body, html_body = build_digest_body()
     to = DIGEST_TO_ADDRESS or account["email_address"]
-    draft_id = gmail_mod.create_draft(account, to, subject, text_body, html_body)
+    draft_id, _thread_id, _msg_id = gmail_mod.create_draft(account, to, subject, text_body, html_body)
     print(f"[digest] saved draft '{subject}' (draft {draft_id}) to {account['email_address']}")
     return draft_id

@@ -14,13 +14,41 @@ Runs five sequential stages on each poll cycle:
 | **Bill calendar** | Creates/enriches Google Calendar events for financial notes |
 | **Appointment updater** | Polls `next_update_at <= now()` → writes enriched events to Google Calendar |
 
+Independent loops run alongside on their own intervals: calendar (15 min), tasks (15 min), financial (5 min), item review (90 s) and a weekly digest check (hourly, fires Mondays).
+
+## Google Tasks channel
+
+`event_type = 'task'` rows sync bidirectionally with a dedicated **FamilyBrain** list in Google Tasks — find-or-create, cached per account for the process lifetime, and deliberately not the account's default list (same separation-by-purpose convention as Bills/Family/Holidays being their own calendars).
+
+`task_sync.py` runs three flows per pass:
+
+| Flow | What it does |
+|-------|-------------|
+| **Outbound push** | `event_type='task'` rows never synced, past `next_update_at`, or changed since the last push → insert or patch in Google Tasks, batched 50 at a time |
+| **Inbound add** | A Google task with no sync-map row was created by hand → new `personal.event` with `provenance = 'google_tasks'` |
+| **Inbound completion** | A mapped Google task marked completed → `task_status = 'done'` on the linked event |
+
+Completion is **Google → FamilyBrain only**. Marking a task done on the FamilyBrain side does not push back to Google.
+
+`google_tasks.py` holds no OAuth plumbing of its own — it calls `gmail.py`'s `_cached_service()`, so Gmail, Calendar and Tasks all share one credential and one service cache rather than building a third copy of the same machinery.
+
+Two schema notes, both from `postgres/init/50_google_tasks.sql`. Task state lives in `personal.event.task_status` (`open`/`done`) rather than the shared `status` column, whose CHECK constraint is calendar-lifecycle-specific and shared across every event type. The event↔task mapping reuses `personal.calendar_sync_map` under `channel = 'gtask_primary'`; that table gained the `channel` discriminator specifically so one mapping table serves both calendar mirrors and tasks instead of a parallel table being added. The older `task_list` channel (tasks as tagged notes) is superseded and now disabled in `personal.channel`.
+
+## Sync health
+
+Every per-account sync failure is written to `personal.email_account.last_sync_error` / `last_sync_error_at` via `db.record_sync_error()`, and cleared automatically the next time that account's sync succeeds. The dashboard's `/accounts` page reads it.
+
+This exists because a revoked Gmail refresh token failed with `invalid_grant` on every single attempt for over two weeks and the only trace was in this container's own logs. `last_synced_at` showed the account was stale; nothing said why. The failure was already caught and printed — it just had nowhere durable to go.
+
+A refresh token dies from a password change, access revoked in the Google account, roughly six months of disuse, and — the one that is easy to miss — **any change to the set of OAuth scopes requested**. Adding the Tasks scope invalidates every previously issued token, so each affected account has to be re-authorised through `auth_helper.py` and its `refresh_token` replaced.
+
 ## Reliability — connection reuse and the watchdog
 
 **Connection leak (fixed).** `gmail.py`'s `_gmail_service()` / `_calendar_service()`, `bill_calendar.py`'s `_cal_service()`, and `appointment_updater.py`'s `_cal_service()` each used to call `googleapiclient.discovery.build()` fresh on every invocation — worse, the latter two built a *Gmail* service purely to steal its credentials, then built a *second, separate* Calendar service. `build()`'s underlying `httplib2` transport is not closed promptly on garbage collection, so under sustained polling (every 5–15 min, for hours) these accumulated as `CLOSE_WAIT` sockets. Traced live: dozens of stuck `CLOSE_WAIT` connections to Google/Microsoft endpoints, zero Postgres connections held, all three loop threads silently stopped making progress — no crash, no error logged, `docker ps` still showed the container `Up`.
 
 Fixed by caching built API clients per `(account_id, api)` in `gmail.py._cached_service()` (rebuilt every 30 min so token refresh is still picked up), with `bill_calendar.py` and `appointment_updater.py`'s `_cal_service()` now just calling `gmail.py`'s cached `_calendar_service()` instead of building their own.
 
-**Watchdog (structural safeguard).** Even with the leak fixed, any blocking call without a timeout can hang a loop thread silently — Python's `try/except` around each loop body only catches exceptions, never a hang. `main.py` now has each loop (`email_loop`, `calendar_loop`, `financial_loop`) touch a heartbeat file (`/tmp/heartbeats/<name>`) after every iteration, and a `_watchdog_loop()` thread checks staleness every 60s. If a loop misses 4 consecutive cycles' worth of heartbeat, the watchdog calls `os._exit(1)` — skipping cleanup entirely, since a hung thread may be holding a lock a clean shutdown would wait on forever — and `restart: unless-stopped` in `docker-compose.yml` brings the container back. Docker only restarts a container on process *exit*; it has no way to detect an internal hang on its own, so the watchdog's job is specifically to turn "silently stuck" into "exited, restart me."
+**Watchdog (structural safeguard).** Even with the leak fixed, any blocking call without a timeout can hang a loop thread silently — Python's `try/except` around each loop body only catches exceptions, never a hang. `main.py` now has each loop (`email_loop`, `calendar_loop`, `task_loop`, `financial_loop`, `review_loop`, `digest_loop`) touch a heartbeat file (`/tmp/heartbeats/<name>`) after every iteration, and a `_watchdog_loop()` thread checks staleness every 60s. If a loop misses 4 consecutive cycles' worth of heartbeat, the watchdog calls `os._exit(1)` — skipping cleanup entirely, since a hung thread may be holding a lock a clean shutdown would wait on forever — and `restart: unless-stopped` in `docker-compose.yml` brings the container back. Docker only restarts a container on process *exit*; it has no way to detect an internal hang on its own, so the watchdog's job is specifically to turn "silently stuck" into "exited, restart me."
 
 ## Bill classification & extraction
 
@@ -106,6 +134,8 @@ If unset, `target_calendar_id()` falls back to the account's default/primary cal
 
 ## Adding an account
 
+Gmail accounts are authorised for three scopes — `gmail.modify`, `calendar` and `tasks` — in a single consent. See [SETUP.md](SETUP.md) for the full flow.
+
 1. Complete OAuth consent flow and obtain a refresh token
 2. Insert a row into `personal.email_account`:
    ```sql
@@ -153,7 +183,7 @@ The scanner fetches all upcoming events from each calendar, extracts the `fb:eXX
 ## Key env vars
 
 ```env
-DATABASE_URL=postgresql://curator:<password>@postgres:5432/familybrain
+DATABASE_URL=postgresql://curator:<password>@postgres:5432/openclaw
 GOOGLE_CLIENT_ID=<required>
 GOOGLE_CLIENT_SECRET=<required>
 MICROSOFT_CLIENT_ID=<required>
@@ -167,4 +197,10 @@ GMAIL_INITIAL_DAYS=730
 OUTLOOK_INITIAL_DAYS=90
 EMAIL_POLL_INTERVAL_SECS=300
 CALENDAR_POLL_INTERVAL_SECS=900
+TASKS_POLL_INTERVAL_SECS=900
+FINANCIAL_POLL_INTERVAL_SECS=300
+REVIEW_POLL_INTERVAL_SECS=90
+DIGEST_CHECK_INTERVAL_SECS=3600
 ```
+
+`docker-compose.yml` passes through only `EMAIL_POLL_INTERVAL_SECS`, `CALENDAR_POLL_INTERVAL_SECS` and `REVIEW_POLL_INTERVAL_SECS`. `TASKS_POLL_INTERVAL_SECS`, `FINANCIAL_POLL_INTERVAL_SECS` and `DIGEST_CHECK_INTERVAL_SECS` are read by `main.py` but not declared there, so setting them in `.env` has no effect until they are added to the service's `environment:` block. Each one also sets its loop's watchdog threshold (interval × 4) — lowering `REVIEW_POLL_INTERVAL_SECS` has been confirmed live to force-restart the container mid-review, because a single review can involve several LLM extraction calls and legitimately outlast a short interval.

@@ -148,6 +148,7 @@ class QueryRequest(BaseModel):
     model: str | None = None
     thinking: bool = False   # only meaningful for models with a chat-template tokenizer loaded
     person_hint: str | None = None   # last focused person name, for pronoun follow-ups
+    graph: str | None = None   # explicit graph override ("personal"/"property"/"decision") from a UI selector
 
 
 class QueryResponse(BaseModel):
@@ -233,7 +234,7 @@ async def query(req: QueryRequest):
                              graphs_used=["personal_graph"], elapsed_ms=elapsed)
 
     # ── 5. Knowledge query ────────────────────────────────────────────────────
-    intent = classify(message)
+    intent = classify(message, graph_override=req.graph)
     graphs = intent.graphs
     person_hint = req.person_hint or None
     context_sections, retrieve_meta = retrieve(message, graphs, person_hint=person_hint)
@@ -461,10 +462,21 @@ async def clear_history(sender: str):
 
 @app.post("/maintenance")
 async def maintenance(tasks: list[str] | None = Query(default=None)):
-    """Trigger nightly maintenance. Runs in background — returns immediately."""
+    """Trigger nightly maintenance. Runs in background — returns immediately.
+
+    Reports "already_running" without scheduling a duplicate if a previous
+    call is still in progress (checked here, not just inside run_maintenance
+    itself) — confirmed live that maintenance-cron's 5-minute trigger interval
+    is routinely shorter than a full cycle takes (the review_query_flags
+    task's 35B model call alone can run 10+ minutes), and the response
+    previously always claimed "running" regardless, making the cron's own
+    logs useless for spotting the pileup this caused."""
+    from src.maintenance import _maintenance_lock
+    effective = tasks or ["rederive_facts", "re_embed", "link", "audit_concepts", "dedup", "prune", "check_data_expectations", "review_data_expectations", "detect_provider_gaps", "generate_events", "detect_conflicts", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary", "review_query_flags", "query_flags_report"]
+    if _maintenance_lock.locked():
+        return {"status": "already_running", "tasks": effective}
     import asyncio
     asyncio.get_event_loop().run_in_executor(None, run_maintenance, tasks)
-    effective = tasks or ["rederive_facts", "re_embed", "link", "audit_concepts", "dedup", "prune", "check_data_expectations", "review_data_expectations", "detect_provider_gaps", "generate_events", "detect_conflicts", "reconcile_ingested", "refresh_asset_notes", "asset_graph_sync", "monitor", "tune_weights", "appointment_digest", "routine_context_pack", "notify_provider_conflicts", "asset_summary", "review_query_flags", "query_flags_report"]
     return {"status": "running", "tasks": effective}
 
 
@@ -479,6 +491,38 @@ async def health():
 async def api_list_query_flags(limit: int = 100):
     from src.query_flags_store import list_flags
     return {"flags": list_flags(limit)}
+
+
+# ── Connected account sync health (dashboard visibility) ────────────────────
+# personal.email_account isn't reachable from dashboard_ro (personal schema is
+# private), so the dashboard proxies through this endpoint instead — same
+# pattern as query_flags above. Built after shannon.garner@gmail.com's Gmail
+# token failed silently for 2+ weeks (invalid_grant on every sync attempt)
+# with nothing queryable to surface it; last_sync_error/last_sync_error_at
+# (postgres/init/48_email_account_sync_status.sql) are written by
+# email-sync's gmail.py/outlook.py on failure and cleared on the next
+# successful sync.
+@app.get("/api/email_accounts")
+async def api_list_email_accounts():
+    import psycopg2
+    import psycopg2.extras
+    DB_URL = os.environ.get("DATABASE_URL")
+    conn = psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, provider, email_address, display_name, enabled,
+                       sync_email, sync_calendar, is_primary,
+                       last_synced_at, last_sync_error, last_sync_error_at
+                FROM personal.email_account
+                ORDER BY enabled DESC, id
+                """
+            )
+            accounts = cur.fetchall()
+    finally:
+        conn.close()
+    return {"accounts": accounts}
 
 
 # ── Fallback self-healing: staged fix review (P0-6) ─────────────────────────
