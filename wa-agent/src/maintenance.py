@@ -1704,9 +1704,15 @@ def task_asset_graph_sync() -> dict:
 
             if asset.get("person_name"):
                 pname = asset["person_name"].replace("'", "\\'")
+                # AGE has no ON CREATE SET — coalesce stamps the default only on
+                # a new edge and keeps any existing confidence, same as
+                # ingestor/src/graph.py. With ON CREATE SET this query failed
+                # with "syntax error at or near ON" on every cycle, so no
+                # HAS_ASSET edge was ever written: 896 such errors in one day.
                 _cypher(conn, "personal_graph",
                     f"MATCH (p:Person {{name: '{pname}'}}), (a:Asset {{ref: '{ref}'}}) "
-                    f"MERGE (p)-[r:HAS_ASSET]->(a) ON CREATE SET r.confidence = 90",
+                    f"MERGE (p)-[r:HAS_ASSET]->(a) "
+                    f"SET r.confidence = coalesce(r.confidence, 90)",
                 )
                 linked += 1
 
