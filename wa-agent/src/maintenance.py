@@ -2344,6 +2344,48 @@ def run_maintenance(tasks: list[str] | None = None) -> dict:
         _maintenance_lock.release()
 
 
+
+# ── After-hours window for model-heavy work ──────────────────────────────────
+# Maintenance was running its full task list every 5 minutes, around the clock.
+# Measured over 24h: ~30 model calls an hour, every hour, almost all of it
+# appointment_digest batching — against roughly 20 emails for the whole day.
+# That, not the mail, is what filled the GPU queue and took the host off the
+# network. These tasks belong in an after-hours block.
+#
+# Inside the window the full list runs. Outside it, the model-heavy tasks are
+# skipped and only the cheap database work continues, so the pipeline stays
+# current without competing for the GPU during the day.
+MAINTENANCE_TZ = os.environ.get("MAINTENANCE_TZ", "Australia/Brisbane")
+WINDOW_START_HOUR = int(os.environ.get("MAINTENANCE_WINDOW_START_HOUR", "2"))
+WINDOW_END_HOUR = int(os.environ.get("MAINTENANCE_WINDOW_END_HOUR", "6"))
+
+# Tasks that call a model (generation or embeddings). Everything else is SQL
+# and graph work, cheap enough to keep running through the day.
+NIGHTLY_ONLY_TASKS = {
+    t.strip() for t in os.environ.get(
+        "MAINTENANCE_NIGHTLY_TASKS",
+        "re_embed,audit_concepts,asset_summary,appointment_digest,"
+        "routine_context_pack,review_query_flags,query_flags_report",
+    ).split(",") if t.strip()
+}
+
+
+def _local_now() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(MAINTENANCE_TZ))
+    except Exception:
+        return datetime.now()
+
+
+def in_maintenance_window(now: datetime | None = None) -> bool:
+    """Is it the after-hours block? Handles a window that crosses midnight."""
+    hour = (now or _local_now()).hour
+    if WINDOW_START_HOUR <= WINDOW_END_HOUR:
+        return WINDOW_START_HOUR <= hour < WINDOW_END_HOUR
+    return hour >= WINDOW_START_HOUR or hour < WINDOW_END_HOUR
+
+
 def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
     all_tasks = tasks or [
         "rederive_facts",
@@ -2361,6 +2403,16 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "asset_summary",
         "review_query_flags", "query_flags_report",
     ]
+    # An explicit task list means somebody asked for it by name — honour it.
+    # An automatic cycle outside the window drops the model-heavy work.
+    if tasks is None and not in_maintenance_window():
+        deferred = [t for t in all_tasks if t in NIGHTLY_ONLY_TASKS]
+        all_tasks = [t for t in all_tasks if t not in NIGHTLY_ONLY_TASKS]
+        if deferred:
+            print(f"[maintenance] outside the {WINDOW_START_HOUR:02d}:00-"
+                  f"{WINDOW_END_HOUR:02d}:00 {MAINTENANCE_TZ} window — deferring "
+                  f"{len(deferred)} model-heavy task(s): {', '.join(deferred)}")
+
     results   = {}
     t0        = time.time()
 
