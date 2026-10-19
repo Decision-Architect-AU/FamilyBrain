@@ -36,6 +36,8 @@ from dateutil.relativedelta import relativedelta
 
 from src.linker import run_linker, audit_concepts, _conn, _embed, _cypher, _esc, _looks_like_real_name, GRAPHS
 from src.routine_context_pack import assemble_all_packs
+from src.task_deadline import (TaskAbandoned, abort_if_expired, clear_deadline,
+                               set_deadline)
 
 DB_URL     = os.environ.get("DATABASE_URL")
 
@@ -66,11 +68,24 @@ def _run_with_timeout(fn, timeout_secs: int, task_name: str):
     for the same practical effect as a hang even though nothing was stuck.
     One broken task should cost that task's result, not the rest of the run.
     """
-    future = _task_executor.submit(fn)
+    def _runner():
+        # The deadline is recorded inside the worker thread, so the task itself
+        # can see it and stop. Nothing can kill a thread from outside.
+        set_deadline(task_name, timeout_secs)
+        try:
+            return fn()
+        except TaskAbandoned as e:
+            print(f"[maintenance] {e}")
+            return {"abandoned": True}
+        finally:
+            clear_deadline()
+
+    future = _task_executor.submit(_runner)
     try:
         return future.result(timeout=timeout_secs)
     except concurrent.futures.TimeoutError:
-        print(f"[maintenance] {task_name} exceeded {timeout_secs}s — abandoning for this cycle (may still be running in the background)")
+        print(f"[maintenance] {task_name} exceeded {timeout_secs}s — abandoning for this "
+              f"cycle; it will stop at its next model call or loop step")
         return {"timeout": True, "timeout_secs": timeout_secs}
     except Exception as e:
         print(f"[maintenance] {task_name} raised: {e!r} — continuing with the rest of the cycle")
@@ -142,6 +157,7 @@ def task_re_embed() -> dict:
                 rows = cur.fetchall()
 
             for row in rows:
+                abort_if_expired("re_embed row")
                 try:
                     vec = _embed((row["body"] or "")[:2000])
                     vec_str = "[" + ",".join(str(v) for v in vec) + "]"
@@ -1522,6 +1538,7 @@ def task_asset_summary() -> dict:
         graph_conn = _conn()
         try:
             for asset in assets:
+                abort_if_expired("asset_summary asset")
                 ref = f"personal.asset:{asset['id']}"
 
                 fresh_rows = _cypher(
@@ -1608,6 +1625,7 @@ def _derive_asset_summary(name: str, asset_type: str, facts: dict) -> str | None
         f"this {asset_type} asset named '{name}' using ONLY these known facts — "
         f"do not add anything not listed:\n{facts_text}"
     )
+    abort_if_expired("asset summary generate")
     try:
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
@@ -2252,6 +2270,7 @@ def task_appointment_digest() -> dict:
         print(f"[maintenance] appointment_digest: {len(events)} events → {len(batches)} batches")
 
         for i, batch in enumerate(batches):
+            abort_if_expired(f"appointment_digest batch {i + 1}")
             events_text  = _format_events_for_prompt(batch)
             window_blocks = _build_window_blocks(today)
             prompt = _DIGEST_PROMPT.format(

@@ -4,6 +4,7 @@ import re
 import requests
 
 from .llm_caller import caller_headers
+from .task_deadline import abort_if_expired
 
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 _OPEN_ANSWER_TAG_RE = re.compile(r"<answer>(.*)", re.DOTALL | re.IGNORECASE)
@@ -39,6 +40,8 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 
 def embed(text: str) -> list[float]:
+    # An abandoned maintenance task must not keep spending GPU time.
+    abort_if_expired("embed")
     resp = requests.post(
         f"{OLLAMA_URL}/api/embeddings",
         json={"model": EMBED_MODEL, "prompt": text[:4000]},
@@ -67,6 +70,7 @@ def generate(prompt: str, system: str | None = None, model: str | None = None,
     # 8192-token reasoning generations (qwen3.6) can run well past 300s under
     # GPU contention from the linker maintenance task — 480s gives headroom
     # while dashboard's own timeout (500s) still exceeds this one.
+    abort_if_expired(f"generate ({purpose})")
     resp = requests.post(f"{OLLAMA_URL}/api/generate", json=payload,
                          headers=caller_headers(purpose), timeout=480)
     resp.raise_for_status()
