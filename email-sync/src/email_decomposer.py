@@ -21,6 +21,7 @@ import requests as req
 
 from .llm_caller import caller_headers
 from .ingest_client import inference_busy
+from .audience import resolve_audience
 
 from datetime import datetime, timezone, date, timedelta
 
@@ -1210,6 +1211,27 @@ def _enrich_asset_from_confirmed(cur, asset_id: int, confirmed_item: dict,
         print(f"[decompose] asset enrichment failed for asset {asset_id}: {e}")
 
 
+# Titles that describe a job arising from an event rather than the event: they
+# share nearly every word with it, so token-overlap dedup happily collapsed the
+# two and kept the wrong one.
+# Note the bracket form is matched without a trailing \b: there is no word
+# boundary between "]" and the space in "[URGENT] Return ...", so requiring one
+# silently excluded the very titles this exists to catch.
+_ACTION_TITLE_SQL = (
+    r'^\s*(?:\[?urgent\]?[:\s]|'
+    r'(?:volunteer|return|sign|submit|confirm|book|pay|renew|rsvp|register|'
+    r'bring|order|collect|drop off|pick up|send|complete|review|check|'
+    r'arrange|organise|organize)\b)'
+)
+_ACTION_TITLE = re.compile(_ACTION_TITLE_SQL, re.I)
+
+# Postgres regex is not Python's: \b there means a backspace character, not a
+# word boundary — the word boundary is \y. Passing the Python pattern to
+# Postgres silently matched nothing, so the exclusion below did nothing and a
+# volunteer task still superseded the event it was about.
+_ACTION_TITLE_PG = _ACTION_TITLE_SQL.replace(r"\b", r"\y")
+
+
 def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int) -> int | None:
     """Does an existing event already describe the same real-world thing?
 
@@ -1229,6 +1251,15 @@ def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int)
     tokens = list(dict.fromkeys(re.findall(r'[a-z0-9]{4,}', title.lower())))
     if not tokens:
         return None
+    # A thing to DO about an event is not the event. "Volunteer for Spooky
+    # Disco" and "Return Spooky Disco permission slip" share almost every
+    # token with "Spooky Disco", and one of them superseded the disco itself —
+    # leaving the jobs on the calendar and not the thing they are about.
+    # Compare like with like. A job arising from an event shares nearly every
+    # word with it, so collapsing across the two kept the task and buried the
+    # event; but two tasks for the same job should still collapse together.
+    is_action = bool(_ACTION_TITLE.search(title))
+    kind_clause = ("title ~* %(action)s" if is_action else "title !~* %(action)s")
     need = max(2, len(tokens) - 1) if len(tokens) >= 2 else 1
     cur.execute(
         """
@@ -1236,12 +1267,14 @@ def _find_similar_existing_event(cur, title: str, effective_dt, exclude_id: int)
         WHERE id != %(exclude_id)s
           AND effective_date = %(eff)s
           AND status NOT IN ('cancelled', 'superseded')
+          AND """ + kind_clause + """
           AND (SELECT count(*) FROM unnest(%(toks)s::text[]) t
                WHERE position(t IN lower(title)) > 0) >= %(need)s
         ORDER BY created_at ASC
         LIMIT 1
         """,
-        {"exclude_id": exclude_id, "eff": effective_dt, "toks": tokens, "need": need},
+        {"exclude_id": exclude_id, "eff": effective_dt, "toks": tokens,
+         "need": need, "action": _ACTION_TITLE_PG},
     )
     row = cur.fetchone()
     return row["id"] if row else None
@@ -1503,6 +1536,44 @@ def _ground_event_date(item: dict, body: str) -> None:
                 item["time"] = f"{h:02d}:{mi:02d}"
 
 
+_FORWARD_NOISE = re.compile(r'^\s*((fw|fwd|re)\s*:\s*)+', re.I)
+
+
+def _clean_event_title(title: str) -> str:
+    """Strip forwarding noise. "Fw: Spooky Disco permission slip" is not a title."""
+    cleaned = _FORWARD_NOISE.sub("", title or "").strip()
+    return re.sub(r"\s{2,}", " ", cleaned) or (title or "").strip()
+
+
+def _sender_names(email_meta: dict | None) -> tuple[str, ...]:
+    """First names and the local part of the sender, for exclusion."""
+    meta = email_meta or {}
+    parts: list[str] = []
+    for value in (meta.get("from_name"), meta.get("from_address")):
+        if not value:
+            continue
+        local = str(value).split("@")[0]
+        parts.extend(re.split(r"[.\s_\-]+", local))
+    return tuple(p for p in parts if len(p) > 2)
+
+
+def _is_sender_person(person_id: int, sender_names: tuple[str, ...]) -> bool:
+    """Is this person only here because they sent the email?"""
+    if not sender_names:
+        return False
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM personal.person WHERE id = %s", (person_id,))
+                row = cur.fetchone()
+        if not row:
+            return False
+        first = (row["name"] or "").split()[0].lower()
+        return bool(first) and first in {n.lower() for n in sender_names}
+    except Exception:
+        return False
+
+
 def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              ingestor_url: str, received_date: str = "",
                              title_to_event_id: dict | None = None,
@@ -1511,7 +1582,7 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                              email_body: str = "") -> int | None:
     """Create a calendar event. Returns the new event id, or None on failure."""
     from .db import upsert_event
-    title    = item.get("title", "")
+    title    = _clean_event_title(item.get("title", ""))
     detail   = item.get("detail", "")
     date_str = item.get("date")
     time_str = item.get("time")
@@ -1543,7 +1614,47 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         cal_id = f"decompose:{email_id}:{re.sub(r'[^a-z0-9]', '', title.lower()[:30])}:{date_str}"
 
         # Build notes with LLM detail + source provenance footer
-        notes_parts = [detail[:500]] if detail else []
+        # Who this is about, most specific signal first: a named child, else a
+        # class/year, else the whole school. Resolved BEFORE the write, because
+        # the title and notes are part of what gets written — doing it
+        # afterwards left "Primary Campus Spooky Disco" attributed to the
+        # school itself, as though Varsity College were attending.
+        sender_names = _sender_names(email_meta)
+        # The body matters here: a school notice's title is often just
+        # "Primary Campus Spooky Disco", and the school is named further down.
+        # Deliberately excludes the model's `detail`: it is a paraphrase that
+        # differs on every run, and when it happened to name a child the
+        # whole-school notice flipped from "both children" to one of them —
+        # twice, to different children. Who an event concerns is a fact about
+        # the email, so read the email.
+        # The whole body, not a slice: school notices name the school in the
+        # footer, past any reasonable prefix, and a 2000-character window
+        # missed it — so a whole-school notice looked like nobody's and fell
+        # through to being pinned on one child by routine inheritance.
+        audience_text = "\n".join([title, (email_body or "")[:20000]])
+        audience = resolve_audience(audience_text, exclude_names=sender_names)
+        audience_note = ""
+        people = audience["person_ids"]
+        if len(people) == 1:
+            audience_person_id = people[0]
+        elif len(people) > 1:
+            # More than one child is covered, whether the notice named their
+            # classes or just the school. Pinning it on the first of them was
+            # how a whole-school disco became Olivia's (and, on another run,
+            # Elliana's), so name them all and attribute it to neither.
+            audience_person_id = None
+            who = " & ".join(audience["names"])
+            if who and who.lower() not in title.lower():
+                title = f"{who} {title}"
+            audience_note = f"Applies to: {', '.join(audience['names'])}"
+        else:
+            audience_person_id = _resolve_person_id(f"{title} {detail}")
+            # Don't let the sender become the subject of their own forward.
+            if audience_person_id and _is_sender_person(audience_person_id, sender_names):
+                audience_person_id = None
+
+        notes_parts = [audience_note] if audience_note else []
+        notes_parts += [detail[:500]] if detail else []
         if email_meta:
             src_lines = []
             if email_meta.get("account_email"):
@@ -1598,8 +1709,9 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         # Stage 2: set provenance/status and attempt slot override
         event_type   = item.get("event_type", "inferred").upper()
 
-        # Resolve person from title + detail
-        person_id = _resolve_person_id(f"{title} {detail}")
+        # Audience was resolved before the write (see above), so the title and
+        # notes already carry it.
+        person_id = audience_person_id
 
         # Resolve routine asset by name/synonym match — the only other route to
         # this (slot_key override in _supersede_placeholder below) requires
@@ -1611,7 +1723,13 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         # says nothing about who's attending) inherits one from the routine —
         # every event should trace back to a person/entity/property, not float
         # unattached.
-        person_id = person_id or routine_person_id
+        #
+        # Except at entity level: a school-wide notice deliberately belongs to
+        # no single child, and inheriting one from a matched routine quietly
+        # re-pinned the whole-school disco onto Olivia, which is the thing the
+        # audience resolution exists to prevent.
+        if len(audience["person_ids"]) < 2:
+            person_id = person_id or routine_person_id
 
         # Classify incoming event
         from .slot_classify import classify as _classify_slot
@@ -1629,6 +1747,14 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
             print(f"[decompose] '{title[:40]}' looks advertised, not booked — routing to Tentative")
         else:
             ev_status, susp_reason = "confirmed", None
+        # When the audience resolved, it is authoritative: overwrite rather
+        # than COALESCE, and correct the title too. upsert_event matches an
+        # existing row by calendar_event_id and leaves its title and person
+        # alone, so without this a row written before the audience was
+        # understood keeps its wrong attribution through every re-run — the
+        # school disco stayed pinned on "Varsity College" no matter how many
+        # times it was re-decomposed.
+        audience_resolved = audience["level"] is not None
         cur.execute("""
             UPDATE personal.event
             SET provenance      = 'email',
@@ -1638,12 +1764,15 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
                 slot_class      = %s,
                 blocks_person   = %s,
                 precedence_rank = %s,
-                person_id       = COALESCE(person_id, %s),
+                person_id       = CASE WHEN %s THEN %s ELSE COALESCE(person_id, %s) END,
                 asset_id        = COALESCE(asset_id, %s),
-                occurrence_date = %s
+                occurrence_date = %s,
+                title           = %s,
+                notes           = %s
             WHERE id = %s
         """, (ev_status, susp_reason, slot_key, slot_class, blocks_person, rank,
-              person_id, routine_asset_id, effective_dt, event_id))
+              audience_resolved, person_id, person_id,
+              routine_asset_id, effective_dt, title, notes, event_id))
         if routine_asset_id:
             print(f"[decompose] linked event {event_id} ({title[:40]!r}) to routine asset {routine_asset_id}")
 
