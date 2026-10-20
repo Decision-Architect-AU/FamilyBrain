@@ -92,6 +92,12 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
     r'ignitionapp\.com|'
     # Hospitals / specialists — appointment letters and admission paperwork
     r'ramsayhealth|pindara|healthscope|mater\.org\.au|drneilsmith|'
+    # Children's hospital and medical imaging
+    r'childrens\.health\.qld|health\.qld\.gov\.au|qscan|qld\.imaging|'
+    # The school's own platform. Everything it sends is school business, and
+    # its subjects carry no transactional keyword ("Primary Campus Spooky
+    # Disco"), so without this they fell to the LLM and were skipped.
+    r'compass\.email|compass\.education|ymcaqueensland|'
     r'sammygordonsschoolofproperty\.com\.au)',   # property education — Q&A session reminders carry real dates/times
     re.I,
 )
@@ -138,6 +144,16 @@ _INGEST_SUBJECT_KW = re.compile(
     # School / kids
     r'compass|excursion|permission slip|report card|uniform|'
     r'tuckshop|term dates|'
+    # School social events: a date, a venue, often a ticket, and nothing that
+    # looks transactional. "Spooky Disco" matched nothing and was skipped
+    # three times over.
+    r'disco|fete|fair day|mufti|free dress|dress up|dress-up|book week|'
+    r'athletics|swimming carnival|sports carnival|assembly|incursion|'
+    r'save the date|parent teacher interviews?|graduation|'
+    # Imaging and procedures, which "appointment" alone does not cover.
+    # Deliberately not bare "scan": that matches scanners and "scan this
+    # document", which is most of a household's mail about documents.
+    r'mri|ct scan|ultrasound|x-ray|xray|medical imaging|'
     # School / kids — extracurricular (music, sport, performances) — these
     # carry real calendar events (dates, venues, group/team assignments) and
     # were previously falling through to the ambiguous LLM triage step, which

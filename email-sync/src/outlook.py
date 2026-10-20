@@ -161,7 +161,7 @@ def _parse_address(addr_obj: dict) -> tuple[str, str]:
 _ATTACHMENT_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".pdf")
 
 
-def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> str:
+def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> tuple[str, bool]:
     """
     Fetch image/PDF attachments via Graph and OCR them through the
     ingestor's existing /ingest/extract endpoint. Previously attachments
@@ -185,9 +185,12 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
         items = resp.json().get("value", [])
     except Exception as e:
         print(f"[outlook] attachment list failed for {msg_id}: {e}")
-        return ""
+        # Couldn't even list them: report failure so the caller defers rather
+        # than judging the email without its contents.
+        return "", False
 
     blocks = []
+    failed = False
     for att in items:
         filename = att.get("name") or ""
         content_b64 = att.get("contentBytes")
@@ -203,9 +206,17 @@ def _extract_attachments_text(account: dict, msg_id: str, ingestor_url: str) -> 
                 text = r.json().get("text", "").strip()
                 if text:
                     blocks.append(f"--- Attachment: {filename} ---\n{text}")
+            else:
+                failed = True
+                print(f"[outlook] attachment extract rejected for {filename!r}: "
+                      f"{r.status_code} {r.text[:120]}")
         except Exception as e:
+            failed = True
             print(f"[outlook] attachment extract failed for {filename!r}: {e}")
-    return "\n\n".join(blocks)
+    # `ok` is False when any attachment couldn't be read, which is NOT the same
+    # as an attachment with no text in it. The caller must defer rather than
+    # triage an email on the fragment that's left.
+    return "\n\n".join(blocks), not failed
 
 
 # Fields every inbox fetch needs — the delta cursor bakes this projection in,
@@ -353,12 +364,22 @@ def _process_message(account: dict, msg: dict, ingestor_url: str) -> str:
     if not body_text.strip():
         body_text = msg.get("bodyPreview", "")
 
+    subject = msg.get("subject") or "(no subject)"
+
     if msg.get("hasAttachments"):
-        attachment_text = _extract_attachments_text(account, msg_id, ingestor_url)
+        attachment_text, extract_ok = _extract_attachments_text(account, msg_id, ingestor_url)
         if attachment_text:
             body_text = f"{body_text}\n\n{attachment_text}"
-
-    subject = msg.get("subject") or "(no subject)"
+        elif not extract_ok:
+            # The attachment IS the email — a photographed appointment letter
+            # with an empty body. Judging it on the subject alone is how an
+            # MRI booking became "Olivia mri" and got skipped for good. Leave
+            # it for the retry pass, which re-fetches and re-extracts.
+            print(f"[outlook] couldn't read attachments for '{subject[:40]}' — "
+                  f"deferring rather than triaging without them")
+            db.mark_pending(account_id, msg_id, from_addr, subject,
+                            msg.get("receivedDateTime"), "attachment text unavailable")
+            return "deferred"
 
     # Skip locally if still no body — avoids ingestor round-trip rejection
     if not body_text.strip():

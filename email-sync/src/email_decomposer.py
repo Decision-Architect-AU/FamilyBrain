@@ -13,6 +13,7 @@ Financial processor still handles structured attachments (PDFs, invoices).
 import json
 import os
 import re
+from functools import lru_cache
 import traceback
 import psycopg2
 import psycopg2.extras
@@ -107,6 +108,60 @@ Body: {body}
 Answer:"""
 
 
+@lru_cache(maxsize=1)
+def _household_addresses() -> frozenset[str]:
+    """Our own connected inboxes."""
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT lower(email_address) AS a FROM personal.email_account")
+                return frozenset(r["a"] for r in cur.fetchall() if r["a"])
+    except Exception:
+        return frozenset()
+
+
+# A date, a weekday or a month. Note the explicit suffixes rather than a
+# trailing wildcard: "mar[a-z]*" matched "married", so a law firm's newsletter
+# about marriage counted as dated and skipped the gate.
+_HAS_A_DATE = re.compile(
+    r'\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b'
+    r'|\b\d{1,2}(?:st|nd|rd|th)\b'
+    r'|\b(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?:day)?\b'
+    r'|\b(?:jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)'
+    r'(?:uary|ruary|ch|il|e|y|ust|tember|ober|ember)?\b'
+    r'|\bmay\b', re.I)
+
+# Words that make a dated email a thing to put in a calendar rather than prose
+# that happens to mention a day.
+_EVENTISH = re.compile(
+    r'\b(disco|excursion|incursion|permission|assembly|carnival|fete|parade|'
+    r'graduation|appointment|booking|booked|rehearsal|recital|concert|'
+    r'mri|ultrasound|x-ray|scan|surgery|admission|photo day|book week|'
+    r'due|deadline|invoice|statement|rent|settlement|vacate)\b', re.I)
+
+
+def _must_extract(subject: str, body: str, from_address: str) -> str | None:
+    """Reasons to extract without asking the gate. Returns the reason, or None."""
+    sender = (from_address or "").lower().strip()
+    if sender and sender in _household_addresses():
+        # We don't email ourselves for fun. A self-sent message is a deliberate
+        # act — usually a photographed letter or a note meant for FamilyBrain —
+        # so it is never judged on its subject, which is typically three words
+        # ("Olivia mri"). This is the case the gate is worst at and the one
+        # where being wrong costs the most.
+        return "from our own inbox"
+    if _HAS_A_DATE.search(subject or ""):
+        return "a date in the subject"
+    # The date is usually in the body, not the subject: "Primary Campus Spooky
+    # Disco" says nothing, while its body says "Thursday 22 October". A date
+    # plus a word like "disco" or "appointment" is a calendar entry, and the
+    # gate said otherwise for exactly these.
+    text = f"{subject or ''}\n{(body or '')[:2000]}"
+    if _HAS_A_DATE.search(text) and _EVENTISH.search(text):
+        return "a date and an event word"
+    return None
+
+
 def _worth_extracting(subject: str, body: str, from_address: str) -> bool:
     """Cheap gate before the expensive extraction pass.
 
@@ -116,9 +171,18 @@ def _worth_extracting(subject: str, body: str, from_address: str) -> bool:
     made quarter-second triage calls wait minutes. Asking a small model one
     yes/no question first takes that cost off the GPU.
 
+    Some mail skips the question entirely (see _must_extract): the gate is a
+    cost optimisation, and it has no business overruling a clear signal. It
+    answered "nothing to diarise" for "Save the date Spooky Disco" and for a
+    permission slip, which is how a school event stayed off the calendar.
+
     Raises DecomposeUnavailable if the gate itself can't run, so the email
     stays queued rather than being dropped on an outage.
     """
+    bypass = _must_extract(subject, body, from_address)
+    if bypass:
+        print(f"[decompose] extracting '{subject[:44]}' without the gate — {bypass}")
+        return True
     try:
         resp = req.post(
             f"{OLLAMA_URL}/api/generate",
@@ -1355,6 +1419,38 @@ def _explicit_day_refs(text: str) -> list[tuple[int, int | None, tuple[int, int]
     return refs
 
 
+def _correct_hallucinated_year(item: dict, body: str, anchor: str) -> None:
+    """Pull a wildly-past date forward when the text never stated a year.
+
+    School notices say "Thursday 22 October" and leave the year implied. With
+    a weak anchor the model has filled in years as far back as 2020, putting a
+    live event six years in the past where nothing will ever show it.
+
+    Only acts when the body contains no 4-digit year at all — if the email
+    states one, it is right and we are not.
+    """
+    date_str = item.get("date")
+    if not date_str or re.search(r'\b(19|20)\d{2}\b', body[:4000]):
+        return
+    try:
+        parsed = date.fromisoformat(date_str)
+        anchor_date = date.fromisoformat(anchor[:10])
+    except (TypeError, ValueError):
+        return
+    if (anchor_date - parsed).days <= 180:
+        return
+    for candidate_year in (anchor_date.year, anchor_date.year + 1):
+        try:
+            shifted = parsed.replace(year=candidate_year)
+        except ValueError:
+            continue
+        if shifted >= anchor_date - timedelta(days=7):
+            print(f"[decompose] year correction: '{item.get('title', '')[:40]}' "
+                  f"{date_str} -> {shifted} (no year stated in the email)")
+            item["date"] = shifted.isoformat()
+            return
+
+
 def _ground_event_date(item: dict, body: str) -> None:
     """Correct an LLM calendar date that disagrees with a day the email states.
 
@@ -1763,7 +1859,13 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
     email_id     = email["id"]
     subject      = email["subject"] or ""
     body         = email["note_body"] or ""
-    received_at  = str(email["received_at"] or "")
+    # Every relative date in the prompt resolves against this. A forwarded
+    # email can arrive with no received_at, and an empty anchor is how
+    # "Thursday 22 October" became 22 October *2020* — the model had nothing
+    # to count from and invented a year. Fall back to when we ingested it,
+    # then to today, so the anchor is never blank.
+    received_at  = str(email.get("received_at") or email.get("ingest_at")
+                       or date.today().isoformat())
     account_id   = email["account_id"]
     provider_id  = email["provider_msg_id"] or ""
     acct         = next((a for a in accounts if a["id"] == account_id), None)
@@ -1835,6 +1937,7 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
 
             if itype == "calendar_event":
                 _ground_event_date(item, body)
+                _correct_hallucinated_year(item, body, received_at)
                 # A meeting dated before the email arrived already happened
                 # ("thanks for your time on Zoom yesterday") — it's a record,
                 # not something to put in the calendar

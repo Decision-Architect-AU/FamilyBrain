@@ -111,6 +111,37 @@ def mark_last_synced(account_id: int) -> None:
 
 # ── Message deduplication ──────────────────────────────────────────────────────
 
+def mark_pending(account_id: int, provider_msg_id: str, from_address: str,
+                 subject: str, received_at, reason: str) -> None:
+    """Record a message we deliberately haven't judged yet, for the retry pass.
+
+    Distinct from mark_skipped, which is permanent. Used when the content we
+    would judge the email on couldn't be read — an unreadable attachment is
+    not the same as an email with nothing in it, and triaging the stub throws
+    the real content away. A photographed MRI appointment letter was skipped
+    exactly this way: the OCR call failed while the ingestor was saturated, so
+    triage only ever saw the subject "Olivia mri".
+    """
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO personal.email_message
+                    (account_id, provider_msg_id, from_address, subject, received_at,
+                     ingest_status, ingest_error, ingest_at)
+                VALUES (%s, %s, %s, %s, %s, 'pending', %s, now())
+                ON CONFLICT (account_id, provider_msg_id) DO UPDATE
+                    SET ingest_status = 'pending',
+                        ingest_error  = EXCLUDED.ingest_error,
+                        ingest_at     = now()
+                    WHERE personal.email_message.ingest_status NOT IN
+                          ('ingested', 'confirmed', 'skip', 'marketing')
+                """,
+                (account_id, provider_msg_id, from_address, subject, received_at, reason),
+            )
+        c.commit()
+
+
 def mark_skipped(account_id: int, provider_msg_id: str, from_address: str,
                  subject: str, received_at, reason: str) -> None:
     """Record a skipped message so it's not re-evaluated on every sync run."""
