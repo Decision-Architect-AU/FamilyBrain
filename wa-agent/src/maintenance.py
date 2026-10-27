@@ -2463,8 +2463,12 @@ def _parse_spot_check(answer: str) -> tuple[str, str]:
         return "UNSURE", (text[-300:].strip() or "no readable verdict")
     verdict = m.group(1).upper()
     # Keep what it said after the verdict: the reasoning is the useful part.
-    detail = re.sub(r"\s{2,}", " ", text[m.end():m.end() + 300])
-    return verdict, detail.strip(" -|:\n")[:300]
+    # It lands mid-narration, so drop the leading fragment of whatever sentence
+    # the verdict interrupted and start the detail at readable prose.
+    detail = re.sub(r"\s+", " ", text[m.end():m.end() + 500])
+    detail = re.sub(r"^[^A-Za-z]*(?:because|since|as)?\s*", "", detail, flags=re.I)
+    detail = re.sub(r"\*+|#+|^\s*-\s*", "", detail).strip()
+    return verdict, detail[:300]
 
 def task_spot_check() -> dict:
     """Audit a sample of recent extractions with the deep model."""
