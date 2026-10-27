@@ -2350,6 +2350,183 @@ def task_routine_context_pack() -> dict:
 _maintenance_lock = threading.Lock()
 
 
+
+# ── Spot check: the deep model audits the small ones ─────────────────────────
+# The pipeline is a cascade of small models — a 3B gate, a 3B router, a 14B
+# extractor — and nothing checked their work. Meanwhile the 35B reasoning
+# checkpoint had never been called once in 5,686 requests.
+#
+# So it audits instead of producing: each night it re-reads a small sample of
+# what the small models extracted, against the source text they read, and
+# records where it disagrees. Findings are evidence for review, never applied
+# automatically: a second opinion does not get to rewrite a correct
+# appointment.
+DEEP_MODEL = os.environ.get("MODEL_PARSER_DEEP", "OpenVINO/Qwen3.6-35B-A3B-int4-ov")
+SPOT_CHECK_SAMPLE = int(os.environ.get("SPOT_CHECK_SAMPLE", "6"))
+SPOT_CHECK_VERDICTS = {"OK", "WRONG_DATE", "WRONG_PERSON", "NOT_AN_EVENT", "UNSURE"}
+
+_SPOT_CHECK_PROMPT = """You are auditing one calendar entry that a smaller model extracted from an email. Decide whether it is right.
+
+Today is {today}.
+
+--- the email it was taken from ---
+{source}
+--- end of email ---
+
+The entry that was created:
+  title: {title}
+  date: {date}{time}
+  type: {event_type}
+  about: {about}
+
+Check three things, using only the email above:
+1. Is this genuinely something to put on a family calendar? A receipt, a
+   statement, an advertisement or a thing that already happened is not.
+2. Is the date right? The email's own wording decides. A date the email never
+   states is wrong, however plausible.
+3. Is it about the right person? Nobody named is better than the wrong person.
+
+Think it through, then end with one line of the form shown below. These are
+worked examples of the form, about other emails — not answers about this one:
+
+<answer>OK the letter gives 19 November and the entry matches</answer>
+<answer>WRONG_DATE the email says the 21st, the entry says the 22nd</answer>
+<answer>NOT_AN_EVENT this is a receipt for a payment already made</answer>
+<answer>WRONG_PERSON the notice is about Elliana, not Olivia</answer>
+<answer>UNSURE the email does not say enough to judge</answer>
+
+Write your own line for the entry above: one of those five words, then your
+reason in your own words. Nothing after the closing tag."""
+
+
+def _spot_check_sample(conn, limit: int) -> list[dict]:
+    """Recent extractions that can still be compared with their source text."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.id, e.title, e.effective_date, e.event_type, e.notes,
+                   to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'HH24:MI') AS at_time,
+                   e.starts_at::time <> '00:00'::time AS has_time,
+                   p.name AS person_name,
+                   split_part(e.calendar_event_id, ':', 2)::bigint AS email_id
+              FROM personal.event e
+              LEFT JOIN personal.person p ON p.id = e.person_id
+             WHERE e.calendar_event_id LIKE 'decompose:%%'
+               AND e.provenance = 'email'
+               AND e.status NOT IN ('cancelled', 'superseded')
+               AND e.created_at > now() - interval '21 days'
+               AND split_part(e.calendar_event_id, ':', 2) ~ '^[0-9]+$'
+               -- not already raised, so a known finding doesn't crowd out new ones
+               AND NOT EXISTS (
+                     SELECT 1 FROM personal.audit_finding f
+                      WHERE f.entity_type = 'event' AND f.entity_id = e.id
+                        AND f.status = 'open')
+             ORDER BY random()
+             LIMIT %s
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _spot_check_source(conn, email_id: int) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT n.body FROM personal.email_message em
+                 JOIN personal.note n ON n.id = em.note_id
+                WHERE em.id = %s""",
+            (email_id,),
+        )
+        row = cur.fetchone()
+    return (row["body"] if row else "") or ""
+
+
+def _parse_spot_check(answer: str) -> tuple[str, str]:
+    """Find the verdict wherever it lands in the reply.
+
+    Positional parsing failed on every single answer: the model echoed the
+    template's own word, replying "VERDICT | WRONG_DATE | ...", so the first
+    field was literally "VERDICT" and all six audits came back UNSURE. A
+    reasoning model narrates; the verdict has to be searched for, not assumed
+    to be in slot one.
+    """
+    raw = answer or ""
+    # The prompt now carries worked examples that contain these very words, and
+    # a reasoning model quotes them back while thinking. Only the final tagged
+    # line is the verdict, so read from the last opening tag onward.
+    tail = re.split(r"<answer>", raw, flags=re.I)[-1]
+    text = re.sub(r"</?answer>", " ", tail, flags=re.I).strip()
+    found = [(m.start(), m.group(0)) for v in SPOT_CHECK_VERDICTS - {"OK"}
+             for m in re.finditer(rf"\b{v}\b", text, re.I)]
+    if found:
+        # Earliest named problem wins; its own word is not the detail.
+        pos, verdict = min(found)
+        detail = re.sub(r"\s*\|\s*", " ", (text[:pos] + " " + text[pos + len(verdict):]))
+        detail = re.sub(r"\bVERDICT\b", "", detail, flags=re.I)
+        return verdict.upper(), re.sub(r"\s{2,}", " ", detail).strip(" -|")[:300]
+    if re.search(r"\bOK\b", text, re.I):
+        return "OK", ""
+    return "UNSURE", (text[:300] or "no readable verdict")
+
+
+def task_spot_check() -> dict:
+    """Audit a sample of recent extractions with the deep model."""
+    from src.llm import generate
+
+    conn = _conn()
+    checked, agreed, raised, skipped = 0, 0, 0, 0
+    try:
+        rows = _spot_check_sample(conn, SPOT_CHECK_SAMPLE)
+        if not rows:
+            return {"checked": 0, "note": "nothing new to audit"}
+
+        for row in rows:
+            abort_if_expired("spot_check")
+            source = _spot_check_source(conn, row["email_id"])
+            if len(source.strip()) < 40:
+                skipped += 1
+                continue
+
+            prompt = _SPOT_CHECK_PROMPT.format(
+                today=date.today().isoformat(),
+                source=source[:2500],
+                title=row["title"] or "(none)",
+                date=row["effective_date"] or "(none)",
+                time=f" at {row['at_time']}" if row.get("has_time") else "",
+                event_type=row["event_type"] or "(none)",
+                about=row.get("person_name") or "nobody in particular",
+            )
+            try:
+                answer = generate(prompt, model=DEEP_MODEL, max_tokens=512,
+                                  purpose="spot-check")
+            except Exception as e:
+                print(f"[maintenance] spot_check: event {row['id']} not audited: {e}")
+                skipped += 1
+                continue
+
+            checked += 1
+            verdict, detail = _parse_spot_check(answer)
+            if verdict == "OK":
+                agreed += 1
+                continue
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.audit_finding
+                           (entity_type, entity_id, verdict, detail, model, source_email_id)
+                       VALUES ('event', %s, %s, %s, %s, %s)
+                       ON CONFLICT (entity_type, entity_id, verdict)
+                            WHERE status = 'open' DO NOTHING""",
+                    (row["id"], verdict, detail, DEEP_MODEL, row["email_id"]),
+                )
+            conn.commit()
+            raised += 1
+            print(f"[maintenance] spot_check: {verdict} on event {row['id']} "
+                  f"'{(row['title'] or '')[:40]}' — {detail}")
+    finally:
+        conn.close()
+    return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
+
+
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
     Run maintenance tasks in order. Pass task names to run a subset.
@@ -2390,7 +2567,7 @@ NIGHTLY_ONLY_TASKS = {
     t.strip() for t in os.environ.get(
         "MAINTENANCE_NIGHTLY_TASKS",
         "re_embed,audit_concepts,asset_summary,appointment_digest,"
-        "routine_context_pack,review_query_flags,query_flags_report",
+        "routine_context_pack,review_query_flags,query_flags_report,spot_check",
     ).split(",") if t.strip()
 }
 
@@ -2427,6 +2604,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "routine_context_pack", "notify_provider_conflicts",
         "asset_summary",
         "review_query_flags", "query_flags_report",
+        "spot_check",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -2636,6 +2814,18 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         else:
             results["query_flags_report"] = {"skipped": "throttled"}
             print("[maintenance] query_flags_report skipped (throttled)")
+
+    if "spot_check" in all_tasks:
+        # Daily is plenty: it is a sample, not a sweep, and each call is a 35B
+        # generation that must not crowd out the family's own mail.
+        if _pg_throttle_due("spot_check", int(os.environ.get("SPOT_CHECK_INTERVAL_SECS", "72000"))):
+            results["spot_check"] = _run_with_timeout(
+                task_spot_check, int(os.environ.get("SPOT_CHECK_TIMEOUT_SECS", "1800")), "spot_check")
+            _pg_throttle_mark("spot_check")
+            print(f"[maintenance] spot_check done: {results['spot_check']}")
+        else:
+            results["spot_check"] = {"skipped": "throttled"}
+            print("[maintenance] spot_check skipped (throttled)")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")

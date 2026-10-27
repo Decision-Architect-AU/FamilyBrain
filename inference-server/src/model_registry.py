@@ -125,12 +125,25 @@ def load_registry():
 
 
 def get_generate_pipeline(model_name: str):
-    # Exact match first, then prefix match
+    """Resolve a model name to a loaded pipeline, or None.
+
+    A TAGGED name must match exactly. The old prefix match compared against
+    the family alone, so "qwen2.5:32b" — a checkpoint that is not loaded —
+    silently got served by whichever qwen2.5 pipeline came first in the dict.
+    A request for a 32B model was answered by the 3B in 0.75s, and the metrics
+    recorded the GPU time against a model that had never run. Silently
+    substituting a different size is worse than failing: the caller cannot
+    tell, and every number downstream is then fiction.
+
+    An UNTAGGED name ("qwen2.5") is still a legitimate alias for whatever
+    build of that family is loaded, so that keeps working.
+    """
     if model_name in _generate_pipelines:
         return _generate_pipelines[model_name]
-    for key in _generate_pipelines:
-        if model_name.startswith(key.split(":")[0]):
-            return _generate_pipelines[key]
+    if ":" not in model_name:
+        for key in _generate_pipelines:
+            if key.split(":")[0] == model_name:
+                return _generate_pipelines[key]
     return None
 
 

@@ -93,12 +93,12 @@ services:
       OLLAMA_URL: http://172.23.96.1:11434
       MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
       MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
-      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-OpenVINO/Qwen3.6-35B-A3B-int4-ov}
       MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EXTRACT_MODEL_QUICK:  ${MODEL_PARSER_1ST:-qwen2.5:3b}
       EXTRACT_MODEL_DEEP:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
-      EXTRACT_MODEL_DEEPER: ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      EXTRACT_MODEL_DEEPER: ${MODEL_PARSER_DEEP:-OpenVINO/Qwen3.6-35B-A3B-int4-ov}
       EXTRACT_DEEP_PASS:    ${EXTRACT_DEEP_PASS:-false}
       EXTRACT_DEEPER_PASS:  ${EXTRACT_DEEPER_PASS:-false}
       EXTRACT_CHUNK_DELAY:  ${EXTRACT_CHUNK_DELAY:-2}
@@ -150,7 +150,7 @@ services:
       OLLAMA_URL: http://172.23.96.1:11434
       MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
       MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
-      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-OpenVINO/Qwen3.6-35B-A3B-int4-ov}
       MODEL_PARSER_VOICE: ${MODEL_PARSER_VOICE:-qwen2.5:14b}
       MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
       AGENT_MODEL: ${MODEL_PARSER_2ND:-qwen2.5:14b}
@@ -285,9 +285,12 @@ services:
       OLLAMA_URL: http://172.23.96.1:11434
       MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
       MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
-      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-OpenVINO/Qwen3.6-35B-A3B-int4-ov}
       MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
-      AGENT_MODEL: ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      # Not the deep model: CrewAI builds "ollama/<AGENT_MODEL>", and the
+      # OpenVINO checkpoint's name already contains a slash, which LiteLLM
+      # would mis-split into provider and model. It needs a plain name.
+      AGENT_MODEL: ${AGENT_MODEL:-qwen2.5:14b}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       PR_CRON_TIME: ${PR_CRON_TIME:-07:00}
       PR_RUN_ON_START: ${PR_RUN_ON_START:-false}
@@ -456,7 +459,7 @@ services:
       OLLAMA_URL:     http://172.23.96.1:11434
       MODEL_PARSER_1ST:   ${MODEL_PARSER_1ST:-qwen2.5:3b}
       MODEL_PARSER_2ND:   ${MODEL_PARSER_2ND:-qwen2.5:14b}
-      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-qwen2.5:32b}
+      MODEL_PARSER_DEEP:  ${MODEL_PARSER_DEEP:-OpenVINO/Qwen3.6-35B-A3B-int4-ov}
       MODEL_PARSER_VISION: ${MODEL_PARSER_VISION:-qwen2.5:14b}
       AGENT_MODEL:    ${MODEL_PARSER_2ND:-qwen2.5:14b}
       GMAIL_INITIAL_DAYS:   ${GMAIL_INITIAL_DAYS:-730}
