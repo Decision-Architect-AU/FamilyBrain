@@ -2386,17 +2386,14 @@ Check three things, using only the email above:
    states is wrong, however plausible.
 3. Is it about the right person? Nobody named is better than the wrong person.
 
-Think it through, then end with one line of the form shown below. These are
-worked examples of the form, about other emails — not answers about this one:
+Begin your reply with the verdict, before any working. Start with exactly one
+of these five words, then a short reason:
 
-<answer>OK the letter gives 19 November and the entry matches</answer>
-<answer>WRONG_DATE the email says the 21st, the entry says the 22nd</answer>
-<answer>NOT_AN_EVENT this is a receipt for a payment already made</answer>
-<answer>WRONG_PERSON the notice is about Elliana, not Olivia</answer>
-<answer>UNSURE the email does not say enough to judge</answer>
+OK, WRONG_DATE, WRONG_PERSON, NOT_AN_EVENT, UNSURE
 
-Write your own line for the entry above: one of those five words, then your
-reason in your own words. Nothing after the closing tag."""
+So a reply starts like "WRONG_DATE - the email says the 21st, not the 22nd".
+Put the word first: this model narrates its reasoning at length and its reply
+is cut off before the end, so a verdict saved for last never arrives."""
 
 
 def _spot_check_sample(conn, limit: int) -> list[dict]:
@@ -2450,24 +2447,24 @@ def _parse_spot_check(answer: str) -> tuple[str, str]:
     reasoning model narrates; the verdict has to be searched for, not assumed
     to be in slot one.
     """
-    raw = answer or ""
-    # The prompt now carries worked examples that contain these very words, and
-    # a reasoning model quotes them back while thinking. Only the final tagged
-    # line is the verdict, so read from the last opening tag onward.
-    tail = re.split(r"<answer>", raw, flags=re.I)[-1]
-    text = re.sub(r"</?answer>", " ", tail, flags=re.I).strip()
-    found = [(m.start(), m.group(0)) for v in SPOT_CHECK_VERDICTS - {"OK"}
-             for m in re.finditer(rf"\b{v}\b", text, re.I)]
-    if found:
-        # Earliest named problem wins; its own word is not the detail.
-        pos, verdict = min(found)
-        detail = re.sub(r"\s*\|\s*", " ", (text[:pos] + " " + text[pos + len(verdict):]))
-        detail = re.sub(r"\bVERDICT\b", "", detail, flags=re.I)
-        return verdict.upper(), re.sub(r"\s{2,}", " ", detail).strip(" -|")[:300]
-    if re.search(r"\bOK\b", text, re.I):
-        return "OK", ""
-    return "UNSURE", (text[:300] or "no readable verdict")
-
+    raw = (answer or "").strip()
+    # This checkpoint narrates at length and its reply is cut off mid-sentence,
+    # so neither tags nor position can be trusted: earlier attempts read
+    # "VERDICT | one short sentence" and then "WORD reason" straight out of the
+    # instructions it was quoting back. The verdict is asked for first now, and
+    # the recited list of allowed values is scrubbed before anything is read, so
+    # a reply that recaps the choices before deciding still parses.
+    text = re.sub(r"</?answer>", " ", raw, flags=re.I)
+    words = "|".join(sorted(SPOT_CHECK_VERDICTS))
+    recital = re.compile(r"(?:\b(?:" + words + r")\b[,/]?[ \t]*(?:or[ \t]+)?){2,}", re.I)
+    text = recital.sub(" ... ", text)
+    m = re.search(r"\b(" + words + r")\b", text)
+    if not m:
+        return "UNSURE", (text[-300:].strip() or "no readable verdict")
+    verdict = m.group(1).upper()
+    # Keep what it said after the verdict: the reasoning is the useful part.
+    detail = re.sub(r"\s{2,}", " ", text[m.end():m.end() + 300])
+    return verdict, detail.strip(" -|:\n")[:300]
 
 def task_spot_check() -> dict:
     """Audit a sample of recent extractions with the deep model."""
@@ -2497,7 +2494,10 @@ def task_spot_check() -> dict:
                 about=row.get("person_name") or "nobody in particular",
             )
             try:
-                answer = generate(prompt, model=DEEP_MODEL, max_tokens=512,
+                # A small budget is pointless here: the server floors this
+                # checkpoint at 8192 tokens because it reasons regardless, and
+                # the replies still truncate. Ask high and let it think.
+                answer = generate(prompt, model=DEEP_MODEL, max_tokens=8192,
                                   purpose="spot-check")
             except Exception as e:
                 print(f"[maintenance] spot_check: event {row['id']} not audited: {e}")
