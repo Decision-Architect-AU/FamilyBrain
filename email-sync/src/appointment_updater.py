@@ -276,6 +276,60 @@ def _looks_thin(title: str) -> bool:
             and not _SPECIFIC_SIGNAL.search(title))
 
 
+def _apply_to_series(title: str, new_title: str, new_desc: str) -> int:
+    """Spend one model answer on the whole series, not on one occurrence.
+
+    A weekly routine is the same job every week: "Olivia Physio" x44, the
+    same enrichment each time. The answer was already being cached and
+    stored, so the 14B only ran once — but every other occurrence still had
+    to be recognised as thin, have its graph context looked up (an embedding
+    call) and be matched against the store, every cycle, for years.
+
+    The date is the only part that differs, and the date is not what the
+    model was asked about. So once an answer exists, code writes it across
+    the future occurrences of that series in one statement. They stop being
+    thin, which means they stop asking: the next cycle skips them entirely.
+
+    Past occurrences are left exactly as they were. Rewriting history to
+    match a title the family has already seen on the calendar helps nobody,
+    and a wrong enrichment would spread to every week that ever happened.
+    """
+    if not new_title or new_title == title:
+        return 0
+    try:
+        with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE personal.event
+                       SET title = %(new_title)s,
+                           notes = CASE
+                               WHEN %(desc)s = '' THEN notes
+                               WHEN coalesce(notes, '') = '' THEN %(desc)s
+                               WHEN position(%(desc)s IN notes) > 0 THEN notes
+                               ELSE notes || E'\n' || %(desc)s
+                           END,
+                           updated_at = now()
+                     WHERE lower(btrim(title)) = lower(btrim(%(old_title)s))
+                       AND event_type <> 'task'
+                       AND status NOT IN ('cancelled', 'superseded')
+                       AND (starts_at IS NULL OR starts_at >= now())
+                 RETURNING id
+                    """,
+                    {"new_title": new_title, "desc": (new_desc or "")[:2000],
+                     "old_title": title},
+                )
+                touched = cur.fetchall()
+            conn.commit()
+        if touched:
+            print(f"[appt] enrichment for '{title[:40]}' applied across "
+                  f"{len(touched)} future occurrence(s) without a model call")
+        return len(touched)
+    except Exception as e:
+        print(f"[appt] could not spread enrichment for '{title[:40]}': {e}")
+        return 0
+
+
 def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
     """
     If the title looks thin, attempt graph-backed LLM enrichment.
@@ -299,6 +353,7 @@ def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
     stored = _load_enrichment(title, context)
     if stored:
         _enrich_cache[key] = stored
+        _apply_to_series(title, stored[0], stored[1])
         return stored
 
     # Enrichment is a nicety, not the job. At 100% GPU this host loses its
@@ -310,6 +365,7 @@ def _try_enrich(title: str, notes: str, starts_at) -> tuple[str, str]:
 
     result = _llm_enrich(title, notes, context, starts_at)
     _enrich_cache[key] = result
+    _apply_to_series(title, result[0], result[1])
     return result
 
 
