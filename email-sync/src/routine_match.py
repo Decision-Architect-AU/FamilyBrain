@@ -43,6 +43,20 @@ _STOPWORDS = {
     "additional", "annual", "renewal", "renewals", "payment", "payments",
     "statement", "statements", "invoice", "deadline", "reminder", "holiday",
     "holidays", "term", "first", "second", "third", "extra", "update", "notice",
+    # Plan tiers and billing words. A subscription named for its tier —
+    # "Netflix Standard", "LinkedIn Premium" — owns that word only because
+    # nothing else subscribed to happens to share it, and on the strength of
+    # it the backfill offered to file a body-corporate levy under Netflix and
+    # an overdue insurance premium under LinkedIn.
+    "standard", "premium", "basic", "plus", "pro", "lite", "essential",
+    "essentials", "unlimited", "starter", "business", "personal", "family",
+    "plan", "plans", "tier", "subscription", "membership", "levy", "levies",
+    "overdue", "approved", "submission", "permission", "slip",
+    # "Return" is the identity of an annual tax return and also the verb in
+    # "Return the signed permission slip", which is how a property trust came
+    # to claim a school disco. The word cannot tell those apart, and an
+    # unlinked event costs far less than a wrong link.
+    "return", "returns", "signed",
 }
 # Shortest stem we'll match on, so "ot" or "gp" can't match half the calendar.
 _MIN_KEYWORD = 5
@@ -56,12 +70,23 @@ def _keywords(text: str) -> set[str]:
     return {w for w in words if len(w) >= _MIN_KEYWORD and w not in _STOPWORDS}
 
 
+def _as_word(needle: str) -> re.Pattern:
+    """A needle that has to start on a word boundary to count."""
+    return re.compile(r"\b" + re.escape(needle), re.I)
+
+
 def _matches(keyword: str, text: str) -> bool:
-    """Does this keyword (or its stem) appear in the text?"""
-    if keyword in text:
+    """Does this keyword (or its stem) appear in the text as a word?
+
+    Substring matching was linking events on fragments inside unrelated
+    words: the asset named "Pro" claimed "Payment approved". A keyword still
+    matches a longer word that starts with it, so "physio" finds
+    "Physiotherapy", but it can no longer appear in the middle of one.
+    """
+    if _as_word(keyword).search(text):
         return True
-    # "physiotherapy" -> "physio" so it finds "Olivia Physio"
-    return len(keyword) > _STEM_LEN and keyword[:_STEM_LEN] in text
+    return (len(keyword) > _STEM_LEN
+            and _as_word(keyword[:_STEM_LEN]).search(text) is not None)
 
 
 def link_event_to_routine(event_id: int, explain: bool = False) -> int | None:
@@ -210,7 +235,7 @@ def resolve_routine(text: str, person_id: int | None = None,
         # street name. Scored above any keyword so configuration always wins.
         for cand in [routine["name"]] + list(routine.get("synonyms") or []) + labels:
             cand_lower = (cand or "").lower().strip()
-            if len(cand_lower) > 2 and cand_lower in text_lower:
+            if len(cand_lower) > 2 and _as_word(cand_lower).search(text_lower):
                 if 1000 + len(cand_lower) > score:
                     score, why = 1000 + len(cand_lower), f"configured text {cand_lower!r}"
 

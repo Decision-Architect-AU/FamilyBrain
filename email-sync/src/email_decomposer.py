@@ -1490,6 +1490,14 @@ _RELATIVE_DATE_RE = re.compile(
     r'\b(today|tonight|tomorrow|next (?:week|month)|this (?:week|weekend)|'
     r'monday|tuesday|wednesday|thursday|friday|saturday|sunday|'
     r'in \d+ (?:days?|weeks?|months?)|\+\s*\d+\s*(?:days?|weeks?))\b', re.I)
+# A relative expression that names a day, as opposed to one that just means
+# "now". "Next Tuesday" could be the date the model produced and cannot be
+# checked from the text; "apply today" in a mailout could not.
+_POINTS_AT_A_DAY = re.compile(
+    r'\b(tomorrow|tonight|next (?:week|month|mon|tues|wednes|thurs|fri|satur|sun)'
+    r'|this (?:week|weekend|coming)|'
+    r'monday|tuesday|wednesday|thursday|friday|saturday|sunday|'
+    r'in \d+ (?:days?|weeks?|months?)|\+\s*\d+\s*(?:days?|weeks?))\b', re.I)
 _TIME_NEAR_RE = re.compile(r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b(\d{1,2}):(\d{2})\b', re.I)
 
 
@@ -1543,6 +1551,45 @@ def _correct_hallucinated_year(item: dict, body: str, anchor: str) -> None:
                   f"{date_str} -> {shifted} (no year stated in the email)")
             item["date"] = shifted.isoformat()
             return
+
+
+def _date_is_stated(item: dict, body: str) -> bool:
+    """Does the email actually say the day this entry was given?
+
+    _ground_event_date corrects a date the email contradicts, but says
+    nothing about a date the email never mentions at all — and that one goes
+    straight onto the real calendar as a confirmed appointment. It is how an
+    expired application deadline and a show nobody booked came to sit among
+    the family's real commitments: the model produced a plausible date and
+    nothing asked where it came from.
+
+    A date is taken as stated when the email names that day, when the entry
+    is anchored to something else and derived by code, or when the email
+    talks in relative terms this cannot check ("next Tuesday"). Everything
+    left is a date the model supplied on its own.
+    """
+    date_str = item.get("date")
+    if not date_str:
+        return True                  # dateless entries are judged elsewhere
+    if item.get("relative_to") or item.get("relative_offset_days"):
+        return True                  # derived by code from an anchor
+    try:
+        when = date.fromisoformat(date_str)
+    except ValueError:
+        return True
+    text = (body or "")[:6000]
+    if _POINTS_AT_A_DAY.search(text):
+        return True                  # unverifiable rather than unstated
+    for day, month, _span in _explicit_day_refs(text):
+        if day == when.day and (month is None or month == when.month):
+            return True
+    # Numeric forms a person writes, which _explicit_day_refs does not cover.
+    for form in (when.strftime("%d/%m"), f"{when.day}/{when.month}",
+                 when.isoformat(), when.strftime("%d-%m"),
+                 when.strftime("%d.%m")):
+        if form in text:
+            return True
+    return False
 
 
 def _ground_event_date(item: dict, body: str) -> None:
@@ -1806,6 +1853,16 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         if _is_unbooked_promo(title, detail, email_body or ""):
             ev_status, susp_reason = "suspended", "advertised show — no booking held"
             print(f"[decompose] '{title[:40]}' looks advertised, not booked — routing to Tentative")
+        elif not _date_is_stated(item, email_body or ""):
+            # The third destination. The gate used to be binary — a confident
+            # entry on the real calendar, or nothing — so a date the model
+            # invented was indistinguishable from one the email stated. This
+            # is the case for Tentative: keep it, mark why, and let a person
+            # decide rather than either asserting it or losing it.
+            ev_status = "suspended"
+            susp_reason = f"date {date_str} is not stated in the email"
+            print(f"[decompose] '{title[:40]}' — {date_str} not found in the "
+                  f"email, routing to Tentative")
         else:
             ev_status, susp_reason = "confirmed", None
         # When the audience resolved, it is authoritative: overwrite rather

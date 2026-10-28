@@ -323,7 +323,7 @@ export default function RadarPage() {
 
       {/* thread */}
       <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-1">
-        {!detail ? <div className="animate-pulse text-gray-500">Loading thread…</div> : (
+        {!sel ? null : !detail ? <div className="animate-pulse text-gray-500">Loading thread…</div> : (
           <div>
             <div className="border border-gray-800 rounded-lg p-4 mb-4 bg-gray-900/60">
               <div className="flex justify-between">

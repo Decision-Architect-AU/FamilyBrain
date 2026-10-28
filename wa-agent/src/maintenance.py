@@ -24,6 +24,7 @@ import os
 import json
 import time
 import re
+import hashlib
 import threading
 import concurrent.futures
 import requests
@@ -2718,6 +2719,366 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── What the auditor keeps asking for ────────────────────────────────────────
+# Each audit ends with one suggestion for the extractor, and on its own a
+# suggestion about one email is an anecdote. The same suggestion three times
+# is a bug: the small models are failing the same way on a whole class of
+# mail, and that is worth someone's afternoon.
+#
+# So the complaints are grouped by the words they share and anything said
+# three times or more is raised as its own finding. Nothing here is applied —
+# a change to how extraction works is not a change code should make to itself
+# on the strength of a model's opinion, repeated or not.
+ROLLUP_MIN_REPEATS = int(os.environ.get("ROLLUP_MIN_REPEATS", "3"))
+
+# Words every suggestion contains, which group nothing.
+_ROLLUP_NOISE = {
+    "about", "already", "always", "because", "better", "change", "concrete",
+    "could", "email", "emails", "entry", "event", "extract", "extractor",
+    "field", "fields", "information", "instead", "model", "notes", "rather",
+    "should", "source", "state", "stated", "states", "text", "their", "there",
+    "these", "those", "title", "value", "which", "while", "would",
+}
+
+
+def suggestion_patterns(conn, min_repeats: int | None = None) -> list[dict]:
+    """Complaints the auditor has made more than once, commonest first."""
+    min_repeats = min_repeats or ROLLUP_MIN_REPEATS
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, improve FROM personal.audit_finding
+                WHERE improve IS NOT NULL
+                  AND created_at > now() - interval '120 days'
+                ORDER BY created_at DESC
+                LIMIT 300"""
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    # One theme per distinctive word. Crude, but it reads well and it is
+    # obvious why a suggestion landed where it did — which matters more here
+    # than cluster quality, because a person has to act on the result.
+    by_word: dict[str, list[str]] = {}
+    for row in rows:
+        words = {w for w in re.findall(r"[a-z]{5,}", (row["improve"] or "").lower())
+                 if w not in _ROLLUP_NOISE}
+        for w in words:
+            by_word.setdefault(w, []).append(row["improve"])
+
+    themes = [{"theme": word, "count": len(texts), "examples": texts[:3]}
+              for word, texts in by_word.items() if len(texts) >= min_repeats]
+    themes.sort(key=lambda t: -t["count"])
+    return themes
+
+
+def task_audit_rollup() -> dict:
+    """Raise the complaints that have come up often enough to be a pattern."""
+    conn = _conn()
+    raised = 0
+    try:
+        themes = suggestion_patterns(conn)
+        for theme in themes[:5]:
+            # A stable id per theme so the open-finding index keeps this to
+            # one row however many nights the pattern persists.
+            entity_id = int(hashlib.sha256(theme["theme"].encode()).hexdigest()[:8], 16)
+            detail = (f"\"{theme['theme']}\" has come up in {theme['count']} audit "
+                      f"suggestions. For example: {theme['examples'][0][:200]}")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.audit_finding
+                           (entity_type, entity_id, verdict, detail, model,
+                            score, risk, improve)
+                       VALUES ('extractor', %s, 'REPEATED_SUGGESTION', %s,
+                               'audit-rollup', %s, 'high', %s)
+                       ON CONFLICT (entity_type, entity_id, verdict)
+                            WHERE status = 'open' DO NOTHING""",
+                    (entity_id, detail, min(9, 3 + theme["count"]),
+                     "the same complaint this many times is a class of mail "
+                     "the extractor handles badly, not one awkward email"),
+                )
+            conn.commit()
+            raised += 1
+            print(f"[maintenance] audit_rollup: {theme['count']}x {theme['theme']}")
+    finally:
+        conn.close()
+    return {"themes": raised}
+
+
+# ── Is anything still coming in? ─────────────────────────────────────────────
+# Shannon's Gmail stopped on 18 August with invalid_grant and nothing said a
+# word for ten weeks. The failure was recorded faithfully in
+# email_account.last_sync_error every single cycle; it just had no way out of
+# the table.
+#
+# This is worse than any extraction bug. A wrong date is visible and gets
+# complained about; a dead inbox looks exactly like a quiet one, and every
+# other part of the system is built on the assumption that the mail arrives.
+# So the one thing that must never fail silently is intake itself: when an
+# enabled account has delivered nothing for days, say so where it will be
+# seen, and keep saying it, because the fix needs the person who owns the
+# account.
+STALE_CONNECTOR_HOURS = int(os.environ.get("STALE_CONNECTOR_HOURS", "72"))
+
+
+def task_connector_health() -> dict:
+    """Report any enabled mail account that has gone quiet."""
+    # Reuse the report sender's own configuration rather than reading the
+    # environment a second time and drifting from it.
+    from src.query_flags_report import WA_BRIDGE_URL, WA_SELF_NUMBER
+
+    conn = _conn()
+    stale: list[dict] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, provider, email_address, last_synced_at,
+                          last_sync_error, last_sync_error_at,
+                          round(extract(epoch from (now() - last_synced_at)) / 3600) AS hours_quiet
+                     FROM personal.email_account
+                    WHERE enabled AND sync_email
+                      AND (last_synced_at IS NULL
+                           OR last_synced_at < now() - (%s || ' hours')::interval)
+                    ORDER BY last_synced_at NULLS FIRST""",
+                (STALE_CONNECTOR_HOURS,),
+            )
+            stale = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    if not stale:
+        return {"accounts_quiet": 0}
+
+    lines = ["⚠️ *Mail is not arriving*"]
+    for a in stale:
+        quiet = (f"{int(a['hours_quiet'] // 24)} day(s)" if a["hours_quiet"]
+                 else "never synced")
+        lines.append(f"\n• {a['email_address']} ({a['provider']}) — silent for {quiet}")
+        if a["last_sync_error"]:
+            # The reason matters: invalid_grant needs the account owner to
+            # sign in again, and no amount of retrying will fix it.
+            lines.append(f"  {str(a['last_sync_error'])[:160]}")
+    lines.append("\nNothing from these accounts is reaching the calendar.")
+    message = "\n".join(lines)
+
+    # WA_SELF_NUMBER is not configured in this deployment, so the WhatsApp
+    # send below does nothing — which is also true of the morning report that
+    # uses the same path. An alarm that depends on unconfigured plumbing is no
+    # alarm at all, so the finding is recorded first, where the review queue
+    # and the dashboard can both see it. The unique index on an open finding
+    # per entity keeps this to one row per account, however many nights it
+    # stays broken.
+    conn = _conn()
+    try:
+        with conn.cursor() as cur:
+            for a in stale:
+                quiet_days = int((a["hours_quiet"] or 0) // 24)
+                cur.execute(
+                    """INSERT INTO personal.audit_finding
+                           (entity_type, entity_id, verdict, detail, model,
+                            score, risk, confidence, improve)
+                       VALUES ('email_account', %s, 'NOT_ARRIVING', %s,
+                               'connector-health', 10, 'high', %s, %s)
+                       ON CONFLICT (entity_type, entity_id, verdict)
+                            WHERE status = 'open' DO NOTHING""",
+                    (a["id"],
+                     f"{a['email_address']} ({a['provider']}) has delivered "
+                     f"nothing for {quiet_days} day(s). "
+                     f"{str(a['last_sync_error'] or '')[:200]}",
+                     "certain — the account's own sync recorded the failure",
+                     "re-authorise this account; invalid_grant cannot be "
+                     "retried away and needs whoever owns the mailbox"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sent = False
+    if WA_SELF_NUMBER:
+        try:
+            resp = requests.post(f"{WA_BRIDGE_URL}/send",
+                                 json={"to": WA_SELF_NUMBER, "message": message},
+                                 timeout=10)
+            sent = resp.status_code == 200
+        except Exception as e:
+            print(f"[maintenance] connector_health: could not send: {e}")
+    for line in message.split("\n"):
+        if line.strip():
+            print(f"[maintenance] connector_health: {line.strip()}")
+    return {"accounts_quiet": len(stale), "notified": sent,
+            "accounts": [a["email_address"] for a in stale]}
+
+
+# ── Has the money moved? ─────────────────────────────────────────────────────
+# Rent payments changed to Friday and the calendar went on saying Tuesday for
+# months. Nothing was wrong with either half: a rule generates the schedule,
+# and the mail reports what actually happened, and no code ever compared the
+# two. A recurring payment is the one kind of event where the family's own
+# behaviour is the authority, and the rule is only a guess about it.
+#
+# So compare them. Take the weekday (or day of the month) the rule keeps
+# generating, take the dates the recent receipts and notices actually land on,
+# and when they disagree twice over, say so. The rule is never rewritten from
+# this: a drift finding is a question for a person, because "the last two
+# receipts came on a Friday" is evidence about two payments, not proof that
+# the tenancy changed.
+MONEY_SERIES = re.compile(
+    r"rent|rates|water|insurance|premium|subscription|loan|repayment|levy"
+    r"|body corporate|strata|mortgage|instal?ment", re.I)
+DRIFT_MIN_OBSERVED = 2
+
+
+def _cadence(dates: list) -> str:
+    """Weekly, monthly, or not regular enough to judge."""
+    if len(dates) < 3:
+        return "other"
+    gaps = sorted((dates[i + 1] - dates[i]).days for i in range(len(dates) - 1))
+    median = gaps[len(gaps) // 2]
+    if 6 <= median <= 8:
+        return "weekly"
+    if 13 <= median <= 16:
+        return "fortnightly"
+    if 27 <= median <= 32:
+        return "monthly"
+    return "other"
+
+
+def _modal(values: list):
+    """The commonest value, and how many of them there were."""
+    best, count = None, 0
+    for v in set(values):
+        n = values.count(v)
+        if n > count:
+            best, count = v, n
+    return best, count
+
+
+def _one_day_apart(unit: str, scheduled, seen) -> bool:
+    """Is the difference just the gap between paying and being told?
+
+    A Friday payment produces a Saturday receipt, and a payment due on the
+    1st shows up as a confirmation on the 2nd. Neither means the schedule
+    moved, so a single day either way is not drift.
+    """
+    if unit == "weekday":
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                "Friday", "Saturday", "Sunday"]
+        try:
+            gap = (days.index(str(seen)) - days.index(str(scheduled))) % 7
+        except ValueError:
+            return False
+        return gap <= 1 or gap >= 6
+    try:
+        gap = abs(int(seen) - int(scheduled))
+    except (TypeError, ValueError):
+        return False
+    return gap <= 1 or gap >= 27      # month boundaries wrap too
+
+
+def task_money_drift() -> dict:
+    """Compare generated payment schedules against what the mail reports."""
+    conn = _conn()
+    checked, raised = 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT lower(btrim(title)) AS series_key,
+                       min(title) AS title,
+                       array_agg(effective_date ORDER BY effective_date) AS dates,
+                       min(id) FILTER (WHERE effective_date >= current_date) AS next_id
+                  FROM personal.event
+                 WHERE provenance = 'rule'
+                   AND status NOT IN ('cancelled', 'superseded')
+                   AND effective_date IS NOT NULL
+                   AND effective_date BETWEEN current_date - interval '120 days'
+                                          AND current_date + interval '120 days'
+                 GROUP BY 1
+                HAVING count(*) >= 3
+                """
+            )
+            series = [dict(r) for r in cur.fetchall()]
+
+        for row in series:
+            if not MONEY_SERIES.search(row["title"] or ""):
+                continue
+            if not row["next_id"]:
+                continue        # nothing scheduled ahead: nothing to correct
+            cadence = _cadence(row["dates"])
+            if cadence == "other":
+                continue        # no pattern to drift from
+
+            # The distinctive words of the payee, so "Rent Payment Due" and
+            # "Rent due - 4 Brighton Crescent" are recognised as the same
+            # money without matching every event that says "due".
+            tokens = [t for t in re.findall(r"[a-z]{4,}", row["title"].lower())
+                      if MONEY_SERIES.search(t)]
+            if not tokens:
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT effective_date
+                      FROM personal.event
+                     WHERE provenance = 'email'
+                       AND status NOT IN ('cancelled', 'superseded')
+                       AND effective_date IS NOT NULL
+                       AND effective_date > current_date - interval '150 days'
+                       AND effective_date <= current_date + interval '14 days'
+                       AND (SELECT count(*) FROM unnest(%s::text[]) t
+                            WHERE position(t IN lower(title)) > 0) > 0
+                     ORDER BY effective_date DESC
+                     LIMIT 6
+                    """,
+                    (tokens,),
+                )
+                observed = [r["effective_date"] for r in cur.fetchall()]
+
+            if len(observed) < DRIFT_MIN_OBSERVED:
+                continue
+            checked += 1
+
+            if cadence in ("weekly", "fortnightly"):
+                unit = "weekday"
+                sched, _ = _modal([d.strftime("%A") for d in row["dates"]
+                                   if d >= date.today()])
+                seen, agree = _modal([d.strftime("%A") for d in observed])
+            else:
+                unit = "day of the month"
+                sched, _ = _modal([d.day for d in row["dates"] if d >= date.today()])
+                seen, agree = _modal([d.day for d in observed])
+
+            if sched is None or seen is None or str(sched) == str(seen):
+                continue
+            if agree * 2 <= len(observed):
+                continue        # a minority of the mail is not a new pattern
+            if _one_day_apart(unit, sched, seen):
+                continue        # a receipt the next morning is the same payment
+
+            detail = (f"the schedule keeps generating {cadence} on {unit} {sched}, "
+                      f"but {agree} of the last {len(observed)} in the mail "
+                      f"landed on {seen}")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.audit_finding
+                           (entity_type, entity_id, verdict, detail, model,
+                            score, risk, confidence, improve)
+                       VALUES ('event', %s, 'SCHEDULE_DRIFT', %s, 'rule-vs-mail',
+                               8, 'high', %s, %s)
+                       ON CONFLICT (entity_type, entity_id, verdict)
+                            WHERE status = 'open' DO NOTHING""",
+                    (row["next_id"], detail,
+                     f"{agree} of {len(observed)} recent payments agree",
+                     "check whether this payment has genuinely moved, and if "
+                     "it has, change the rule rather than the generated rows"),
+                )
+            conn.commit()
+            raised += 1
+            print(f"[maintenance] money_drift: {row['title'][:44]} — {detail}")
+    finally:
+        conn.close()
+    return {"series_checked": checked, "raised": raised}
+
+
 # ── Applying the safe repairs ────────────────────────────────────────────────
 # Some findings are a judgement call and some are just a fact the extractor
 # dropped: the hall the disco is in, the $5 at the office. The second kind can
@@ -2930,7 +3291,8 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "routine_context_pack", "notify_provider_conflicts",
         "asset_summary",
         "review_query_flags", "query_flags_report",
-        "spot_check", "apply_audit_patches",
+        "spot_check", "apply_audit_patches", "money_drift",
+        "connector_health", "audit_rollup",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -3155,6 +3517,27 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         else:
             results["spot_check"] = {"skipped": "throttled"}
             print("[maintenance] spot_check skipped (throttled)")
+
+    if "audit_rollup" in all_tasks:
+        # Cheap, and only ever as interesting as the findings behind it.
+        results["audit_rollup"] = _run_with_timeout(task_audit_rollup, 60, "audit_rollup")
+        print(f"[maintenance] audit_rollup done: {results['audit_rollup']}")
+
+    if "connector_health" in all_tasks:
+        # Throttled to once a day: a dead account is worth saying every day
+        # until it is fixed, and worth saying no more often than that.
+        if _pg_throttle_due("connector_health", 82800):
+            results["connector_health"] = _run_with_timeout(
+                task_connector_health, 60, "connector_health")
+            _pg_throttle_mark("connector_health")
+            print(f"[maintenance] connector_health done: {results['connector_health']}")
+        else:
+            results["connector_health"] = {"skipped": "throttled"}
+
+    if "money_drift" in all_tasks:
+        # No model call: two queries and a comparison.
+        results["money_drift"] = _run_with_timeout(task_money_drift, 120, "money_drift")
+        print(f"[maintenance] money_drift done: {results['money_drift']}")
 
     if "apply_audit_patches" in all_tasks:
         # No model call and no throttle: this only re-reads findings the audit

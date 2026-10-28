@@ -21,8 +21,14 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "wa-agent"))
+# Runs from the repo (scripts/../wa-agent) and from inside the wa-agent
+# container (/app), where the same code sits at a different path.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _candidate in (os.path.join(_here, "..", "wa-agent"), os.path.join(_here, ".."),
+                   "/app", _here):
+    if os.path.isfile(os.path.join(_candidate, "src", "maintenance.py")):
+        sys.path.insert(0, _candidate)
+        break
 
 from src.maintenance import _conn, task_apply_audit_patches   # noqa: E402
 
@@ -36,9 +42,10 @@ def _rows(conn, where: str, params: tuple) -> list[dict]:
                        f.risk, f.status, f.detail, f.confidence, f.alternatives,
                        f.mismatch, f.missing, f.improve, f.patch_field,
                        f.patch_value, f.applied_note, f.review_notes,
-                       f.entity_id, e.title, e.effective_date
+                       f.entity_id, f.entity_type, e.title, e.effective_date
                   FROM personal.audit_finding f
-                  LEFT JOIN personal.event e ON e.id = f.entity_id
+                  LEFT JOIN personal.event e
+                         ON e.id = f.entity_id AND f.entity_type = 'event' 
                  WHERE {where}
                  ORDER BY f.score DESC NULLS LAST, f.created_at DESC""",
             params,
@@ -53,10 +60,18 @@ def _print_summary(rows: list[dict]) -> None:
     print(f"{len(rows)} open finding(s), worst first\n")
     for r in rows:
         score = f"{r['score']}/10" if r["score"] else "unscored"
-        print(f"  [{r['id']:>4}] {score:>9}  {r['verdict']:<13} "
-              f"{(r['title'] or '(untitled)')[:44]:<44} {r['effective_date'] or ''}")
+        # Not every finding is about an event: a dead mail account has no
+        # title and no date, and saying "(untitled)" about it tells nobody
+        # anything.
+        subject = r["title"] or f"{r['entity_type']} {r['entity_id']}"
+        print(f"  [{r['id']:>4}] {score:>9}  {r['verdict']:<14} "
+              f"{subject[:44]:<44} {r['effective_date'] or ''}")
         if r["mismatch"] and r["mismatch"].lower() != "none":
             print(f"         wrong:  {r['mismatch'][:110]}")
+        elif r["detail"]:
+            # A finding that is not about an extraction — a dead mail account,
+            # a payment that has moved — carries its whole story in detail.
+            print(f"         {r['detail'][:118]}")
         if r["missing"] and r["missing"].lower() not in ("none", "nothing"):
             print(f"         absent: {r['missing'][:110]}")
         if r["patch_field"]:
@@ -105,6 +120,8 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="include settled findings")
     ap.add_argument("--suggestions", action="store_true",
                     help="just the extractor improvements, newest first")
+    ap.add_argument("--patterns", action="store_true",
+                    help="complaints the auditor has made more than once")
     ap.add_argument("--apply-safe", action="store_true",
                     help="apply the repairs that pass every gate")
     ap.add_argument("--resolve", type=int, metavar="ID")
@@ -124,6 +141,15 @@ def main() -> None:
             _settle(conn, args.dismiss, "dismissed", args.note)
         elif args.id:
             _print_one(_rows(conn, "f.id = %s", (args.id,)))
+        elif args.patterns:
+            from src.maintenance import suggestion_patterns
+            found = suggestion_patterns(conn)
+            if not found:
+                print("No complaint has come up often enough to be a pattern yet.")
+            for theme in found:
+                print(f"\n  {theme['count']}x  {theme['theme']}")
+                for example in theme["examples"]:
+                    print(f"        - {example[:100]}")
         elif args.suggestions:
             # What the auditor keeps asking for, across findings. Repeats here
             # are the useful signal: the same complaint three times is a bug in
