@@ -136,9 +136,32 @@ function reachLabel(e: any): string {
   return parts.slice(0, 2).join(' · ');
 }
 
-function FocusStrip({ onOpen }: { onOpen: (captureId: number, comment: any) => void }) {
-  const { data } = useSWR('/api/commentos/captures?view=focus', fetcher, { refreshInterval: 30000 });
-  if (!data?.length) return null;
+// When the post itself was published. Nothing stores it, but the URL does:
+// X status IDs and LinkedIn activity IDs are snowflakes whose top bits are a
+// ms timestamp. Falls back to first_seen_at (an upper bound on freshness) for
+// channels without one, e.g. blogs and review sites.
+function postedAt(c: any): number | null {
+  const url = c.post_url || '';
+  let m = url.match(/\/status\/(\d{15,})/);
+  if (m) return Number(BigInt(m[1]) >> BigInt(22)) + 1288834974657;
+  m = url.match(/activity(?::|%3A)(\d{15,})/i);
+  if (m) return Number(BigInt(m[1]) >> BigInt(22));
+  const seen = c.first_seen_at || c.captured_at;
+  return seen ? new Date(seen).getTime() : null;
+}
+
+const POST_WINDOWS: [string, number | null][] = [['2d', 2], ['7d', 7], ['30d', 30], ['Any', null]];
+
+function withinWindow(c: any, days: number | null) {
+  if (days == null) return true;
+  const t = postedAt(c);
+  return t == null || Date.now() - t < days * 86400e3;
+}
+
+function FocusStrip({ onOpen, days }: { onOpen: (captureId: number, comment: any) => void; days: number | null }) {
+  const { data: raw } = useSWR('/api/commentos/captures?view=focus', fetcher, { refreshInterval: 30000 });
+  const data = (raw || []).filter((f: any) => withinWindow(f, days));
+  if (!data.length) return null;
   return (
     <div className="mb-4">
       <div className="text-xs text-gray-500 uppercase mb-2">🎯 Highest-impact opportunities — answer these first</div>
@@ -166,10 +189,25 @@ export default function RadarPage() {
   const [replyTo, setReplyTo] = useState<any>(null);
   const [channel, setChannel] = useState<string | null>(null);
   const [newOnly, setNewOnly] = useState(false);
+  // post-date window, remembered per browser; most sessions only want the last 2 days
+  const [days, setDaysState] = useState<number | null>(2);
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem('radar.postDays');
+      if (v) setDaysState(v === 'any' ? null : Number(v));
+    } catch {}
+  }, []);
+  const setDays = (d: number | null) => {
+    setDaysState(d); setSel(null);
+    try { localStorage.setItem('radar.postDays', d == null ? 'any' : String(d)); } catch {}
+  };
   const { data: captures, mutate: mutList } = useSWR('/api/commentos/captures', fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
 
-  useEffect(() => { if (!sel && captures?.length) setSel(captures[0].id); }, [captures, sel]);
+  useEffect(() => {
+    const first = captures?.find((c: any) => withinWindow(c, days));
+    if (!sel && first) setSel(first.id);
+  }, [captures, sel, days]);
   useEffect(() => { setReplyTo(null); }, [sel]);
 
   const comments = detail?.comments || [];
@@ -205,11 +243,11 @@ export default function RadarPage() {
   };
   const isNew = (c: any) =>
     c.first_seen_at && Date.now() - new Date(c.first_seen_at).getTime() < 48 * 3600e3;
-  let shown = captures.filter((c: any) => !channel || c.platform === channel);
+  let shown = captures.filter((c: any) => (!channel || c.platform === channel) && withinWindow(c, days));
   if (newOnly)
     shown = shown.filter(isNew).sort((a: any, b: any) =>
       +new Date(b.first_seen_at) - +new Date(a.first_seen_at));
-  const newCount = captures.filter(isNew).length;
+  const newCount = captures.filter((c: any) => isNew(c) && withinWindow(c, days)).length;
   const platforms = Array.from(new Set(captures.map((c: any) => c.platform))) as string[];
   const groups: Record<string, string[]> = {};
   for (const pf of platforms) {
@@ -224,8 +262,15 @@ export default function RadarPage() {
 
   return (
     <div>
-      <FocusStrip onOpen={openFocus} />
+      <FocusStrip onOpen={openFocus} days={days} />
       <div className="flex gap-3 mb-3 items-center flex-wrap">
+        <span className="flex gap-1.5 items-center" title="when the post was published, not when we scraped it">
+          <span className="text-[10px] text-gray-600 uppercase">Posted</span>
+          {POST_WINDOWS.map(([label, d]) => (
+            <button key={label} onClick={() => setDays(d)}
+              className={`px-3 py-1 rounded-full text-xs border ${days === d ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>
+              {label}</button>))}
+        </span>
         <button onClick={() => setChannel(null)}
           className={`px-3 py-1 rounded-full text-xs border ${!channel ? 'border-cyan-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>All</button>
         <button onClick={() => setNewOnly(!newOnly)}
@@ -245,6 +290,8 @@ export default function RadarPage() {
     <div className={`grid gap-4 ${replyTo ? 'grid-cols-[280px_1fr_360px]' : 'grid-cols-[300px_1fr]'}`}>
       {/* captures list */}
       <div className="space-y-2 max-h-[calc(100vh-160px)] overflow-y-auto pr-1">
+        {!shown.length && (
+          <p className="text-xs text-gray-500 p-3">No threads posted in the last {days} days — run a scrape, or widen the window.</p>)}
         {shown.map((c: any) => (
           <button key={c.id} onClick={() => setSel(c.id)}
             className={`w-full text-left p-3 rounded-lg border ${sel === c.id ? 'border-cyan-500 bg-gray-900' : 'border-gray-800 bg-gray-900/50 hover:border-gray-600'}`}>
@@ -253,7 +300,8 @@ export default function RadarPage() {
                 {c.run_id && <span className="text-amber-400" title={`from scrape run #${c.run_id}`}> ⚡run</span>}
                 {isNew(c) &&
                   <span className="text-emerald-400 font-semibold" title={`first seen ${timeAgo(c.first_seen_at)}`}> 🆕</span>}</span>
-              <span className="flex items-center gap-2">{timeAgo(c.first_seen_at || c.captured_at)}
+              <span className="flex items-center gap-2" title={`first seen ${timeAgo(c.first_seen_at || c.captured_at)}`}>
+                posted {timeAgo(new Date(postedAt(c) || Date.now()))}
                 <span role="button" title="Delete thread" onClick={async (e) => {
                   e.stopPropagation();
                   await fetch('/api/commentos/captures', { method: 'PATCH',

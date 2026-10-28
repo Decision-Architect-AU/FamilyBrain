@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
     const rows = await q(`
       SELECT cm.id AS comment_id, cm.capture_id, cm.impact, cm.body, cm.author_name, cm.is_reply,
              c.post_author, c.platform, c.brand, c.engagement, c.impact AS thread_impact,
-             c.first_seen_at
+             c.first_seen_at, c.post_url
       FROM decision_os.co_comment cm
       JOIN decision_os.co_capture c ON c.id = cm.capture_id
       WHERE cm.triage='relevant' AND NOT cm.is_own AND c.status='active'
