@@ -54,7 +54,7 @@ def embed(text: str) -> list[float]:
 
 def generate(prompt: str, system: str | None = None, model: str | None = None,
              thinking: bool = False, max_tokens: int | None = None,
-             purpose: str = "generate") -> str:
+             purpose: str = "generate", timeout: int | None = None) -> str:
     options = {"temperature": 0.3}
     if max_tokens:
         options["num_predict"] = max_tokens
@@ -70,8 +70,15 @@ def generate(prompt: str, system: str | None = None, model: str | None = None,
     # 8192-token reasoning generations (qwen3.6) can run well past 300s under
     # GPU contention from the linker maintenance task — 480s gives headroom
     # while dashboard's own timeout (500s) still exceeds this one.
+    #
+    # The deep audit needs longer still: a full critique of one entry is
+    # 11,000 characters of reasoning and took around twelve minutes, so every
+    # call died on the 480s ceiling and the audit recorded nothing at all. A
+    # caller that knows its own work is slow passes its own timeout rather
+    # than this default being raised for everybody.
     abort_if_expired(f"generate ({purpose})")
     resp = requests.post(f"{OLLAMA_URL}/api/generate", json=payload,
-                         headers=caller_headers(purpose), timeout=480)
+                         headers=caller_headers(purpose),
+                         timeout=timeout or 480)
     resp.raise_for_status()
     return _extract_answer(resp.json()["response"].strip())

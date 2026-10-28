@@ -2362,7 +2362,10 @@ _maintenance_lock = threading.Lock()
 # automatically: a second opinion does not get to rewrite a correct
 # appointment.
 DEEP_MODEL = os.environ.get("MODEL_PARSER_DEEP", "OpenVINO/Qwen3.6-35B-A3B-int4-ov")
-SPOT_CHECK_SAMPLE = int(os.environ.get("SPOT_CHECK_SAMPLE", "6"))
+# Three is plenty. Each one is a twelve-minute reasoning generation, so six
+# was most of an hour of GPU for a sample that is meant to be a spot check.
+SPOT_CHECK_SAMPLE = int(os.environ.get("SPOT_CHECK_SAMPLE", "3"))
+SPOT_CHECK_CALL_TIMEOUT = int(os.environ.get("SPOT_CHECK_CALL_TIMEOUT", "1200"))
 SPOT_CHECK_VERDICTS = {"OK", "WRONG_DATE", "WRONG_PERSON", "NOT_AN_EVENT", "UNSURE"}
 
 _SPOT_CHECK_PROMPT = """You are auditing one calendar entry that a smaller model extracted from an email. Decide whether it is right, and say what could be better.
@@ -2378,6 +2381,7 @@ The entry that was created:
   date: {date}{time}
   type: {event_type}
   about: {about}
+  location: {location}
   notes: {notes}
 
 Judge it using only the email above:
@@ -2421,6 +2425,7 @@ def _spot_check_sample(conn, limit: int) -> list[dict]:
         cur.execute(
             """
             SELECT e.id, e.title, e.effective_date, e.event_type, e.notes,
+                   e.location,
                    to_char(e.starts_at AT TIME ZONE 'Australia/Brisbane', 'HH24:MI') AS at_time,
                    e.starts_at::time <> '00:00'::time AS has_time,
                    p.name AS person_name,
@@ -2443,6 +2448,46 @@ def _spot_check_sample(conn, limit: int) -> list[dict]:
             (limit,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _source_window(body: str, entry_date, title: str, budget: int = 2500) -> str:
+    """The part of a long email that is actually about this entry.
+
+    Short emails go through whole. For anything longer than the budget, find
+    where the email talks about the entry — the date in the forms a person
+    writes it, or words from the title — and send that neighbourhood along
+    with the opening, which usually carries the sender and subject.
+    """
+    body = body or ""
+    if len(body) <= budget:
+        return body
+
+    needles = []
+    if entry_date:
+        day, month = entry_date.day, entry_date.strftime("%B")
+        needles += [f"{day} {month}", f"{day}{_ordinal(day)} {month}",
+                    f"{month} {day}", entry_date.strftime("%d/%m"),
+                    entry_date.strftime("%-d/%-m") if os.name != "nt" else f"{day}/{entry_date.month}",
+                    entry_date.isoformat()]
+    needles += [w for w in re.findall(r"[A-Za-z]{6,}", title or "")][:4]
+
+    low = body.lower()
+    hit = next((low.find(n.lower()) for n in needles
+                if n and low.find(n.lower()) >= 0), -1)
+    head = body[:600]
+    if hit < 0:
+        # Nothing to aim at: the head plus the tail beats the head alone,
+        # since sign-offs often carry the detail a newsletter buried.
+        return head + "\n[...]\n" + body[-(budget - 700):]
+    start = max(0, hit - (budget - 900) // 2)
+    window = body[start:start + budget - 700]
+    return head + "\n[...]\n" + window if start > 600 else body[:budget]
+
+
+def _ordinal(day: int) -> str:
+    if 11 <= day <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
 
 def _spot_check_source(conn, email_id: int) -> str:
@@ -2611,12 +2656,13 @@ def task_spot_check() -> dict:
 
             prompt = _SPOT_CHECK_PROMPT.format(
                 today=date.today().isoformat(),
-                source=source[:2500],
+                source=_source_window(source, row["effective_date"], row["title"]),
                 title=row["title"] or "(none)",
                 date=row["effective_date"] or "(none)",
                 time=f" at {row['at_time']}" if row.get("has_time") else "",
                 event_type=row["event_type"] or "(none)",
                 about=row.get("person_name") or "nobody in particular",
+                location=row.get("location") or "(empty)",
                 notes=re.sub(r"\s+", " ", row.get("notes") or "")[:400] or "(none)",
             )
             try:
@@ -2624,7 +2670,8 @@ def task_spot_check() -> dict:
                 # at 8192 tokens because it reasons whether or not it is asked
                 # to, so a smaller budget buys nothing but a cut-off answer.
                 answer = generate(prompt, model=DEEP_MODEL, max_tokens=8192,
-                                  purpose="spot-check")
+                                  purpose="spot-check",
+                                  timeout=SPOT_CHECK_CALL_TIMEOUT)
             except Exception as e:
                 print(f"[maintenance] spot_check: event {row['id']} not audited: {e}")
                 skipped += 1
@@ -3099,7 +3146,10 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         # generation that must not crowd out the family's own mail.
         if _pg_throttle_due("spot_check", int(os.environ.get("SPOT_CHECK_INTERVAL_SECS", "72000"))):
             results["spot_check"] = _run_with_timeout(
-                task_spot_check, int(os.environ.get("SPOT_CHECK_TIMEOUT_SECS", "1800")), "spot_check")
+                task_spot_check,
+                int(os.environ.get("SPOT_CHECK_TIMEOUT_SECS",
+                                   str(SPOT_CHECK_SAMPLE * SPOT_CHECK_CALL_TIMEOUT + 300))),
+                "spot_check")
             _pg_throttle_mark("spot_check")
             print(f"[maintenance] spot_check done: {results['spot_check']}")
         else:
