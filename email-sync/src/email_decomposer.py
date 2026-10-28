@@ -578,6 +578,47 @@ def _create_note(cur, email_id: int, title: str, body: str,
     return row["id"] if row else None
 
 
+def _find_duplicate_task(cur, title: str, effective_date) -> dict | None:
+    """An open task that is already the same job.
+
+    Events got a duplicate check on the create side; tasks never did, so
+    re-reading an email — a retry, a re-sync, a thread that gets another
+    reply — simply made the job again. Nobody wants "Return the permission
+    slip" three times.
+
+    Tasks need their own rule rather than the event one, because most have no
+    date at all: the event check requires a matching effective_date and would
+    never fire. So match on the words, and treat a missing date as agreeing
+    with anything — which also lets a later email that names the due date
+    improve the task already sitting there instead of adding a second copy.
+    """
+    # The urgency marker is decoration, not part of the job.
+    plain = re.sub(r"^\[URGENT\]\s*", "", title or "", flags=re.I)
+    tokens = list(dict.fromkeys(re.findall(r"[a-z0-9]{4,}", plain.lower())))
+    if not tokens:
+        return None
+    need = max(2, len(tokens) - 1) if len(tokens) >= 2 else 1
+    cur.execute(
+        """
+        SELECT id, effective_date, notes
+          FROM personal.event
+         WHERE event_type = 'task'
+           AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+           AND status NOT IN ('cancelled', 'superseded')
+           AND created_at > now() - interval '180 days'
+           AND (effective_date IS NULL OR %(eff)s IS NULL
+                OR effective_date = %(eff)s)
+           AND (SELECT count(*) FROM unnest(%(toks)s::text[]) t
+                WHERE position(t IN lower(title)) > 0) >= %(need)s
+         ORDER BY created_at ASC
+         LIMIT 1
+        """,
+        {"eff": effective_date, "toks": tokens, "need": need},
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def _create_task_event(cur, email_id: int, title: str, detail: str,
                         date_str: str | None, priority: str = "normal") -> int:
     """
@@ -608,6 +649,26 @@ def _create_task_event(cur, email_id: int, title: str, detail: str,
             pass
 
     display_title = f"[URGENT] {title}" if priority == "high" else title
+
+    existing = _find_duplicate_task(cur, display_title, effective_date)
+    if existing:
+        # Already on the list. If this telling of it carries a due date the
+        # first one lacked, that is new information and worth keeping; the
+        # task itself is not created twice.
+        if effective_date and not existing["effective_date"]:
+            cur.execute(
+                """UPDATE personal.event
+                      SET effective_date = %s, starts_at = %s, updated_at = now()
+                    WHERE id = %s""",
+                (effective_date, starts_at, existing["id"]),
+            )
+            cur.connection.commit()
+            print(f"[decompose] task {existing['id']} already open — "
+                  f"added its due date {effective_date}")
+        else:
+            print(f"[decompose] task {existing['id']} already open — "
+                  f"not creating a second '{display_title[:50]}'")
+        return existing["id"]
 
     cur.execute(
         """
