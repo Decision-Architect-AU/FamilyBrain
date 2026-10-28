@@ -2365,7 +2365,7 @@ DEEP_MODEL = os.environ.get("MODEL_PARSER_DEEP", "OpenVINO/Qwen3.6-35B-A3B-int4-
 SPOT_CHECK_SAMPLE = int(os.environ.get("SPOT_CHECK_SAMPLE", "6"))
 SPOT_CHECK_VERDICTS = {"OK", "WRONG_DATE", "WRONG_PERSON", "NOT_AN_EVENT", "UNSURE"}
 
-_SPOT_CHECK_PROMPT = """You are auditing one calendar entry that a smaller model extracted from an email. Decide whether it is right.
+_SPOT_CHECK_PROMPT = """You are auditing one calendar entry that a smaller model extracted from an email. Decide whether it is right, and say what could be better.
 
 Today is {today}.
 
@@ -2378,22 +2378,41 @@ The entry that was created:
   date: {date}{time}
   type: {event_type}
   about: {about}
+  notes: {notes}
 
-Check three things, using only the email above:
+Judge it using only the email above:
 1. Is this genuinely something to put on a family calendar? A receipt, a
    statement, an advertisement or a thing that already happened is not.
 2. Is the date right? The email's own wording decides. A date the email never
    states is wrong, however plausible.
-3. Is it about the right person? Nobody named is better than the wrong person.
+3. Is it about the right person? A school or class notice that names no child
+   is still about the children who go there, and the entry is meant to name
+   them - that inference is deliberate, not an error. Call the person wrong
+   only when the email names somebody else, or names one child where the entry
+   says another.
+4. Is it complete? An entry can be correct and still leave out what the email
+   says about cost, place, what to bring, or who must attend.
 
-Begin your reply with the verdict, before any working. Start with exactly one
-of these five words, then a short reason:
+Work it through however you like, then end your reply with these six labels,
+each on its own line, each filled in with your own words:
 
-OK, WRONG_DATE, WRONG_PERSON, NOT_AN_EVENT, UNSURE
+VERDICT: one of OK, WRONG_DATE, WRONG_PERSON, NOT_AN_EVENT, UNSURE
+SCORE: 1 to 10 for how much this matters. 1 means cosmetic. 10 means somebody
+  will act on this entry and should not. A missing ticket price is about a 3; a
+  real appointment on the wrong day is a 9.
+CONFIDENCE: high, medium or low, and in a few words why that level
+ALTERNATIVES: the other verdicts you weighed, and why you rejected them
+MISMATCH: each place the entry contradicts the email, or none
+MISSING: what the email states that belongs on the entry but is absent
+IMPROVE: one concrete change to how the extractor should read this kind of email
+RISK: low, medium or high - how safe it would be to apply your PATCH below
+  without a person reading it first. Say low only for adding detail the email
+  plainly states. Anything touching a date, a person or a title is high.
+PATCH: one repair a program can make without judgement, written as
+  field = text, where field is notes or location. Copy the wording from the
+  email rather than paraphrasing it. Write none if the fix needs a person.
 
-So a reply starts like "WRONG_DATE - the email says the 21st, not the 22nd".
-Put the word first: this model narrates its reasoning at length and its reply
-is cut off before the end, so a verdict saved for last never arrives."""
+Put the labels last, after your working, and fill every one."""
 
 
 def _spot_check_sample(conn, limit: int) -> list[dict]:
@@ -2438,37 +2457,139 @@ def _spot_check_source(conn, email_id: int) -> str:
     return (row["body"] if row else "") or ""
 
 
-def _parse_spot_check(answer: str) -> tuple[str, str]:
-    """Find the verdict wherever it lands in the reply.
+_SPOT_CHECK_LABELS = ("VERDICT", "SCORE", "CONFIDENCE", "ALTERNATIVES",
+                      "MISMATCH", "MISSING", "IMPROVE", "RISK", "PATCH")
 
-    Positional parsing failed on every single answer: the model echoed the
-    template's own word, replying "VERDICT | WRONG_DATE | ...", so the first
-    field was literally "VERDICT" and all six audits came back UNSURE. A
-    reasoning model narrates; the verdict has to be searched for, not assumed
-    to be in slot one.
+# Phrases lifted from the prompt itself. A reasoning model recites the labels
+# and their descriptions while it thinks, so a section whose text is still the
+# instruction has not been answered and must not be stored as an answer.
+_SPOT_CHECK_ECHO = re.compile(
+    r"one of OK|high, medium or low|other verdicts you weighed"
+    r"|each place the entry contradicts|belongs on the entry but is absent"
+    r"|one concrete change|your own words|own its own line"
+    r"|how much this matters|how safe it would be|a program can make"
+    r"|field = text|low, medium or high",
+    re.I)
+
+
+def _spot_check_sections(answer: str) -> dict[str, str]:
+    """Pull the labelled sections out of the reply.
+
+    The labels are asked for last and read last: this model narrates at
+    length and recites the instructions while it reasons, so an early
+    VERDICT line is usually the prompt being quoted back rather than a
+    decision. Taking the final filled-in copy of each label gets the
+    conclusion it actually settled on.
     """
-    raw = (answer or "").strip()
-    # This checkpoint narrates at length and its reply is cut off mid-sentence,
-    # so neither tags nor position can be trusted: earlier attempts read
-    # "VERDICT | one short sentence" and then "WORD reason" straight out of the
-    # instructions it was quoting back. The verdict is asked for first now, and
-    # the recited list of allowed values is scrubbed before anything is read, so
-    # a reply that recaps the choices before deciding still parses.
-    text = re.sub(r"</?answer>", " ", raw, flags=re.I)
+    text = re.sub(r"</?answer>", " ", answer or "", flags=re.I)
+    # This checkpoint thinks out loud inside <think>...</think> and then
+    # answers cleanly after it. Everything before the close tag is working:
+    # it recites the labels, tries values, argues itself out of them. Read
+    # only what follows, and the labels parse exactly as asked for.
+    if "</think>" in text.lower():
+        text = re.split(r"</think>", text, flags=re.I)[-1]
+    label_re = re.compile(
+        r"^[ \t>*#-]*(" + "|".join(_SPOT_CHECK_LABELS) + r")[ \t]*\**[ \t]*:",
+        re.I | re.M)
+    hits = list(label_re.finditer(text))
+    out: dict[str, str] = {}
+    for i, m in enumerate(hits):
+        name = m.group(1).upper()
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
+        value = re.sub(r"\s+", " ", text[m.end():end]).strip(" *#-–—|:")
+        if not value or _SPOT_CHECK_ECHO.search(value):
+            continue        # still the instruction, not an answer
+        out[name] = value   # a later copy supersedes an earlier one
+    return out
+
+
+def _spot_check_verdict(text: str) -> str:
+    """Read a verdict word out of prose.
+
+    Positional parsing failed on every answer: the model echoed the
+    template's own word, replying "VERDICT | WRONG_DATE | ...", so the first
+    field was literally "VERDICT" and all six audits came back UNSURE. Then
+    it recited the list of allowed values before choosing one, so the list
+    has to be scrubbed before a word is read from what remains.
+    """
     words = "|".join(sorted(SPOT_CHECK_VERDICTS))
     recital = re.compile(r"(?:\b(?:" + words + r")\b[,/]?[ \t]*(?:or[ \t]+)?){2,}", re.I)
-    text = recital.sub(" ... ", text)
-    m = re.search(r"\b(" + words + r")\b", text)
+    m = re.search(r"\b(" + words + r")\b", recital.sub(" ... ", text or ""))
+    return m.group(1).upper() if m else ""
+
+
+def _parse_spot_check(answer: str) -> dict:
+    """Turn one audit reply into a finding.
+
+    Three and a half minutes of reasoning used to be reduced to a single
+    word. The model weighs alternatives, notices facts the extractor
+    dropped and can say what it should have done differently, so all of
+    that is kept now; the verdict is just the field that decides whether
+    anyone needs to look.
+    """
+    sections = _spot_check_sections(answer)
+    verdict = _spot_check_verdict(sections.get("VERDICT", ""))
+    if not verdict:
+        # No usable labels: fall back to reading the narration itself, which
+        # is how this worked before the labels existed.
+        verdict = _spot_check_verdict(answer) or "UNSURE"
+    detail = sections.get("MISMATCH") or sections.get("VERDICT") or ""
+    if not detail:
+        detail = re.sub(r"\s+", " ", (answer or "")[-300:]).strip()
+    patch_field, patch_value = _parse_patch(sections.get("PATCH", ""))
+    return {
+        "verdict": verdict,
+        "detail": detail[:400],
+        "score": _parse_score(sections.get("SCORE", "")),
+        "confidence": (sections.get("CONFIDENCE") or "")[:200] or None,
+        "alternatives": (sections.get("ALTERNATIVES") or "")[:600] or None,
+        "mismatch": (sections.get("MISMATCH") or "")[:600] or None,
+        "missing": (sections.get("MISSING") or "")[:600] or None,
+        "improve": (sections.get("IMPROVE") or "")[:600] or None,
+        "risk": _parse_risk(sections.get("RISK", "")),
+        "patch_field": patch_field,
+        "patch_value": patch_value,
+    }
+
+
+def _parse_score(text: str) -> int | None:
+    """The first 1-10 in the score line, or nothing.
+
+    Asking for a number does not guarantee a bare number: it writes "8/10",
+    "around 7" and "SCORE: 9 - because...". Any of those is readable; a
+    sentence with no number in it is not, and an unscored finding sorts last
+    rather than pretending to be a 1.
+    """
+    m = re.search(r"\b(10|[1-9])\b", text or "")
+    return int(m.group(1)) if m else None
+
+
+def _parse_risk(text: str) -> str | None:
+    m = re.search(r"\b(low|medium|high)\b", text or "", re.I)
+    return m.group(1).lower() if m else None
+
+
+def _parse_patch(text: str) -> tuple[str | None, str | None]:
+    """Read `field = text` out of the patch line.
+
+    Everything else about the reply is prose, so this one line is the only
+    place the audit asks for a machine-readable answer, and it is treated as
+    a suggestion to be checked rather than an instruction: the field has to
+    be one the code is willing to touch, and the text still has to survive
+    the grounding check in _safe_patch before anything is written.
+    """
+    body = re.sub(r"\s+", " ", text or "").strip()
+    if not body or re.match(r"^(none|n/?a|nothing)\b", body, re.I):
+        return None, None
+    m = re.match(r"^\**\s*([a-z_]+)\s*\**\s*[=:]\s*(.+)$", body, re.I)
     if not m:
-        return "UNSURE", (text[-300:].strip() or "no readable verdict")
-    verdict = m.group(1).upper()
-    # Keep what it said after the verdict: the reasoning is the useful part.
-    # It lands mid-narration, so drop the leading fragment of whatever sentence
-    # the verdict interrupted and start the detail at readable prose.
-    detail = re.sub(r"\s+", " ", text[m.end():m.end() + 500])
-    detail = re.sub(r"^[^A-Za-z]*(?:because|since|as)?\s*", "", detail, flags=re.I)
-    detail = re.sub(r"\*+|#+|^\s*-\s*", "", detail).strip()
-    return verdict, detail[:300]
+        return None, None
+    field = m.group(1).strip().lower()
+    value = m.group(2).strip().strip('"\'').strip()
+    if not value or re.match(r"^(none|n/?a|nothing)\b", value, re.I):
+        return None, None
+    return field, value[:400]
+
 
 def task_spot_check() -> dict:
     """Audit a sample of recent extractions with the deep model."""
@@ -2496,11 +2617,12 @@ def task_spot_check() -> dict:
                 time=f" at {row['at_time']}" if row.get("has_time") else "",
                 event_type=row["event_type"] or "(none)",
                 about=row.get("person_name") or "nobody in particular",
+                notes=re.sub(r"\s+", " ", row.get("notes") or "")[:400] or "(none)",
             )
             try:
-                # A small budget is pointless here: the server floors this
-                # checkpoint at 8192 tokens because it reasons regardless, and
-                # the replies still truncate. Ask high and let it think.
+                # Ask high and let it think. The server floors this checkpoint
+                # at 8192 tokens because it reasons whether or not it is asked
+                # to, so a smaller budget buys nothing but a cut-off answer.
                 answer = generate(prompt, model=DEEP_MODEL, max_tokens=8192,
                                   purpose="spot-check")
             except Exception as e:
@@ -2509,27 +2631,180 @@ def task_spot_check() -> dict:
                 continue
 
             checked += 1
-            verdict, detail = _parse_spot_check(answer)
+            found = _parse_spot_check(answer)
+            verdict = found["verdict"]
+            # A correct entry is still worth a row when the auditor found facts
+            # the extractor dropped, or has something to say about how it read
+            # the email. Only a clean OK with nothing to add is discarded.
+            worth_keeping = verdict != "OK" or found["missing"] or found["improve"]
             if verdict == "OK":
                 agreed += 1
+            if not worth_keeping:
                 continue
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO personal.audit_finding
-                           (entity_type, entity_id, verdict, detail, model, source_email_id)
-                       VALUES ('event', %s, %s, %s, %s, %s)
+                           (entity_type, entity_id, verdict, detail, model,
+                            source_email_id, confidence, alternatives,
+                            mismatch, missing, improve, score, risk,
+                            patch_field, patch_value)
+                       VALUES ('event', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                               %s, %s, %s, %s)
                        ON CONFLICT (entity_type, entity_id, verdict)
                             WHERE status = 'open' DO NOTHING""",
-                    (row["id"], verdict, detail, DEEP_MODEL, row["email_id"]),
+                    (row["id"], verdict, found["detail"], DEEP_MODEL,
+                     row["email_id"], found["confidence"], found["alternatives"],
+                     found["mismatch"], found["missing"], found["improve"],
+                     found["score"], found["risk"], found["patch_field"],
+                     found["patch_value"]),
                 )
             conn.commit()
-            raised += 1
-            print(f"[maintenance] spot_check: {verdict} on event {row['id']} "
-                  f"'{(row['title'] or '')[:40]}' — {detail}")
+            if verdict != "OK":
+                raised += 1
+            print(f"[maintenance] spot_check: {verdict} "
+                  f"score={found['score'] or '?'} risk={found['risk'] or '?'} "
+                  f"on event {row['id']} '{(row['title'] or '')[:40]}' "
+                  f"— {found['detail']}")
+
     finally:
         conn.close()
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
+
+# ── Applying the safe repairs ────────────────────────────────────────────────
+# Some findings are a judgement call and some are just a fact the extractor
+# dropped: the hall the disco is in, the $5 at the office. The second kind can
+# be repaired without a person retyping it — but "the model said it was safe"
+# is not a safety argument, so the auditor's own low-risk rating is the weakest
+# of the gates here, not the only one.
+#
+# A repair is applied only when all of this holds:
+#   * the auditor judged the entry itself correct (OK). A wrong date or wrong
+#     person is never patched; those need a person.
+#   * the field is one that only ever gains text: notes, or a location that is
+#     currently empty. Nothing overwrites what is already there.
+#   * every substantial word and every number in the new text appears in the
+#     source email. This is the real gate. An auditor that invents a room
+#     number cannot get it past a grep of the email it was reading.
+#
+# Anything that fails a gate stays open for review with its suggestion intact.
+PATCH_FIELDS = {"notes", "location"}
+PATCH_MAX_LEN = 240
+
+
+def _patch_is_grounded(value: str, source: str) -> bool:
+    """Is every claim in this text traceable to the email it came from?
+
+    The check is deliberately crude: long words and digit runs from the
+    proposed text must appear in the source. Crude is the point — it cannot
+    be talked around, and a model that paraphrases loses nothing it needed,
+    because a fact worth adding is a fact the email states in its own words.
+    """
+    low = (source or "").lower()
+    for number in re.findall(r"\d[\d:.,]*", value or ""):
+        if number.strip(".,") and number.strip(".,") not in low:
+            return False
+    words = [w for w in re.findall(r"[a-z]{5,}", (value or "").lower())
+             if w not in _PATCH_STOPWORDS]
+    if not words:
+        return False      # nothing checkable: not worth applying blind
+    return all(w in low for w in words)
+
+
+# Words that carry no fact, so their absence from the email proves nothing.
+_PATCH_STOPWORDS = {
+    "about", "after", "again", "along", "available", "before", "being",
+    "bring", "children", "could", "email", "entry", "event", "needs",
+    "parent", "please", "should", "their", "there", "these", "those",
+    "using", "which", "while", "would",
+}
+
+
+def _safe_patch(found: dict, source: str) -> tuple[str, str] | None:
+    """The repair this finding is allowed to make, if any."""
+    field = (found.get("patch_field") or "").strip().lower()
+    value = re.sub(r"\s+", " ", found.get("patch_value") or "").strip(" \"'")
+    if field not in PATCH_FIELDS or not value:
+        return None
+    if found.get("verdict") != "OK":
+        return None                            # a disagreement needs a person
+    if (found.get("risk") or "").lower() != "low":
+        return None
+    if len(value) > PATCH_MAX_LEN:
+        return None                            # too much to add unread
+    if not _patch_is_grounded(value, source):
+        print(f"[maintenance] spot_check: patch not grounded in the email, "
+              f"left for review: {value[:80]}")
+        return None
+    return field, value
+
+
+def task_apply_audit_patches(limit: int = 20) -> dict:
+    """Apply the findings that only add detail the source email already states."""
+    conn = _conn()
+    applied, left = 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT f.id, f.entity_id, f.verdict, f.risk, f.patch_field,
+                          f.patch_value, f.source_email_id,
+                          e.notes, e.location, e.title
+                     FROM personal.audit_finding f
+                     JOIN personal.event e ON e.id = f.entity_id
+                    WHERE f.status = 'open'
+                      AND f.entity_type = 'event'
+                      AND f.patch_field IS NOT NULL
+                      AND e.status NOT IN ('cancelled', 'superseded')
+                    ORDER BY f.created_at
+                    LIMIT %s""",
+                (limit,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        for row in rows:
+            source = _spot_check_source(conn, row["source_email_id"]) if row["source_email_id"] else ""
+            patch = _safe_patch(row, source)
+            if not patch:
+                left += 1
+                continue
+            field, value = patch
+
+            if field == "location":
+                # Only ever fills a blank. Overwriting a location is how you
+                # send somebody to the wrong place.
+                if (row["location"] or "").strip():
+                    left += 1
+                    continue
+                sql = "UPDATE personal.event SET location = %s, updated_at = now() WHERE id = %s"
+                params = (value, row["entity_id"])
+                note = f"set location to {value!r}"
+            else:
+                existing = row["notes"] or ""
+                if value.lower() in existing.lower():
+                    # Already said. Nothing to do, but the finding is settled.
+                    sql, params, note = None, None, "already present in notes"
+                else:
+                    merged = (existing.rstrip() + "\n" + value).strip()
+                    sql = "UPDATE personal.event SET notes = %s, updated_at = now() WHERE id = %s"
+                    params = (merged, row["entity_id"])
+                    note = f"appended to notes: {value!r}"
+
+            with conn.cursor() as cur:
+                if sql:
+                    cur.execute(sql, params)
+                cur.execute(
+                    """UPDATE personal.audit_finding
+                          SET status = 'applied', applied_at = now(), applied_note = %s
+                        WHERE id = %s""",
+                    (note, row["id"]),
+                )
+            conn.commit()
+            applied += 1
+            print(f"[maintenance] audit_patch: event {row['entity_id']} "
+                  f"'{(row['title'] or '')[:40]}' — {note}")
+    finally:
+        conn.close()
+    return {"applied": applied, "left_for_review": left}
 
 def run_maintenance(tasks: list[str] | None = None) -> dict:
     """
@@ -2608,7 +2883,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "routine_context_pack", "notify_provider_conflicts",
         "asset_summary",
         "review_query_flags", "query_flags_report",
-        "spot_check",
+        "spot_check", "apply_audit_patches",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -2830,6 +3105,13 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         else:
             results["spot_check"] = {"skipped": "throttled"}
             print("[maintenance] spot_check skipped (throttled)")
+
+    if "apply_audit_patches" in all_tasks:
+        # No model call and no throttle: this only re-reads findings the audit
+        # already wrote and makes the repairs that passed every gate.
+        results["apply_audit_patches"] = _run_with_timeout(
+            task_apply_audit_patches, 300, "apply_audit_patches")
+        print(f"[maintenance] apply_audit_patches done: {results['apply_audit_patches']}")
 
     results["elapsed_s"] = round(time.time() - t0, 1)
     print(f"[maintenance] Complete in {results['elapsed_s']}s")
