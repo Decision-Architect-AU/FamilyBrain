@@ -63,6 +63,7 @@ def _creds(account: dict) -> Credentials:
     return creds
 
 
+import threading
 import time as _time
 
 # Cache built API clients per (account_id, api_name) so repeated calls across the
@@ -70,8 +71,26 @@ import time as _time
 # fresh one every call. googleapiclient's build() does not close its transport on
 # GC in a timely way — leaving it uncached leaked sockets into CLOSE_WAIT under
 # sustained polling until the process ran out of usable connections and hung.
-_service_cache: dict[tuple, tuple] = {}   # (account_id, api) -> (service, cached_at)
+#
+# Per THREAD as well as per account. A googleapiclient service owns one httplib2
+# transport and one TLS connection, and httplib2 is not thread-safe: two threads
+# calling .execute() on the same service interleave writes into the same OpenSSL
+# record layer. That shows up first as "[SSL] record layer failure" and "[SSL:
+# LENGTH_MISMATCH]" on unrelated requests, and then as a segmentation fault —
+# which no try/except can catch, because the process is already gone.
+#
+# Confirmed live: the email loop and the financial loop both fetch attachments
+# through this module, and once they were allowed to run concurrently the
+# container died with exit 139 roughly every four minutes, each time preceded by
+# a burst of SSL record errors on messages that were individually fine. One
+# transport per thread costs a handful of connections and removes the race.
+_service_cache = threading.local()
 _SERVICE_CACHE_TTL_SECS = 1800   # rebuild periodically so credential refresh is picked up
+
+# Credential refresh is shared state — the token goes back to the database — so
+# it is serialised even though the transports are not. Without this, every
+# thread that starts at once refreshes the same account separately.
+_creds_lock = threading.Lock()
 
 # How often a long sync reports that it is still moving. Small enough that the
 # caller's watchdog never waits a whole poll interval for news, large enough
@@ -80,12 +99,17 @@ _PROGRESS_EVERY = 25
 
 
 def _cached_service(account: dict, api: str, version: str):
+    cache = getattr(_service_cache, "services", None)
+    if cache is None:
+        cache = _service_cache.services = {}
     key = (account["id"], api)
-    cached = _service_cache.get(key)
+    cached = cache.get(key)
     if cached and (_time.monotonic() - cached[1]) < _SERVICE_CACHE_TTL_SECS:
         return cached[0]
-    svc = build(api, version, credentials=_creds(account), cache_discovery=False)
-    _service_cache[key] = (svc, _time.monotonic())
+    with _creds_lock:
+        creds = _creds(account)
+    svc = build(api, version, credentials=creds, cache_discovery=False)
+    cache[key] = (svc, _time.monotonic())
     return svc
 
 

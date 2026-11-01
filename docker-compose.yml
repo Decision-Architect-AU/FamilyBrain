@@ -429,6 +429,12 @@ services:
       # Ingestor webhook endpoint (internal Docker network)
       INGESTOR_URL: http://ingestor:4001
 
+      # Print the C-level traceback if a native library segfaults. This service
+      # drives OpenSSL, PyMuPDF and psycopg2 from several threads; a crash in
+      # any of them kills the process with no Python traceback at all, and the
+      # only symptom is a container that restarted for no stated reason.
+      PYTHONFAULTHANDLER: "1"
+
       # wa-agent notify endpoint — used by item_review to ask the user for a
       # source email when a force-review flag can't find one automatically
       WA_AGENT_URL: http://wa-agent:4002
