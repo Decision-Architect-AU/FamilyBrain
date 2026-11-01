@@ -33,6 +33,49 @@ def _resolve_task_account(accounts: list[dict]) -> dict | None:
     )
 
 
+def _mark_done(event_id: int) -> None:
+    """Close a task here because it was disposed of in Google Tasks."""
+    with psycopg2.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.event
+                      SET task_status = 'done', updated_at = now()
+                    WHERE id = %s AND event_type = 'task'
+                      AND coalesce(task_status, 'open') <> 'done'""",
+                (event_id,),
+            )
+        conn.commit()
+
+
+def _forget_remote_task(event_id: int, account_id: int) -> None:
+    """Drop the mapping to a Google task we can no longer touch."""
+    with psycopg2.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM personal.calendar_sync_map
+                    WHERE event_id = %s AND channel = 'gtask_primary'
+                      AND source_account_id = %s""",
+                (event_id, account_id),
+            )
+        conn.commit()
+
+
+def _remote_task_gone(err: Exception) -> bool:
+    """Is this the API saying the task we mapped is not ours to patch?
+
+    Patching a task that has been deleted in Google Tasks, or that belongs to
+    a list other than the one we resolve now, comes back 403 "The caller does
+    not have permission" or 404 — while inserts into the same list keep
+    working. Either way the id we stored is dead and no amount of retrying
+    will revive it.
+    """
+    status = getattr(getattr(err, "resp", None), "status", None)
+    if status in (403, 404):
+        return True
+    text = str(err)
+    return "403" in text and "does not have permission" in text or "404" in text
+
+
 def push_outbound(accounts: list[dict]) -> int:
     """
     Push event_type='task' rows due for sync — next_update_at reached (set
@@ -47,6 +90,7 @@ def push_outbound(accounts: list[dict]) -> int:
 
     now = datetime.now(timezone.utc)
     pushed = 0
+    disposed = 0
 
     with psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
         with conn.cursor() as cur:
@@ -73,6 +117,7 @@ def push_outbound(accounts: list[dict]) -> int:
             rows = list(cur.fetchall())
 
     for row in rows:
+        done = (row.get("task_status") or "open") == "done"
         try:
             _list_id, task_id = google_tasks.push_task(
                 account, row["title"], row.get("notes") or "",
@@ -87,10 +132,36 @@ def push_outbound(accounts: list[dict]) -> int:
             )
             pushed += 1
         except Exception as e:
+            # A dead mapping retried forever. 72 failures had accumulated
+            # against the same handful of tasks, every 15 minutes, because a
+            # failed push never updates last_synced_at — so the row stays
+            # eligible and fails again, and a completion never reaches Google
+            # Tasks. "[URGENT] Pay insurance policy" was marked done here and
+            # could not be ticked off there.
+            if row["task_id"] and _remote_task_gone(e):
+                # The task we mapped is gone from Google Tasks, and the
+                # overwhelmingly likely reason is that somebody deleted it
+                # there — which is how a person says they are finished with
+                # it. pull_inbound already treats a completed remote task as
+                # done here; deletion is the same gesture, stated more firmly.
+                #
+                # The first version of this repair re-created those tasks
+                # instead, and promptly put eleven deleted items back on the
+                # list: "No action required", "Contact to stop emails", "Pay
+                # cleaning service". Undoing somebody's tidying is worse than
+                # the retry loop it was meant to fix.
+                _forget_remote_task(row["id"], account["id"])
+                _mark_done(row["id"])
+                disposed += 1
+                print(f"[task_sync] event {row['id']} ({row['title'][:40]!r}) "
+                      f"no longer exists in Google Tasks — treating it as done "
+                      f"here rather than re-creating it")
+                continue
             print(f"[task_sync] push failed for event {row['id']} ({row['title'][:40]!r}): {e}")
 
-    if pushed:
-        print(f"[task_sync] pushed {pushed} task(s) to Google Tasks")
+    if pushed or disposed:
+        print(f"[task_sync] pushed {pushed} task(s) to Google Tasks"
+              + (f", {disposed} closed as deleted there" if disposed else ""))
     return pushed
 
 
