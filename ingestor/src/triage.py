@@ -106,6 +106,10 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
 _INGEST_SUBJECT_KW = re.compile(
     r'\b('
     # Financial
+    # "Terri Scheer – Credit Note Details" was skipped: a credit note is the
+    # insurer's own record of money moving, and it is what proves a policy
+    # settled. Adjustment notes and refunds are the same kind of document.
+    r'credit note|adjustment note|refund|'
     r'invoice|receipt|statement|tax invoice|remittance|eft|bas|tax return|'
     r'payment received|payment due|overdue|balance due|direct debit|'
     r'loan|mortgage|interest rate|repayment|pre-approval|'

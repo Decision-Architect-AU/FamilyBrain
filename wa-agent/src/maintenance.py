@@ -1068,6 +1068,10 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
         expiry = _fact_anchor(rule, asset_facts)
         title = (_lease_end_title(asset_facts.get("address") or "this property", expiry)
                  if expiry else rule.get("event_label", event_type))
+    elif event_type == "POLICY_RENEWAL" and asset_facts:
+        renews = _fact_anchor(rule, asset_facts)
+        title = (_policy_renewal_title(asset_facts, renews)
+                 if renews else rule.get("event_label", event_type))
     else:
         title = rule.get("event_label", event_type)
 
@@ -1076,7 +1080,16 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
     # date it closes are the whole content, and they have to travel with the
     # entry onto whatever calendar it lands on.
     notes = None
-    if event_type == "LEASE_END" and asset_facts:
+    if event_type == "POLICY_RENEWAL" and asset_facts:
+        renews = _fact_anchor(rule, asset_facts)
+        if renews:
+            notes = (f"{asset_facts.get('plan') or 'Policy'} with "
+                     f"{asset_facts.get('provider') or 'the insurer'}, policy "
+                     f"{asset_facts.get('policy_number') or 'unknown'}, is covered to "
+                     f"{renews.isoformat()}. The premium for the next period falls due "
+                     f"around then; this entry turns green once a payment "
+                     f"confirmation naming the policy arrives.")
+    elif event_type == "LEASE_END" and asset_facts:
         expiry = _fact_anchor(rule, asset_facts)
         if expiry:
             notes = (f"The fixed term for {asset_facts.get('address') or 'this property'} "
@@ -1163,6 +1176,21 @@ def _fact_anchor(rule: dict, facts: dict) -> date | None:
         return date.fromisoformat(str(raw)[:10])
     except ValueError:
         return None
+
+
+def _policy_renewal_title(facts: dict, renews_on: date) -> str:
+    """Name the policy and the date it falls due.
+
+    "Subscription renewal due" was the old label, which does not say which of
+    eleven policies, with which insurer, for how much, or by when. The policy
+    number also has to be in the title for a later payment confirmation to
+    recognise what it settles: that number is the only thing both documents
+    share.
+    """
+    provider = facts.get("provider") or "policy"
+    number = facts.get("policy_number")
+    named = f"{provider} {number}" if number else provider
+    return f"{named} renews {renews_on.strftime('%-d %b %Y')} — premium due"
 
 
 def _lease_notice_title(asset_name: str, expiry: date) -> str:
@@ -2835,6 +2863,183 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Paid is a fact worth acting on ───────────────────────────────────────────
+# Four payment confirmations from the landlord insurer sat ingested while
+# "[URGENT] Pay insurance policy" stayed open and the renewal sat on the
+# calendar looking like something still owed. The mail said everything needed:
+# POLICY NUMBER TS4636381RBI, AMOUNT DUE $0.00, the word PAID, and the period
+# of insurance it covers.
+#
+# A payment confirmation is the one document that can safely close things,
+# because it comes from the party owed. So one arriving settles what it names:
+# the policy records that it is paid and until when, the job to pay it is
+# ticked off, and the appointment turns green.
+#
+# What it must not do is close things it does not name. The policy number is
+# the key throughout — matched against the asset that holds it, and against
+# the text of tasks and events. A confirmation for one of eleven policies has
+# no business settling the other ten, so anything that cannot be tied to the
+# number is left exactly as it was.
+_POLICY_NUMBER_RE = re.compile(
+    r"policy\s*(?:number|no\.?|#)?\s*:?\s*([A-Z]{2}\d{6,9}[A-Z]{0,4})", re.I)
+# Proof that nothing is owed. A bare "paid" is not proof: a payment REMINDER
+# says "if you have already paid, ignore this", and the first run settled an
+# unpaid policy on the strength of that word. Marking something paid when it
+# is not is the one error here that costs money, so this wants the insurer's
+# own statement of a zero balance, or a document that exists only after money
+# moved.
+_NOTHING_OWED_RE = re.compile(
+    r"amount\s*due\s*:?\s*\$?\s*0(?:\.00)?\b"
+    r"|\bpayment confirmation\b|\bcredit note\b"
+    r"|\bpayment (?:received|successful|complete(?:d)?)\b"
+    r"|\breceipt (?:number|no\.?|#)", re.I)
+
+# And proof that something IS owed, which overrides all of the above. A
+# reminder quotes the amount outstanding and the word "paid" in the same
+# breath; a confirmation never asks for money.
+_STILL_OWED_RE = re.compile(
+    r"payment reminder|please pay|remains? (?:unpaid|outstanding)|\boverdue\b"
+    r"|amount\s*due\s*:?\s*\$?\s*[1-9]"
+    r"|arrange payment|pay (?:now|by|before)", re.I)
+
+
+def _is_settled_document(subject: str, body: str) -> bool:
+    """Does this document prove the money has moved?"""
+    text = f"{subject or ''}\n{body or ''}"
+    if _STILL_OWED_RE.search(text):
+        return False
+    return bool(_NOTHING_OWED_RE.search(text))
+_PERIOD_RE = re.compile(
+    r"period of insurance\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})\s*(?:until|to|-)\s*"
+    r"(?:12:01am\s*)?(\d{1,2}/\d{1,2}/\d{4})", re.I)
+
+
+def task_settle_paid_policies(days: int = 60) -> dict:
+    """Mark policies paid, tick off their jobs, and turn their entries green."""
+    conn = _conn()
+    settled_assets, closed_tasks, greened = 0, 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT n.id AS note_id, n.body, em.received_at, em.subject
+                     FROM personal.note n
+                     JOIN personal.email_message em ON em.note_id = n.id
+                    WHERE n.created_at > now() - (%s || ' days')::interval
+                      AND n.body ~* 'policy'
+                      AND n.body ~* 'paid|amount due|credit note'
+                    ORDER BY em.received_at DESC NULLS LAST
+                    LIMIT 200""",
+                (days,),
+            )
+            notes = [dict(r) for r in cur.fetchall()]
+
+        for note in notes:
+            body = note["body"] or ""
+            if not _is_settled_document(note["subject"], body):
+                continue
+            numbers = {m.group(1).upper() for m in _POLICY_NUMBER_RE.finditer(body)}
+            if not numbers:
+                continue
+            period = _PERIOD_RE.search(body)
+            covered_to = covered_from = None
+            if period:
+                covered_from = _au_date(period.group(1))
+                covered_to = _au_date(period.group(2))
+
+            for number in numbers:
+                evidence = (f"{note['subject'] or 'payment confirmation'} "
+                            f"names policy {number} as paid"
+                            + (f", covered to {covered_to.isoformat()}" if covered_to else ""))
+
+                # The policy itself.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.asset
+                              SET facts = facts || jsonb_build_object(
+                                    'paid', 'yes',
+                                    'paid_confirmed_on', %s::text,
+                                    'paid_evidence', %s::text)
+                                  || CASE WHEN %s::text IS NULL THEN '{}'::jsonb
+                                          ELSE jsonb_build_object('covered_to', %s::text) END,
+                                  updated_at = now()
+                            WHERE upper(coalesce(facts->>'policy_number', '')) = %s
+                              AND coalesce(facts->>'paid_evidence', '') <> %s
+                              -- Never wind the coverage date backwards: these
+                              -- notes are read newest first, so an older
+                              -- confirmation must not overwrite a newer one.
+                              AND (%s::text IS NULL
+                                   OR coalesce(facts->>'covered_to', '') = ''
+                                   OR (facts->>'covered_to') <= %s::text)
+                        RETURNING id, name""",
+                        (str(note["received_at"] or date.today())[:10], evidence,
+                         covered_to.isoformat() if covered_to else None,
+                         covered_to.isoformat() if covered_to else None,
+                         number, evidence,
+                         covered_to.isoformat() if covered_to else None,
+                         covered_to.isoformat() if covered_to else None),
+                    )
+                    for row in cur.fetchall():
+                        settled_assets += 1
+                        print(f"[maintenance] settled: policy {number} on "
+                              f"{row['name'][:40]} — {evidence}")
+                conn.commit()
+
+                # The job to pay it.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.event
+                              SET task_status = 'done',
+                                  settled_at = now(),
+                                  settled_note = %s,
+                                  updated_at = now()
+                            WHERE event_type = 'task'
+                              AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+                              AND (title ILIKE %s OR coalesce(notes, '') ILIKE %s)
+                        RETURNING id, title""",
+                        (evidence, f"%{number}%", f"%{number}%"),
+                    )
+                    for row in cur.fetchall():
+                        closed_tasks += 1
+                        print(f"[maintenance] settled: ticked off task {row['id']} "
+                              f"'{row['title'][:40]}'")
+                conn.commit()
+
+                # The appointment, which the writer will repaint green because
+                # updated_at has moved past calendar_written_at.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.event
+                              SET settled_at = now(),
+                                  settled_note = %s,
+                                  updated_at = now()
+                            WHERE event_type <> 'task'
+                              AND settled_at IS NULL
+                              AND status NOT IN ('cancelled', 'superseded')
+                              AND (title ILIKE %s OR coalesce(notes, '') ILIKE %s)
+                              -- Only what this payment covered. A premium paid
+                              -- for 2026-10-02 to 2027-10-02 settles the renewal
+                              -- at the start of that period, never the one at
+                              -- the end: that is the next payment, and painting
+                              -- it green would say a bill is paid a year early.
+                              AND (%s::date IS NULL
+                                   OR effective_date IS NULL
+                                   OR effective_date <= %s::date + 31)
+                        RETURNING id, title""",
+                        (evidence, f"%{number}%", f"%{number}%",
+                         covered_from.isoformat() if covered_from else None,
+                         covered_from.isoformat() if covered_from else None),
+                    )
+                    for row in cur.fetchall():
+                        greened += 1
+                        print(f"[maintenance] settled: event {row['id']} "
+                              f"'{row['title'][:40]}' will turn green")
+                conn.commit()
+    finally:
+        conn.close()
+    return {"policies_settled": settled_assets, "tasks_ticked": closed_tasks,
+            "events_greened": greened}
+
+
 # ── What a new tenancy sets in motion ────────────────────────────────────────
 # A new lease is not one fact, it is a small pile of work: the term has to be
 # known, the rent projected across it, an entry made for the day it ends, a
@@ -3823,7 +4028,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "review_query_flags", "query_flags_report",
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
-        "learn_tenancy_dates", "new_tenancy_followup",
+        "learn_tenancy_dates", "new_tenancy_followup", "settle_paid_policies",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -4055,6 +4260,11 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         results["learn_tenancy_dates"] = _run_with_timeout(
             task_learn_tenancy_dates, 120, "learn_tenancy_dates")
         print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
+
+    if "settle_paid_policies" in all_tasks:
+        results["settle_paid_policies"] = _run_with_timeout(
+            task_settle_paid_policies, 120, "settle_paid_policies")
+        print(f"[maintenance] settle_paid_policies done: {results['settle_paid_policies']}")
 
     if "new_tenancy_followup" in all_tasks:
         # Runs after the reader, so a date learned tonight is already in the

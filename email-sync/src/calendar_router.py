@@ -52,6 +52,23 @@ _HOLIDAY_KW_TAGS = [
 # colorId: 4=Flamingo(pink), 3=Grape(purple), 2=Sage(green)
 _TAG_COLORS = {"Child1": "4", "Child2": "3", "Holiday": "2"}
 
+# Google's Basil. Deliberately not Sage ("2"), which Holiday already uses —
+# two greens that mean different things are worse than one. A settled entry
+# outranks every tag colour: whether a bill is paid matters more to the person
+# scanning the month than which child a thing belongs to, and the tag is still
+# in the title.
+SETTLED_COLOR = "10"
+
+
+def event_color(summary: str, description: str = "", route: str = "default",
+                settled: bool = False) -> tuple[str | None, str | None]:
+    """(tag, colorId) for an event, with settled winning."""
+    if settled:
+        return None, SETTLED_COLOR
+    if route == "family":
+        return tag_family_event(summary, description)
+    return None, None
+
 _BILLS_KW = [
     "invoice", "bill", "payment due", "direct debit", "statement",
     "rates", "rent", "overdue", "balance due", "tax invoice",

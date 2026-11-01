@@ -41,7 +41,7 @@ from .db import get_enabled_accounts, conn
 from .gmail import _gmail_service, _fmt_cal_dt
 from .calendar_router import (
     classify_event, target_calendar_id, tag_family_event,
-    expand_holiday_days, load_routing, _TAG_COLORS,
+    expand_holiday_days, load_routing, _TAG_COLORS, event_color,
     partner_event_involves_owner,
 )
 
@@ -1145,7 +1145,8 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 SELECT id, title, event_type, starts_at, ends_at, effective_date,
                        calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
-                       updated_at, status, suspended_reason, source_email_id, calendar_event_id
+                       updated_at, status, suspended_reason, source_email_id, calendar_event_id,
+                       settled_at
                 FROM personal.event
                 WHERE (
                     -- Obligations must NEVER take the bare "gcal_event_id IS NULL /
@@ -1343,7 +1344,10 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             else:
                 route = classify_event(title, notes, source_is_partner=source_is_partner)
             cal_id   = target_calendar_id(ac, route)
-            tag, color_id = tag_family_event(title, notes) if route == "family" else (None, None)
+            # A settled commitment is green whatever calendar it is on, so the
+            # month reads at a glance: still owed, or done.
+            tag, color_id = event_color(title, notes, route=route,
+                                        settled=bool(ev.get("settled_at")))
 
             gcal_id   = ev.get("gcal_event_id")
             stored_cal = ev.get("gcal_calendar_id")
