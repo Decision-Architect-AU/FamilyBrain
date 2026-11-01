@@ -2863,6 +2863,370 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Selling a property is a list, not an event ───────────────────────────────
+# A sale settles and then a dozen things have to be unwound, each with its own
+# counterparty and its own deadline: the mortgage discharged with the lender,
+# the property taken out of TaxTank before the next return, the landlord
+# insurance cancelled so the premium stops, rates and water adjusted at
+# settlement, the management agreement ended, and the disposal recorded for
+# capital gains. Miss the insurance and you keep paying to insure a house
+# somebody else owns.
+#
+# None of it can be done automatically — every item needs a person to contact
+# a third party — so the whole value here is in the list existing, complete,
+# with the lender, the agent and the policy numbers already filled in from
+# what the system knows. The policy register earns its keep here: it can say
+# which policies cover the property being sold.
+#
+# Only a recent change of status triggers this. A property disposed of months
+# ago has either been dealt with or has not, and a checklist raised now would
+# be archaeology.
+SALE_CHECKLIST_DAYS = int(os.environ.get("SALE_CHECKLIST_DAYS", "90"))
+
+
+# Street types, which the two sides spell differently. The property pattern
+# says "power road"; the insurer's letter says "61 Power Rd, DOVETON". Matching
+# the pattern whole therefore found no policies for Doveton at all — and on a
+# sale that reads as "nothing to cancel", which is how you keep paying to
+# insure a house somebody else owns. So the street type is dropped and the
+# distinctive part of the name is what matches.
+_STREET_TYPES = {
+    "road", "rd", "street", "st", "avenue", "ave", "court", "ct", "crescent",
+    "cres", "place", "pl", "drive", "dr", "lane", "ln", "parade", "pde",
+    "terrace", "tce", "close", "cl", "way", "circuit", "cct", "pass",
+}
+
+
+def _policies_for_property(conn, prop: dict) -> list[str]:
+    """Policy numbers whose insured address is this property."""
+    pattern = ((prop.get("facts") or {}).get("address_pattern") or "").lower()
+    if not pattern:
+        return []
+    distinctive = [w for w in re.findall(r"[a-z]{3,}", pattern)
+                   if w not in _STREET_TYPES] or [pattern]
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT facts->>'policy_number' AS number, facts->>'status' AS status
+                 FROM personal.asset
+                WHERE facts ? 'policy_number'
+                  AND lower(coalesce(facts->>'insured_address', '')) LIKE ALL (
+                        SELECT '%%' || w || '%%' FROM unnest(%s::text[]) w)
+                ORDER BY 1""",
+            (distinctive,),
+        )
+        return [f"{r['number']} ({r['status'] or 'status unknown'})"
+                for r in cur.fetchall() if r["number"]]
+
+
+def task_property_sale_checklist() -> dict:
+    """Raise the unwinding work for a property that has been sold."""
+    conn = _conn()
+    raised = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, facts, status, updated_at
+                     FROM personal.asset
+                    WHERE asset_type = 'property'
+                      AND status IN ('sold', 'disposed')
+                      AND (updated_at > now() - (%s || ' days')::interval
+                           OR (facts->>'sold_on') > (current_date - (%s || ' days')::interval)::text)""",
+                (SALE_CHECKLIST_DAYS, SALE_CHECKLIST_DAYS),
+            )
+            sold = [dict(r) for r in cur.fetchall()]
+
+        for prop in sold:
+            facts = prop["facts"] or {}
+            name = prop["name"]
+            lender = facts.get("lender")
+            loan = facts.get("loan_amount")
+            agent = facts.get("property_manager_agency") or facts.get("property_manager_name")
+            policies = _policies_for_property(conn, prop)
+
+            items = [
+                (f"Discharge the mortgage on {name}",
+                 (f"Lender: {lender or 'not recorded'}"
+                  + (f", loan {loan}" if loan else "")
+                  + ".\nAsk for a discharge authority and confirm the payout "
+                    "figure at settlement.")),
+                (f"Take {name} out of TaxTank",
+                 "Remove the property from the portfolio so the next return "
+                 "does not claim deductions on a house we no longer own, and "
+                 "record the disposal date and sale price."),
+                (f"Cancel the landlord insurance on {name}",
+                 ("Policies on this property: "
+                  + ("; ".join(policies) if policies else "none found in the register")
+                  + ".\nCancel from the settlement date — a premium keeps being "
+                    "charged otherwise, and a refund is usually owed for the "
+                    "unused part of the term.")),
+                (f"Adjust rates and water at settlement for {name}",
+                 "Council rates and water are apportioned at settlement. Check "
+                 "the adjustment on the settlement statement against the last "
+                 "notices received."),
+                (f"End the management agreement for {name}",
+                 f"Managing agent: {agent or 'not recorded'}.\nGive notice, "
+                 f"collect the final statement, and confirm the bond and any "
+                 f"held funds are released."),
+                (f"Record the disposal of {name} for capital gains",
+                 "Keep the contract, the settlement statement and the cost-base "
+                 "records together: purchase price, stamp duty, capital "
+                 "improvements and selling costs all affect the gain."),
+            ]
+
+            for title, detail in items:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id FROM personal.event
+                            WHERE event_type = 'task' AND title = %s
+                              AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+                            LIMIT 1""",
+                        (title,),
+                    )
+                    if cur.fetchone():
+                        continue
+                    cur.execute(
+                        """INSERT INTO personal.event
+                               (title, event_type, status, provenance, calendar_source,
+                                notes, task_status, asset_id)
+                           VALUES (%s, 'task', 'confirmed', 'rule', 'asset_rules',
+                                   %s, 'open', %s)""",
+                        (title, detail, prop["id"]),
+                    )
+                conn.commit()
+                raised += 1
+            print(f"[maintenance] sale checklist raised for {name[:40]} "
+                  f"({len(items)} items, {len(policies)} policy(ies) to cancel)")
+    finally:
+        conn.close()
+    return {"checklist_items_raised": raised}
+
+
+# ── Which policies are still owed ────────────────────────────────────────────
+# Eleven landlord policies, and exactly one of them existed as a record. The
+# other ten lived only as emails, so there was no way to answer "what is still
+# outstanding" — the reminders arrived, got filed, and the question had to be
+# reconstructed from the inbox every time.
+#
+# A reminder states everything needed: the policy number, the amount due, the
+# date, the property insured and the managing agent. So each policy gets a
+# record, and a policy with money owed gets one job to pay it. When the
+# payment advice arrives, task_settle_paid_policies closes the job, marks the
+# record paid and turns the entry green — the two halves of the same cycle.
+#
+# Nothing here ever decides a policy is paid. Absence of a reminder is not
+# evidence of payment, and the advices are still to come.
+_AMOUNT_DUE_RE = re.compile(r"amount\s*due\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)", re.I)
+_DUE_DATE_RE = re.compile(r"due\s*date\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})", re.I)
+_INSURED_ADDRESS_RE = re.compile(r"insured address\s*:?\s*([^\n]{6,90})", re.I)
+# These letters are laid out the same way every time: the product name is the
+# line directly under "Certificate of Insurance". Reading it there beats
+# pattern-matching the prose, which went wrong in both directions — a loose
+# pattern produced plans called "Liability To Other" out of whole clauses, and
+# a tight list of product names then matched "contents insurance" from the
+# fine print ("under a landlord or home and contents insurance policy") while
+# missing the real product, which genuinely is called "Liability to Other".
+_PLAN_AFTER_CERT_RE = re.compile(
+    r"certificate of insurance\s*\n\s*([A-Z][A-Za-z /&-]{4,60})", re.I)
+_PLAN_RE = re.compile(
+    r"\b(landlord (?:residential )?(?:building )?insurance"
+    r"|residential building insurance|liability to other"
+    r"|public liability|strata insurance|landlord protection)\b", re.I)
+
+
+def _plan_from(body: str) -> str | None:
+    """The product this policy is, as the letterhead states it."""
+    m = _PLAN_AFTER_CERT_RE.search(body or "")
+    if m:
+        return m.group(1).strip()
+    m = _PLAN_RE.search(body or "")
+    return m.group(1).strip().title() if m else None
+
+
+# Insurers whose mail we actually get, keyed by their sending domain. The
+# subject line was the first attempt and it produced "Fw: Terri Scheer" and
+# "Re: Action Required" as company names, because a subject is whatever the
+# last person to hit reply left behind. Who sent it is a fact.
+_INSURER_DOMAINS = {
+    "terrischeer": "Terri Scheer",
+    "racq": "RACQ",
+    "aami": "AAMI",
+    "allianz": "Allianz",
+    "suncorp": "Suncorp",
+    "qbe": "QBE",
+    "cgu": "CGU",
+}
+
+
+def _provider_from(subject: str, sender: str, body: str = "") -> str:
+    """The insurer's name: who sent it, or whose letterhead it carries.
+
+    Half of these arrive forwarded from one of our own inboxes, which made
+    the sender "Hotmail" — a forward does not change whose letter it is, so
+    a known insurer named in the letter itself wins over the envelope.
+    """
+    domain = (sender or "").lower()
+    for key, proper in _INSURER_DOMAINS.items():
+        if key in domain:
+            return proper
+    text = f"{subject or ''}\n{(body or '')[:3000]}".lower()
+    for key, proper in _INSURER_DOMAINS.items():
+        if proper.lower() in text or key in text:
+            return proper
+    host = domain.split("@")[-1].split(".")[0]
+    return host.title() if host else "unknown insurer"
+
+
+def task_track_insurance_policies(days: int = 200) -> dict:
+    """Give every policy a record, and every unpaid one a job."""
+    conn = _conn()
+    created, updated, tasked = 0, 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT n.body, em.subject, em.from_address, em.received_at
+                     FROM personal.note n
+                     JOIN personal.email_message em ON em.note_id = n.id
+                    WHERE n.created_at > now() - (%s || ' days')::interval
+                      AND n.body ~* 'policy[[:space:]]*number'
+                    ORDER BY em.received_at ASC NULLS FIRST
+                    LIMIT 400""",
+                (days,),
+            )
+            notes = [dict(r) for r in cur.fetchall()]
+
+        # Oldest first, so the newest letter about a policy has the last word.
+        latest: dict[str, dict] = {}
+        for note in notes:
+            body = note["body"] or ""
+            numbers = {m.group(1).upper() for m in _POLICY_NUMBER_RE.finditer(body)}
+            if not numbers:
+                continue
+            amount = _AMOUNT_DUE_RE.search(body)
+            due = _DUE_DATE_RE.search(body)
+            address = _INSURED_ADDRESS_RE.search(body)
+            plan = _plan_from(body)
+            for number in numbers:
+                latest[number] = {
+                    "number": number,
+                    "provider": _provider_from(note["subject"], note["from_address"], body),
+                    "plan": plan,
+                    "address": address.group(1).strip() if address else None,
+                    "amount_due": amount.group(1).replace(",", "") if amount else None,
+                    "due_date": _au_date(due.group(1)) if due else None,
+                    "settled": _is_settled_document(note["subject"], body),
+                    "seen": str(note["received_at"] or "")[:10],
+                    "subject": note["subject"],
+                }
+
+        for number, info in latest.items():
+            owed = (not info["settled"]
+                    and info["amount_due"] not in (None, "0", "0.00"))
+            facts = {
+                "policy_number": number,
+                "provider": info["provider"],
+                "status": "outstanding" if owed else "paid",
+                "last_letter": f"{info['subject']} ({info['seen']})",
+            }
+            for key, value in (("plan", info["plan"]),
+                               ("insured_address", info["address"]),
+                               ("amount_due", info["amount_due"])):
+                if value:
+                    facts[key] = value
+            if info["due_date"]:
+                facts["due_date"] = info["due_date"].isoformat()
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, name, facts FROM personal.asset
+                        WHERE upper(coalesce(facts->>'policy_number', '')) = %s
+                        LIMIT 1""",
+                    (number,),
+                )
+                existing = cur.fetchone()
+
+                if existing:
+                    # Never overwrite what the settle task recorded: a policy
+                    # confirmed paid stays paid until a new letter says money
+                    # is owed again.
+                    keep = dict(existing["facts"] or {})
+                    if keep.get("paid") == "yes" and not owed:
+                        continue
+                    cur.execute(
+                        """UPDATE personal.asset
+                              SET facts = facts || %s::jsonb, updated_at = now()
+                            WHERE id = %s""",
+                        (json.dumps(facts), existing["id"]),
+                    )
+                    asset_id, name = existing["id"], existing["name"]
+                    updated += 1
+                else:
+                    name = (f"{info['provider']} {info['plan'] or 'insurance'} "
+                            f"— {info['address'] or number}")[:120]
+                    cur.execute(
+                        """INSERT INTO personal.asset
+                               (name, asset_type, status, event_gen_enabled, facts, rules)
+                           VALUES (%s, 'subscription', 'active', true, %s::jsonb, '[]'::jsonb)
+                        RETURNING id""",
+                        (name, json.dumps(facts)),
+                    )
+                    asset_id = cur.fetchone()["id"]
+                    created += 1
+                    print(f"[maintenance] policy {number} recorded — {name[:60]}")
+            conn.commit()
+
+            if not owed:
+                continue
+
+            # A reminder from last year with nothing since is not a live debt:
+            # it was almost certainly paid and the advice never reached us, and
+            # raising "pay this now" against a 2025 due date would be wrong in
+            # the direction that wastes somebody's afternoon. Record the policy,
+            # leave the money question to the review queue.
+            if info["seen"] and info["seen"] < (date.today() - timedelta(days=120)).isoformat():
+                print(f"[maintenance] policy {number}: ${info['amount_due']} was "
+                      f"outstanding as of {info['seen']} — too old to chase, "
+                      f"recorded without a task")
+                continue
+
+            due_text = (f" due {info['due_date'].strftime('%-d %b %Y')}"
+                        if info["due_date"] else "")
+            title = f"Pay {info['provider']} policy {number}"
+            detail = (f"${float(info['amount_due']):,.2f} outstanding on policy "
+                      f"{number}{due_text}.\n"
+                      f"{info['plan'] or 'Insurance'} for "
+                      f"{info['address'] or 'an unnamed property'}.\n"
+                      f"Last letter: {info['subject']} ({info['seen']}).\n"
+                      f"This closes itself when the payment advice arrives.")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM personal.event
+                        WHERE event_type = 'task' AND title = %s
+                          AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+                        LIMIT 1""",
+                    (title,),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """INSERT INTO personal.event
+                           (title, event_type, status, provenance, calendar_source,
+                            notes, task_status, asset_id, effective_date)
+                       VALUES (%s, 'task', 'confirmed', 'rule', 'asset_rules',
+                               %s, 'open', %s, %s)
+                    RETURNING id""",
+                    (title, detail, asset_id, info["due_date"]),
+                )
+                task_id = cur.fetchone()["id"]
+            conn.commit()
+            tasked += 1
+            print(f"[maintenance] policy {number} outstanding "
+                  f"${float(info['amount_due']):,.2f}{due_text} — task {task_id}")
+    finally:
+        conn.close()
+    return {"policies_recorded": created, "policies_updated": updated,
+            "payments_outstanding": tasked}
+
+
 # ── Paid is a fact worth acting on ───────────────────────────────────────────
 # Four payment confirmations from the landlord insurer sat ingested while
 # "[URGENT] Pay insurance policy" stayed open and the renewal sat on the
@@ -4029,6 +4393,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
         "learn_tenancy_dates", "new_tenancy_followup", "settle_paid_policies",
+        "track_insurance_policies", "property_sale_checklist",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -4260,6 +4625,20 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         results["learn_tenancy_dates"] = _run_with_timeout(
             task_learn_tenancy_dates, 120, "learn_tenancy_dates")
         print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
+
+    if "property_sale_checklist" in all_tasks:
+        results["property_sale_checklist"] = _run_with_timeout(
+            task_property_sale_checklist, 60, "property_sale_checklist")
+        print(f"[maintenance] property_sale_checklist done: "
+              f"{results['property_sale_checklist']}")
+
+    if "track_insurance_policies" in all_tasks:
+        # Before the settle task, so a policy discovered tonight can be
+        # settled by the same run if its advice has already arrived.
+        results["track_insurance_policies"] = _run_with_timeout(
+            task_track_insurance_policies, 180, "track_insurance_policies")
+        print(f"[maintenance] track_insurance_policies done: "
+              f"{results['track_insurance_policies']}")
 
     if "settle_paid_policies" in all_tasks:
         results["settle_paid_policies"] = _run_with_timeout(
