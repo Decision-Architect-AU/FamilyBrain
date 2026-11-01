@@ -2814,6 +2814,132 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Learning when a tenancy starts and ends ──────────────────────────────────
+# "We've had new leases" — and the system had no idea, because lease_expiry is
+# a fact somebody typed in once and nothing ever revisited. Ten of the eleven
+# dates were already in the past.
+#
+# The dates are in the mail, in plain words: a property manager's statement
+# says "tenancy started on 02/10/2026", an agreement says "fixed term ending
+# 1 October 2027". No model is needed to read that, and a regex can be held to
+# account in a way a model's paraphrase cannot.
+#
+# Rules this follows:
+#   * a date is only attached to a property the same text names, matched on
+#     the property's own address_pattern;
+#   * a fact that is missing gets filled in;
+#   * a fact that disagrees is never overwritten — it raises a finding, because
+#     a lease date is a legal fact and the mail may be the stale one. Silently
+#     rewriting it could move a notice outside its window.
+_TENANCY_START_RE = re.compile(
+    r"tenanc(?:y|ies)\s+(?:start(?:ed|s|ing)?|commenc\w*)\s*(?:on\s*)?"
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.I)
+_LEASE_END_RE = re.compile(
+    r"(?:lease|tenancy|fixed term|agreement)\s+(?:expir\w*|end\w*|"
+    r"until|through to|run(?:s|ning)? to)\s*(?:on\s*)?"
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.I)
+
+
+def _au_date(raw: str) -> date | None:
+    """Day-first, the way every Australian agent writes it."""
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"):
+        try:
+            return datetime.strptime(raw.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def task_learn_tenancy_dates(days: int = 120) -> dict:
+    """Read tenancy start and lease end dates out of recent mail."""
+    conn = _conn()
+    learned, conflicts, seen = 0, 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, facts->>'address_pattern' AS pattern,
+                          facts->>'lease_expiry' AS known_expiry,
+                          facts->>'lease_start'  AS known_start
+                     FROM personal.asset
+                    WHERE asset_type = 'property' AND status = 'active'
+                      AND coalesce(facts->>'address_pattern', '') <> ''"""
+            )
+            properties = [dict(r) for r in cur.fetchall()]
+
+        for prop in properties:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT n.body
+                         FROM personal.note n
+                         JOIN personal.email_message em ON em.note_id = n.id
+                        WHERE n.body ILIKE %s
+                          AND n.created_at > now() - (%s || ' days')::interval
+                        ORDER BY n.created_at DESC
+                        LIMIT 40""",
+                    (f"%{prop['pattern']}%", days),
+                )
+                bodies = [r["body"] or "" for r in cur.fetchall()]
+
+            found: dict[str, date] = {}
+            for body in bodies:
+                for key, pattern in (("lease_start", _TENANCY_START_RE),
+                                     ("lease_expiry", _LEASE_END_RE)):
+                    m = pattern.search(body)
+                    if not m:
+                        continue
+                    when = _au_date(m.group(1))
+                    # A tenancy date decades out is a misread, not a lease.
+                    if when and abs((when - date.today()).days) < 3650:
+                        found.setdefault(key, when)
+            if not found:
+                continue
+            seen += 1
+
+            for key, when in found.items():
+                known = prop.get(f"known_{key.split('_')[1]}") or (
+                    prop["known_expiry"] if key == "lease_expiry" else prop["known_start"])
+                if known and str(known)[:10] == when.isoformat():
+                    continue
+                if known:
+                    conflicts += 1
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO personal.audit_finding
+                                   (entity_type, entity_id, verdict, detail, model,
+                                    score, risk, improve)
+                               VALUES ('asset', %s, 'LEASE_DATE_CHANGED', %s,
+                                       'tenancy-reader', 8, 'high', %s)
+                               ON CONFLICT (entity_type, entity_id, verdict)
+                                    WHERE status = 'open' DO NOTHING""",
+                            (prop["id"],
+                             f"{prop['name']}: the mail says {key.replace('_', ' ')} "
+                             f"{when.isoformat()}, the record says {str(known)[:10]}",
+                             "check which is current and set it, then the lease "
+                             "notice will schedule itself"),
+                        )
+                    conn.commit()
+                    print(f"[maintenance] tenancy: {prop['name'][:34]} {key} "
+                          f"{when} disagrees with {str(known)[:10]} — raised for review")
+                    continue
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.asset
+                              SET facts = facts || jsonb_build_object(%s, %s::text),
+                                  updated_at = now()
+                            WHERE id = %s""",
+                        (key, when.isoformat(), prop["id"]),
+                    )
+                conn.commit()
+                learned += 1
+                print(f"[maintenance] tenancy: {prop['name'][:34]} {key} = {when} "
+                      f"(from the mail)")
+    finally:
+        conn.close()
+    return {"properties_with_dates": seen, "facts_learned": learned,
+            "conflicts_raised": conflicts}
+
+
 # ── Jobs for things that have already happened ───────────────────────────────
 # A disco was on Thursday. Returning the permission slip for it is not
 # something anybody can usefully do on Friday, and leaving the job open does
@@ -2830,7 +2956,7 @@ def task_spot_check() -> dict:
 PASSED_EVENT_TASK_GRACE_DAYS = int(os.environ.get("PASSED_EVENT_TASK_GRACE_DAYS", "1"))
 
 # Occasions: a day that happens and is then over. Anchored on word
-# boundaries, Postgres's \y rather than  — without it "camp" matches
+# boundaries, Postgres's \y rather than \b — without it "camp" matches
 # "Varsity College Primary Campus" and every campus notice becomes an
 # occasion that expires.
 _OCCASION_WORDS = (
@@ -3524,6 +3650,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "review_query_flags", "query_flags_report",
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
+        "learn_tenancy_dates",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -3748,6 +3875,13 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         else:
             results["spot_check"] = {"skipped": "throttled"}
             print("[maintenance] spot_check skipped (throttled)")
+
+    if "learn_tenancy_dates" in all_tasks:
+        # Before generate_events would be better still, but this is cheap and
+        # a lease date learned tonight schedules its notice tomorrow.
+        results["learn_tenancy_dates"] = _run_with_timeout(
+            task_learn_tenancy_dates, 120, "learn_tenancy_dates")
+        print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
 
     if "close_passed_event_tasks" in all_tasks:
         results["close_passed_event_tasks"] = _run_with_timeout(

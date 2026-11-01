@@ -219,6 +219,62 @@ _MARKETING_SUBJECT_KW = re.compile(
     re.I,
 )
 
+# ── Mail about a property we actually own ─────────────────────────────────────
+# Ray White is the family's property manager and also one of the biggest
+# real-estate marketers in the country, sending listing alerts all day. The
+# triage rules could not tell the two apart, so of their mail 390 went to
+# marketing and 340 to skip against 301 ingested — and in the discarded pile
+# sat "Application Summary - 6a Anchusa Street", which is how a tenancy got
+# re-let without the system ever knowing.
+#
+# The properties know their own names: every one carries an address_pattern
+# fact, which exists precisely for matching text to a property. An email
+# naming one of them is about our house, whoever sent it and however much it
+# looks like a mailout. A listing blast for somebody else's property matches
+# nothing and is unaffected.
+#
+# Cached for the process: thirteen patterns that change when a property is
+# bought or sold, not between emails.
+_OUR_PROPERTIES: re.Pattern | None = None
+
+
+def _our_property_pattern() -> re.Pattern | None:
+    """One regex matching any of our own property addresses."""
+    global _OUR_PROPERTIES
+    if _OUR_PROPERTIES is not None:
+        return _OUR_PROPERTIES
+    try:
+        import psycopg2
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT DISTINCT lower(facts->>'address_pattern')
+                         FROM personal.asset
+                        WHERE asset_type = 'property'
+                          AND status = 'active'
+                          AND coalesce(facts->>'address_pattern', '') <> ''"""
+                )
+                patterns = [r[0] for r in cur.fetchall() if r[0]]
+    except Exception as e:
+        print(f"[triage] could not load property patterns: {e}")
+        return None
+    if not patterns:
+        return None
+    # Word-bounded: "anchusa" must be the word, not part of a longer one.
+    _OUR_PROPERTIES = re.compile(
+        r"\b(" + "|".join(re.escape(x) for x in sorted(patterns)) + r")\b", re.I)
+    return _OUR_PROPERTIES
+
+
+def _is_about_our_property(subject: str, body: str) -> str | None:
+    """The address pattern this email names, if it names one of ours."""
+    pattern = _our_property_pattern()
+    if not pattern:
+        return None
+    hit = pattern.search(f"{subject or ''}\n{body or ''}")
+    return hit.group(1).lower() if hit else None
+
+
 # ── Forwarded-message annotation ─────────────────────────────────────────────
 # A short human-written note added above quoted/forwarded content (e.g.
 # "Loganholme to vacate on 28/10/2026" forwarded straight from an agent's
@@ -390,6 +446,14 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
         if not _content_already_processed(subj):
             print(f"[triage] household forward not yet processed — forcing ingest: {subj[:60]}")
             return "ingest"
+
+    # 0b. About one of our own properties — ahead of the listing and marketing
+    # rules, because the agent who manages our houses also advertises other
+    # people's. A letter naming our address is about our house.
+    ours = _is_about_our_property(subj, body)
+    if ours:
+        print(f"[triage] names our property '{ours}' — ingesting: {subj[:60]}")
+        return "ingest"
 
     # 1. Known noise senders — always skip
     if _ALWAYS_SKIP_SENDERS.search(sender):
