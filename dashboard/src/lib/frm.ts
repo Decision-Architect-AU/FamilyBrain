@@ -18,7 +18,8 @@
  * automatic answer is still there to compare against. See 64_frm.sql.
  */
 
-export type FieldKind = 'text' | 'number' | 'money' | 'date' | 'select' | 'longtext';
+export type FieldKind =
+  'text' | 'number' | 'money' | 'date' | 'select' | 'longtext' | 'tags';
 
 export interface FrmField {
   key: string;
@@ -58,6 +59,37 @@ const MONEY_FIELDS: FrmField[] = [
 
 const NOTES: FrmField = { key: 'notes', label: 'Notes', kind: 'longtext', source: 'column' };
 
+/**
+ * Groups, on every register.
+ *
+ * A text[] of the family's own words, as many as apply: the three units at 8
+ * Macarthur St are one block, Tracey and Leon are one household, and a
+ * property can be in a portfolio and a strata scheme at once. The tag cloud
+ * on each page filters by them.
+ *
+ * Unlike every other field here, a group goes straight into the column
+ * rather than into manual_overrides. Nothing automatic writes groups — no
+ * extractor, no enrichment pass, no learner — so there is no automatic value
+ * underneath for an override to protect, and storing one would only mean the
+ * page had to merge two answers that never disagree.
+ *
+ * Three group names do structural work. `family`, `provider` and `contact`
+ * decide which people register someone appears on, so tagging a contact as
+ * family is how they move; `retired` takes a row off its page without
+ * deleting it.
+ */
+const GROUPS: FrmField = { key: 'groups', label: 'Groups', kind: 'tags', source: 'column' };
+
+/** Group names that move a person between the people registers. */
+export const PAGE_TAGS: Record<string, { slug: string; label: string }> = {
+  family: { slug: 'family', label: 'Family contacts' },
+  provider: { slug: 'providers', label: 'Providers' },
+  contact: { slug: 'contacts', label: 'Contacts' },
+};
+
+/** Taken off its page by the retire button, and brought back by the cloud. */
+export const RETIRED_TAG = 'retired';
+
 /** A person's contact details, which every people page shares. */
 const CONTACT_FIELDS: FrmField[] = [
   { key: 'name', label: 'Name', kind: 'text', source: 'column' },
@@ -85,6 +117,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'property_manager_agency', label: 'Managing agent', kind: 'text', source: 'fact' },
       { key: 'entity', label: 'Owned by', kind: 'text', source: 'fact' },
       ...MONEY_FIELDS,
+      GROUPS,
       NOTES,
     ],
   },
@@ -103,6 +136,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'insurer', label: 'Insurer', kind: 'text', source: 'fact' },
       { key: 'odometer', label: 'Odometer', kind: 'number', source: 'fact' },
       ...MONEY_FIELDS,
+      GROUPS,
       NOTES,
     ],
   },
@@ -120,6 +154,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'abn', label: 'ABN', kind: 'text', source: 'fact' },
       { key: 'role', label: 'Our role', kind: 'text', source: 'fact' },
       { key: 'accountant', label: 'Accountant', kind: 'text', source: 'fact' },
+      GROUPS,
       NOTES,
     ],
   },
@@ -137,6 +172,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'trustee', label: 'Trustee', kind: 'text', source: 'fact' },
       { key: 'beneficiaries', label: 'Beneficiaries', kind: 'text', source: 'fact' },
       { key: 'accountant', label: 'Accountant', kind: 'text', source: 'fact' },
+      GROUPS,
       NOTES,
     ],
   },
@@ -154,6 +190,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'payer', label: 'Paid by', kind: 'text', source: 'fact' },
       { key: 'paid_to', label: 'Paid into', kind: 'text', source: 'fact' },
       ...MONEY_FIELDS,
+      GROUPS,
       NOTES,
     ],
   },
@@ -174,6 +211,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'loan_type', label: 'Type', kind: 'text', source: 'fact' },
       { key: 'fixed_until', label: 'Fixed until', kind: 'date', source: 'fact' },
       ...MONEY_FIELDS,
+      GROUPS,
       NOTES,
     ],
   },
@@ -192,6 +230,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'platform', label: 'Platform', kind: 'text', source: 'fact' },
       { key: 'units', label: 'Units', kind: 'number', source: 'fact' },
       ...MONEY_FIELDS,
+      GROUPS,
       NOTES,
     ],
   },
@@ -212,6 +251,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'next_event_date', label: 'Next billed', kind: 'date', source: 'column', readOnly: true },
       { key: 'payment_method', label: 'Billed to', kind: 'text', source: 'fact' },
       { key: 'policy_number', label: 'Reference', kind: 'text', source: 'fact' },
+      GROUPS,
       NOTES,
     ],
   },
@@ -231,6 +271,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'next_event_date', label: 'Next', kind: 'date', source: 'column', readOnly: true },
       { key: 'events_generated_until', label: 'Generated to', kind: 'date', source: 'column', readOnly: true },
       { key: 'calendar_silent', label: 'Off calendar', kind: 'select', source: 'column', options: ['false', 'true'] },
+      GROUPS,
       NOTES,
     ],
   },
@@ -247,6 +288,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'birth_month', label: 'Birth month', kind: 'number', source: 'column' },
       { key: 'school_year', label: 'School year', kind: 'number', source: 'column' },
       { key: 'class_code', label: 'Class', kind: 'text', source: 'column' },
+      GROUPS,
       NOTES,
     ],
   },
@@ -260,6 +302,7 @@ export const FRM: Record<string, FrmEntity> = {
     fields: [
       ...CONTACT_FIELDS,
       { key: 'speciality', label: 'What for', kind: 'text', source: 'column' },
+      GROUPS,
       NOTES,
     ],
   },
@@ -274,10 +317,53 @@ export const FRM: Record<string, FrmEntity> = {
       ...CONTACT_FIELDS,
       { key: 'birth_day', label: 'Birth day', kind: 'number', source: 'column' },
       { key: 'birth_month', label: 'Birth month', kind: 'number', source: 'column' },
+      GROUPS,
       NOTES,
     ],
   },
 };
+
+/**
+ * The tag cloud, per register: which fields become filter chips.
+ *
+ * Groups are on every one of them, and beside them the things worth slicing a
+ * register by — the company or trust that owns a property, what a provider is
+ * actually for, who bills a subscription. The values are not listed here;
+ * they come from the rows themselves, so a new trust or a new speciality
+ * appears in the cloud without anyone adding it to a list.
+ */
+export const FRM_FACETS: Record<string, string[]> = {
+  properties: ['groups', 'entity', 'property_manager_agency', 'status'],
+  vehicles: ['groups', 'insurer', 'status'],
+  companies: ['groups', 'role', 'accountant', 'status'],
+  trusts: ['groups', 'trustee', 'accountant', 'status'],
+  income: ['groups', 'payer', 'frequency', 'status'],
+  loans: ['groups', 'lender', 'loan_type', 'status'],
+  investments: ['groups', 'held_by', 'platform', 'status'],
+  subscriptions: ['groups', 'provider', 'frequency', 'status'],
+  routines: ['groups', 'day', 'location', 'status'],
+  family: ['groups', 'relationship'],
+  providers: ['groups', 'speciality', 'organisation'],
+  contacts: ['groups', 'relationship', 'organisation'],
+};
+
+/**
+ * Clean a set of tags.
+ *
+ * Lower-cased and trimmed, because "Family", "family " and "family" are the
+ * same group and three spellings of it would split the register into three.
+ * Bounded in length and number: a tag is a word or two, and a row with forty
+ * of them is a mistake rather than a filing system.
+ */
+export function tagList(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  const out: string[] = [];
+  for (const item of raw) {
+    const tag = String(item).trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 60);
+    if (tag && !out.includes(tag)) out.push(tag);
+  }
+  return out.slice(0, 16);
+}
 
 /** The pages, in the order they appear in the sidebar. */
 export const FRM_SECTIONS: { slug: string; label: string; entities: string[] }[] = [

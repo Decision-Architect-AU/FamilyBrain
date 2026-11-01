@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
-import { FRM, FrmEntity, FrmField } from '@/lib/frm';
+import { FRM, FRM_FACETS, FrmEntity, FrmField, tagList } from '@/lib/frm';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +19,12 @@ function selectFor(entity: FrmEntity): string {
   const parts: string[] = [`${alias}.id`];
 
   for (const f of entity.fields) {
+    if (f.kind === 'tags') {
+      // Groups come back as the array itself. They are only ever written by
+      // hand, so there is no automatic value beside them to disagree with.
+      parts.push(`coalesce(${alias}.${f.key}, '{}') AS "${f.key}"`);
+      continue;
+    }
     // A manual edit wins over whatever the automatic writers put underneath,
     // and the underlying value is returned beside it so the page can show
     // that the two disagree instead of hiding one of them.
@@ -55,7 +61,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ entity: str
   try {
     const { rows } = await getPool().query(sql);
     return NextResponse.json({ ok: true, entity: name, label: entity.label,
-                               fields: entity.fields, rows });
+                               fields: entity.fields,
+                               facets: FRM_FACETS[name] ?? ['groups'], rows });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String(e), rows: [] }, { status: 500 });
   }
@@ -80,7 +87,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ entity: st
     const field = byKey.get(key);
     if (!field || field.readOnly) continue;
     if (value === '' || value === null || value === undefined) continue;
-    if (field.source === 'fact') facts[key] = String(value);
+    if (field.kind === 'tags') {
+      const tags = tagList(value);
+      if (tags.length) { cols.push(field.key); vals.push(tags); }
+    } else if (field.source === 'fact') facts[key] = String(value);
     else { cols.push(field.key); vals.push(value); }
   }
   if (!cols.includes('name')) {
@@ -91,9 +101,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ entity: st
     cols.push('asset_type'); vals.push(entity.assetType);
   }
   for (const [k, v] of Object.entries(entity.defaults ?? {})) {
+    if (k === 'groups') {
+      // The page tag is added to whatever groups were typed rather than
+      // instead of them: a new entry on the family page is family even if
+      // somebody also tagged it "west" on the way in, and without this merge
+      // it would save and then not be on the page they added it from.
+      const at = cols.indexOf('groups');
+      if (at < 0) { cols.push('groups'); vals.push([v]); }
+      else {
+        const tags = vals[at] as string[];
+        if (!tags.includes(v)) tags.push(v);
+      }
+      continue;
+    }
     if (cols.includes(k)) continue;
-    if (k === 'groups') { cols.push('groups'); vals.push([v]); }
-    else { cols.push(k); vals.push(v); }
+    cols.push(k); vals.push(v);
   }
   if (Object.keys(facts).length && entity.table === 'asset') {
     cols.push('facts'); vals.push(JSON.stringify(facts));

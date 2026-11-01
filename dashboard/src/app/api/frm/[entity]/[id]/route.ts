@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
-import { FRM } from '@/lib/frm';
+import { FRM, RETIRED_TAG, tagList } from '@/lib/frm';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,28 +35,48 @@ export async function PATCH(
 
   const set: Record<string, string> = {};
   const clear: string[] = [];
+  const arrays: [string, string[]][] = [];
   for (const [key, value] of Object.entries(body)) {
     const field = byKey.get(key);
     if (!field || field.readOnly) continue;
+    if (field.kind === 'tags') {
+      // Groups are written to the column, not the override bag. Nothing
+      // automatic maintains them, so there is nothing to protect them from,
+      // and an override holding a comma-joined string would have to be
+      // parsed back into an array by everything that reads it.
+      arrays.push([field.key, tagList(value)]);
+      continue;
+    }
     const storeKey = field.source === 'column' ? field.key : `facts.${field.key}`;
     if (value === null) clear.push(storeKey);
     else set[storeKey] = String(value);
   }
-  if (!Object.keys(set).length && !clear.length) {
+  if (!Object.keys(set).length && !clear.length && !arrays.length) {
     return NextResponse.json({ ok: false, error: 'nothing to change' }, { status: 400 });
   }
 
+  // The column names come from the entity's own field list, never from the
+  // request body: a key that is not on that list has already been dropped.
+  const vals: unknown[] = [rowId, JSON.stringify(set), clear];
+  const assignments = ['manual_overrides = (manual_overrides || $2::jsonb) - $3::text[]'];
+  for (const [col, tags] of arrays) {
+    vals.push(tags);
+    assignments.push(`${col} = $${vals.length}::text[]`);
+  }
   const sql = `UPDATE personal.${entity.table}
-                  SET manual_overrides = (manual_overrides || $2::jsonb) - $3::text[],
-                      updated_at = now()
+                  SET ${assignments.join(', ')}, updated_at = now()
                 WHERE id = $1
             RETURNING id`;
   try {
-    const { rows } = await getPool().query(sql, [rowId, JSON.stringify(set), clear]);
+    const { rows } = await getPool().query(sql, vals);
     if (!rows.length) {
       return NextResponse.json({ ok: false, error: 'no such row' }, { status: 404 });
     }
-    return NextResponse.json({ ok: true, id: rows[0].id, manual: Object.keys(set), cleared: clear });
+    return NextResponse.json({
+      ok: true, id: rows[0].id,
+      manual: Object.keys(set), cleared: clear,
+      tagged: Object.fromEntries(arrays),
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String(e) }, { status: 400 });
   }
@@ -78,14 +98,22 @@ export async function DELETE(
   // point at these rows, and a hard delete would either fail on a foreign key
   // or orphan the history that explains why the row existed. Retiring it
   // takes it off every page and leaves the record intact.
+  //
+  // A person keeps the group that said which register they were on, and gains
+  // the `retired` tag that hides them from it. That way the cloud's "retired"
+  // chip brings them back exactly where they were, instead of leaving a
+  // restored person in whichever register the fallback happens to be.
   const retire = entity.table === 'asset'
     ? `UPDATE personal.asset SET status = 'disposed', event_gen_enabled = false,
               updated_at = now() WHERE id = $1 RETURNING id`
-    : `UPDATE personal.person SET groups = array_remove(groups, 'family'),
-              notes = coalesce(notes, '') || E'\\n[removed from the register]',
-              updated_at = now() WHERE id = $1 RETURNING id`;
+    : `UPDATE personal.person
+          SET groups = (SELECT array_agg(DISTINCT g)
+                          FROM unnest(groups || ARRAY[$2::text]) AS g),
+              updated_at = now()
+        WHERE id = $1 RETURNING id`;
   try {
-    const { rows } = await getPool().query(retire, [rowId]);
+    const { rows } = await getPool().query(
+      retire, entity.table === 'asset' ? [rowId] : [rowId, RETIRED_TAG]);
     if (!rows.length) {
       return NextResponse.json({ ok: false, error: 'no such row' }, { status: 404 });
     }
