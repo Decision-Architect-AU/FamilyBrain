@@ -1349,6 +1349,26 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             tag, color_id = event_color(title, notes, route=route,
                                         settled=bool(ev.get("settled_at")))
 
+            # A suspended occurrence belongs on a Tentative calendar or on no
+            # calendar at all. target_calendar_id falls back to the default
+            # calendar when an account has no Tentative one, which is right for
+            # bills and family — the event is real, it just lands on the main
+            # calendar — and exactly wrong here: it turns "this is paused" into
+            # an ordinary entry. Only one of the three accounts has a Tentative
+            # calendar, so a cello class suspended for the summer holidays
+            # would have appeared on Glenn's Outlook calendar as though it were
+            # going ahead.
+            #
+            # It would also have churned. The cleanup sweep deletes a suspended
+            # event from any calendar that is not a Tentative one, which makes
+            # it eligible to be written again next cycle: write, delete, write,
+            # delete, for every suspended occurrence of every school holiday.
+            if route == "tentative" and cal_id != ac.tentative_cal_id:
+                print(f"[appt] '{title[:40]}' is suspended and "
+                      f"{ac.email_address} has no Tentative calendar — "
+                      f"leaving it off the calendar entirely")
+                continue
+
             gcal_id   = ev.get("gcal_event_id")
             stored_cal = ev.get("gcal_calendar_id")
 
