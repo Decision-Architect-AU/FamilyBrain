@@ -2863,6 +2863,260 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Moving up a year ─────────────────────────────────────────────────────────
+# "3C stops being relevant and 4-something is." Exactly so, and school_year is
+# not decorative: audience resolution reads a class code out of a school
+# notice, takes the year number from it, and finds the child in that year.
+# Leave the number where it was typed and from late January every year-4
+# notice goes unattributed while every year-3 notice is pinned on a child who
+# has left.
+#
+# Two things move the year, and the order matters.
+#
+# The school's own allocation email, which arrives mid-January, is the
+# authority: it names the child and the class, so it gives the new year and
+# the new class together and there is nothing to infer. That is handled by
+# task_learn_class_allocation below.
+#
+# The first day back is the fallback, for the year the email is missed, filed
+# somewhere unreadable, or never sent. It can only give the year — the class
+# stays unknown, and saying so is the point: a child recorded in "Class 3C" in
+# February is worse than one recorded as year 4, class not yet known.
+#
+# Neither path runs twice. school_year_as_at records the calendar year the
+# number describes, because a nightly task that increments without checking
+# would carry a Year 1 child to Year 30 by March.
+SCHOOL_CLASS_RE = re.compile(r"\b(?:class\s*)?([1-6])\s?([A-F])\b")
+
+
+def _school_return_date(conn, year: int) -> date | None:
+    """The first school day of a calendar year, from the holiday records.
+
+    Taken as the day after the summer break that straddles New Year rather
+    than from a fixed date: the school sets it, it moves every year, and the
+    holiday spans are already the record of it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT (ends_at AT TIME ZONE 'Australia/Brisbane')::date AS last_day
+                 FROM personal.event
+                WHERE event_type = 'SCHOOL_HOLIDAY'
+                  AND status NOT IN ('cancelled', 'superseded')
+                  AND ends_at IS NOT NULL
+                  AND (starts_at AT TIME ZONE 'Australia/Brisbane')::date < make_date(%s, 1, 1)
+                  AND (ends_at AT TIME ZONE 'Australia/Brisbane')::date >= make_date(%s, 1, 1)
+                ORDER BY ends_at DESC
+                LIMIT 1""",
+            (year, year),
+        )
+        row = cur.fetchone()
+    return (row["last_day"] + timedelta(days=1)) if row else None
+
+
+def _retitle_school_routine(conn, person_id: int, school_year: int,
+                            class_code: str | None) -> None:
+    """Keep the routine's own wording honest about the class.
+
+    The class code lived in two places and nowhere else: the asset's facts and
+    the text of the generated event title. Both have to move, or the calendar
+    goes on saying "Class 3C" every weekday of the new year.
+    """
+    label_class = f"Class {class_code}" if class_code else f"Year {school_year}, class TBC"
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, name, facts, rules FROM personal.asset
+                WHERE person_id = %s AND asset_type = 'routine'
+                  AND name ILIKE '%%varsity college%%'""",
+            (person_id,),
+        )
+        assets = [dict(r) for r in cur.fetchall()]
+
+    for asset in assets:
+        facts = asset["facts"] or {}
+        rules = asset["rules"] or []
+        first = (facts.get("school") or "Varsity College")
+        who = (asset["name"] or "").split(" - ")[-1]
+        start, end = facts.get("start_time", "09:00"), facts.get("end_time", "14:40")
+        new_label = f"{who} - {first} {label_class} ({start}-{end})"
+        for rule in rules:
+            if isinstance(rule, dict) and rule.get("event_label"):
+                rule["event_label"] = new_label
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.asset
+                      SET facts = CASE WHEN %s::text IS NULL
+                                       THEN facts - 'class'
+                                       ELSE facts || jsonb_build_object('class', %s::text) END,
+                          rules = %s::jsonb,
+                          updated_at = now()
+                    WHERE id = %s""",
+                (class_code, class_code, json.dumps(rules), asset["id"]),
+            )
+        conn.commit()
+        print(f"[maintenance] school year: '{asset['name']}' now reads {new_label}")
+
+
+def task_roll_school_year() -> dict:
+    """Move the children up a year once school goes back."""
+    conn = _conn()
+    rolled = 0
+    try:
+        today = date.today()
+        return_date = _school_return_date(conn, today.year)
+        if not return_date:
+            return {"rolled": 0, "note": f"no summer break recorded for {today.year}"}
+        if today < return_date:
+            return {"rolled": 0, "note": f"school returns {return_date.isoformat()}"}
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, school_year, school_year_as_at
+                     FROM personal.person
+                    WHERE school_year IS NOT NULL
+                      AND coalesce(school_year_as_at, 0) < %s""",
+                (today.year,),
+            )
+            children = [dict(r) for r in cur.fetchall()]
+
+        for child in children:
+            new_year = child["school_year"] + 1
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE personal.person
+                          SET school_year = %s, school_year_as_at = %s,
+                              class_code = NULL, class_code_as_at = NULL,
+                              updated_at = now()
+                        WHERE id = %s""",
+                    (new_year, today.year, child["id"]),
+                )
+            conn.commit()
+            _retitle_school_routine(conn, child["id"], new_year, None)
+            rolled += 1
+            print(f"[maintenance] school year: {child['name']} is now year {new_year} "
+                  f"(class not yet known)")
+
+            title = f"Find {child['name'].split()[0]}'s class for {today.year}"
+            detail = (f"{child['name']} moved up to year {new_year} when school "
+                      f"returned on {return_date.isoformat()}, and the class is not "
+                      f"known.\nThe school emails class allocations in mid-January. "
+                      f"If that email arrived it should have set this already — "
+                      f"check for it, or ask the office.\nUntil then the routine "
+                      f"reads 'year {new_year}, class TBC' rather than last year's "
+                      f"class, which would be wrong.")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO personal.event
+                           (title, event_type, status, provenance, calendar_source,
+                            notes, task_status, person_id)
+                       SELECT %s, 'task', 'confirmed', 'rule', 'asset_rules',
+                              %s, 'open', %s
+                        WHERE NOT EXISTS (
+                              SELECT 1 FROM personal.event
+                               WHERE title = %s AND event_type = 'task'
+                                 AND coalesce(task_status, 'open') IN ('open', 'in_progress'))""",
+                    (title, detail, child["id"], title),
+                )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"rolled": rolled}
+
+
+def task_learn_class_allocation(days: int = 90) -> dict:
+    """Read the new class out of the school's allocation email.
+
+    The email names the child and the class together, so it settles both the
+    year and the class at once and is believed over the calendar-driven roll.
+    A code for the year above the one on file, seen in the weeks around the
+    turn of the school year, is the school saying the child has moved up.
+    """
+    conn = _conn()
+    learned = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, school_year, school_year_as_at,
+                          class_code, class_code_as_at
+                     FROM personal.person
+                    WHERE school_year IS NOT NULL"""
+            )
+            children = [dict(r) for r in cur.fetchall()]
+        if not children:
+            return {"learned": 0}
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT n.body, em.subject, em.received_at
+                     FROM personal.note n
+                     JOIN personal.email_message em ON em.note_id = n.id
+                    WHERE n.created_at > now() - (%s || ' days')::interval
+                      AND n.body ~* 'class'
+                    ORDER BY em.received_at DESC NULLS LAST
+                    LIMIT 300""",
+                (days,),
+            )
+            notes = [dict(r) for r in cur.fetchall()]
+
+        today = date.today()
+        for child in children:
+            first = (child["name"] or "").split()[0]
+            if not first:
+                continue
+            on_file = child["school_year"]
+            for note in notes:
+                text = f"{note['subject'] or ''}\n{note['body'] or ''}"
+                if first.lower() not in text.lower():
+                    continue
+                # Look near the child's name, not anywhere in a long newsletter.
+                at = text.lower().find(first.lower())
+                window = text[max(0, at - 200):at + 300]
+                m = SCHOOL_CLASS_RE.search(window)
+                if not m:
+                    continue
+                year_in_mail, letter = int(m.group(1)), m.group(2).upper()
+                code = f"{year_in_mail}{letter}"
+
+                if year_in_mail == on_file:
+                    if child["class_code"] == code and child["class_code_as_at"] == today.year:
+                        break
+                    new_year = on_file
+                elif year_in_mail == on_file + 1 and today.month in (12, 1, 2, 3):
+                    # The school says she has moved up, and the school decides.
+                    new_year = year_in_mail
+                else:
+                    continue
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.person
+                              SET school_year = %s, school_year_as_at = %s,
+                                  class_code = %s, class_code_as_at = %s,
+                                  updated_at = now()
+                            WHERE id = %s""",
+                        (new_year, today.year, code, today.year, child["id"]),
+                    )
+                conn.commit()
+                _retitle_school_routine(conn, child["id"], new_year, code)
+                learned += 1
+                print(f"[maintenance] class allocation: {child['name']} is in {code} "
+                      f"(from '{(note['subject'] or 'an email')[:50]}')")
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.event
+                              SET task_status = 'done', updated_at = now()
+                            WHERE event_type = 'task'
+                              AND title ILIKE %s
+                              AND coalesce(task_status, 'open') IN ('open', 'in_progress')""",
+                        (f"Find {first}'s class for%",),
+                    )
+                conn.commit()
+                break
+    finally:
+        conn.close()
+    return {"learned": learned}
+
+
 # ── Birthdays, from the register rather than from memory ─────────────────────
 # Seventeen birthday entries were spread across three calendars, several of
 # them duplicated between Outlook and Gmail, with titles like "Ingas
@@ -4497,6 +4751,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "connector_health", "audit_rollup", "close_passed_event_tasks",
         "learn_tenancy_dates", "new_tenancy_followup", "settle_paid_policies",
         "track_insurance_policies", "property_sale_checklist", "birthday_events",
+        "learn_class_allocation", "roll_school_year",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -4728,6 +4983,19 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         results["learn_tenancy_dates"] = _run_with_timeout(
             task_learn_tenancy_dates, 120, "learn_tenancy_dates")
         print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
+
+    if "learn_class_allocation" in all_tasks:
+        # Before the roll: the school's own email settles the year and the
+        # class together, and the date-driven roll is only the fallback.
+        results["learn_class_allocation"] = _run_with_timeout(
+            task_learn_class_allocation, 120, "learn_class_allocation")
+        print(f"[maintenance] learn_class_allocation done: "
+              f"{results['learn_class_allocation']}")
+
+    if "roll_school_year" in all_tasks:
+        results["roll_school_year"] = _run_with_timeout(
+            task_roll_school_year, 60, "roll_school_year")
+        print(f"[maintenance] roll_school_year done: {results['roll_school_year']}")
 
     if "birthday_events" in all_tasks:
         results["birthday_events"] = _run_with_timeout(
