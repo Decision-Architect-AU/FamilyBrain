@@ -64,6 +64,9 @@ export default function Home() {
           </Link>
           <ReviewBadge />
           <NotificationsBadge />
+          <Link href="/frm" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
+            FRM
+          </Link>
           <Link href="/assets" className="text-xs text-gray-400 hover:text-sky-400 transition-colors">
             Assets
           </Link>
