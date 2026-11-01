@@ -260,9 +260,20 @@ def _our_property_pattern() -> re.Pattern | None:
         return None
     if not patterns:
         return None
+    # Two dwellings on one lot need their own patterns to tell their leases
+    # apart ("6 anchusa", "6a anchusa"), but 12 of 370 emails about that lot
+    # never state which dwelling — just "Anchusa Street". So the street name
+    # on its own counts here too: this gate decides whether mail is about us
+    # at all, and being unsure which of our houses is no reason to bin it.
+    # Deciding WHICH property a date belongs to is a separate job with
+    # stricter rules (see task_learn_tenancy_dates).
+    terms = set(patterns)
+    for pattern in patterns:
+        terms.update(w for w in re.findall(r"[a-z]{5,}", pattern))
     # Word-bounded: "anchusa" must be the word, not part of a longer one.
     _OUR_PROPERTIES = re.compile(
-        r"\b(" + "|".join(re.escape(x) for x in sorted(patterns)) + r")\b", re.I)
+        r"\b(" + "|".join(re.escape(x) for x in sorted(terms, key=len, reverse=True)) + r")\b",
+        re.I)
     return _OUR_PROPERTIES
 
 

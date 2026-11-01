@@ -1064,6 +1064,10 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
         expiry = _fact_anchor(rule, asset_facts)
         title = (_lease_notice_title(asset_facts.get("address") or "this property", expiry)
                  if expiry else rule.get("event_label", event_type))
+    elif event_type == "LEASE_END" and asset_facts:
+        expiry = _fact_anchor(rule, asset_facts)
+        title = (_lease_end_title(asset_facts.get("address") or "this property", expiry)
+                 if expiry else rule.get("event_label", event_type))
     else:
         title = rule.get("event_label", event_type)
 
@@ -1072,7 +1076,13 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
     # date it closes are the whole content, and they have to travel with the
     # entry onto whatever calendar it lands on.
     notes = None
-    if event_type == "LEASE_NOTICE" and asset_facts:
+    if event_type == "LEASE_END" and asset_facts:
+        expiry = _fact_anchor(rule, asset_facts)
+        if expiry:
+            notes = (f"The fixed term for {asset_facts.get('address') or 'this property'} "
+                     f"ends today ({expiry.isoformat()}). Bond, exit condition report "
+                     f"and keys all fall due around this date.")
+    elif event_type == "LEASE_NOTICE" and asset_facts:
         expiry = _fact_anchor(rule, asset_facts)
         if expiry:
             notes = _lease_notice_body(
@@ -1163,6 +1173,17 @@ def _lease_notice_title(asset_name: str, expiry: date) -> str:
     neither which house nor by when.
     """
     return f"{asset_name}: lease ends {expiry.strftime('%-d %b %Y')} — review rent or serve notice"
+
+
+def _lease_end_title(asset_name: str, expiry: date) -> str:
+    """The day itself, as well as the notice before it.
+
+    The 60-day notice is for deciding; this is the date the tenancy actually
+    ends, which is when a bond is settled, an exit condition report is due and
+    a vacating tenant hands back keys. One is a decision, the other is a
+    deadline, and collapsing them loses the deadline.
+    """
+    return f"{asset_name}: lease ends today"
 
 
 def _lease_notice_body(asset_name: str, expiry: date, notice_date: date) -> str:
@@ -2814,6 +2835,158 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── What a new tenancy sets in motion ────────────────────────────────────────
+# A new lease is not one fact, it is a small pile of work: the term has to be
+# known, the rent projected across it, an entry made for the day it ends, a
+# notice placed before the window closes, and the tenancy details brought up
+# to date. FamilyBrain should be doing that, not asking somebody to remember
+# to.
+#
+# All of it depends on the lease itself, and the lease is a document that
+# arrives (or does not) from the agent. So when a tenancy appears without one,
+# the first piece of work is to go and get it — and that is a job for a person,
+# which makes it the one part of this that is genuinely a task. Everything
+# derived from a lease we have not read is marked as assumed, so it can be
+# told apart from what the document actually says.
+LEASE_CHASE_TITLE = "Get the lease agreement for {name}"
+
+
+def _rent_projection(facts: dict) -> str | None:
+    """Rent across the term, when the term and the rent are both known.
+
+    Projected as one figure on the property rather than as a calendar entry
+    per payment: fifty-two entries a year for ten properties is five hundred
+    appointments nobody asked for, and the complaint that started all of this
+    was too many appointments.
+    """
+    try:
+        rent_pw = float(str(facts.get("rent_pw") or "").replace(",", "") or 0)
+        start = date.fromisoformat(str(facts["lease_start"])[:10])
+        end = date.fromisoformat(str(facts["lease_expiry"])[:10])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if rent_pw <= 0 or end <= start:
+        return None
+    weeks = (end - start).days / 7
+    total = round(rent_pw * weeks)
+    return (f"${total:,.0f} over the term ({weeks:.0f} weeks at ${rent_pw:,.0f}/wk, "
+            f"{start.isoformat()} to {end.isoformat()}), before fees")
+
+
+def task_new_tenancy_followup() -> dict:
+    """Chase the lease, project the rent, and say what is still assumed."""
+    conn = _conn()
+    chased, projected = 0, 0
+    try:
+        with conn.cursor() as cur:
+            # Three ways a property needs its lease chased: a tenancy we know
+            # started but cannot describe, a property plainly tenanted (it has
+            # a weekly rent) with no lease on file at all, and a fixed term
+            # whose end has already passed — which means it either rolled over
+            # to periodic or the record is stale, and the notice periods differ.
+            cur.execute(
+                """SELECT id, name, facts
+                     FROM personal.asset
+                    WHERE asset_type = 'property' AND status = 'active'
+                      AND (facts ? 'lease_start'
+                           OR (coalesce(facts->>'rent_pw', '') <> ''
+                               AND coalesce(facts->>'lease_expiry', '') = '')
+                           OR (facts->>'lease_expiry') < current_date::text)"""
+            )
+            properties = [dict(r) for r in cur.fetchall()]
+
+        for prop in properties:
+            facts = prop["facts"] or {}
+            name = prop["name"]
+            assumed = str(facts.get("lease_expiry_source") or "").startswith("assumed")
+            missing = []
+            lapsed = (str(facts.get("lease_expiry") or "")[:10] or "9999") < date.today().isoformat()
+            # A date that has already gone by is not knowledge of the term, it
+            # is the absence of it: the tenancy is on some other footing now
+            # and nothing on file says what.
+            if assumed or not facts.get("lease_expiry") or lapsed:
+                missing.append("the end of the fixed term")
+            if not facts.get("rent_pw"):
+                missing.append("the rent and how often it is paid")
+            if not facts.get("bond"):
+                missing.append("the bond held")
+            if not facts.get("property_manager_agency"):
+                missing.append("who is managing it")
+
+            started = str(facts.get("lease_start") or "")[:10]
+            expiry = str(facts.get("lease_expiry") or "")[:10]
+            if started:
+                opening = (f"A tenancy at {name} started {started} and the lease "
+                           f"has not been read.")
+            elif expiry and expiry < date.today().isoformat():
+                opening = (f"The recorded fixed term for {name} ended {expiry}, so "
+                           f"it has either rolled over to periodic or the record "
+                           f"is out of date, and no current lease has been read.")
+            else:
+                opening = (f"{name} is tenanted — there is a weekly rent on file — "
+                           f"but no lease agreement has been read.")
+
+            projection = _rent_projection(facts)
+            if projection and facts.get("projected_rent_term") != projection:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE personal.asset
+                              SET facts = facts || jsonb_build_object(
+                                    'projected_rent_term', %s::text),
+                                  updated_at = now()
+                            WHERE id = %s""",
+                        (projection, prop["id"]),
+                    )
+                conn.commit()
+                projected += 1
+                print(f"[maintenance] tenancy: {name[:34]} rent projected — {projection}")
+
+            if not missing:
+                continue
+
+            title = LEASE_CHASE_TITLE.format(name=name)
+            detail = (
+                f"{opening}\n"
+                f"The document is needed to settle: {'; '.join(missing)}.\n"
+                + (f"Working assumption meanwhile: {facts.get('lease_expiry_source')}.\n"
+                   if assumed else "")
+                + "Ask the managing agent for the signed agreement. Once it arrives "
+                  "and is read, the term, the rent projection and the end-of-lease "
+                  "notice all follow from it automatically."
+            )
+
+            with conn.cursor() as cur:
+                # One open chase per property. The task carries the asset so
+                # the property and the job can find each other.
+                cur.execute(
+                    """SELECT id FROM personal.event
+                        WHERE event_type = 'task' AND asset_id = %s
+                          AND title = %s
+                          AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+                        LIMIT 1""",
+                    (prop["id"], title),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """INSERT INTO personal.event
+                           (title, event_type, status, provenance, calendar_source,
+                            notes, task_status, asset_id)
+                       VALUES (%s, 'task', 'confirmed', 'rule', 'asset_rules',
+                               %s, 'open', %s)
+                    RETURNING id""",
+                    (title, detail, prop["id"]),
+                )
+                task_id = cur.fetchone()["id"]
+            conn.commit()
+            chased += 1
+            print(f"[maintenance] tenancy: chasing the lease for {name[:34]} "
+                  f"(task {task_id}) — needs {', '.join(missing)}")
+    finally:
+        conn.close()
+    return {"leases_chased": chased, "rent_projected": projected}
+
+
 # ── Learning when a tenancy starts and ends ──────────────────────────────────
 # "We've had new leases" — and the system had no idea, because lease_expiry is
 # a fact somebody typed in once and nothing ever revisited. Ten of the eleven
@@ -3650,7 +3823,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "review_query_flags", "query_flags_report",
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
-        "learn_tenancy_dates",
+        "learn_tenancy_dates", "new_tenancy_followup",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -3882,6 +4055,13 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         results["learn_tenancy_dates"] = _run_with_timeout(
             task_learn_tenancy_dates, 120, "learn_tenancy_dates")
         print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
+
+    if "new_tenancy_followup" in all_tasks:
+        # Runs after the reader, so a date learned tonight is already in the
+        # facts when this decides what is still missing.
+        results["new_tenancy_followup"] = _run_with_timeout(
+            task_new_tenancy_followup, 120, "new_tenancy_followup")
+        print(f"[maintenance] new_tenancy_followup done: {results['new_tenancy_followup']}")
 
     if "close_passed_event_tasks" in all_tasks:
         results["close_passed_event_tasks"] = _run_with_timeout(
