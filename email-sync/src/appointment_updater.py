@@ -1164,7 +1164,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
                        updated_at, status, suspended_reason, source_email_id, calendar_event_id,
                        settled_at, reminder_minutes
-                FROM personal.event
+                FROM personal.event e
                 WHERE (
                     -- Obligations must NEVER take the bare "gcal_event_id IS NULL /
                     -- updated_at > calendar_written_at" immediate-push path — that

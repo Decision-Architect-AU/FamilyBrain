@@ -81,6 +81,24 @@ _WATCHDOG_MISSED_CYCLES = 4   # allow this many missed cycles before treating a 
 _WATCHDOG_CHECK_SECS    = 60
 _PROCESS_START = time.time()
 
+# How long a loop that has never written a heartbeat gets before it counts as
+# hung. A first pass is not a steady-state pass: a Gmail account whose history
+# cursor has expired backfills every message in the window, which legitimately
+# runs far longer than four poll intervals of the *tightest* loop — and until a
+# loop has beaten once, that tightest threshold is what the process-start
+# baseline is measured against.
+#
+# Confirmed live, and it is how this file's own calendar writer stopped: the
+# initial sync took about seven minutes, the review loop's 360s threshold fired
+# against the process-start baseline, os._exit(1) killed the process mid-sync,
+# the cursor was therefore never stored, and the restart began the same backfill
+# again. Sixty restarts, every seven minutes, for ten hours. Nothing after the
+# email pass — the decomposer, the appointment updater — ran once in that time.
+#
+# A startup hang is still caught, just at this threshold rather than at a
+# cadence meant for a loop that is already running.
+_WATCHDOG_STARTUP_GRACE = int(os.environ.get("WATCHDOG_STARTUP_GRACE_SECS", "2700"))
+
 
 def _touch_heartbeat(name: str) -> None:
     try:
@@ -102,11 +120,15 @@ def _watchdog_loop() -> None:
         now = time.time()
         for name, interval in _LOOP_INTERVALS.items():
             path = os.path.join(_HEARTBEAT_DIR, name)
+            threshold = interval * _WATCHDOG_MISSED_CYCLES
             try:
                 age = now - os.path.getmtime(path)
             except FileNotFoundError:
+                # This loop has never completed an iteration. Measuring that
+                # against its running cadence punishes a slow first pass, so
+                # the startup grace applies until it has beaten once.
                 age = now - _PROCESS_START
-            threshold = interval * _WATCHDOG_MISSED_CYCLES
+                threshold = max(threshold, _WATCHDOG_STARTUP_GRACE)
             if age > threshold:
                 print(f"[watchdog] {name} loop stale ({age:.0f}s since last heartbeat/start, "
                       f"threshold {threshold}s) — forcing restart", flush=True)
@@ -119,18 +141,27 @@ def run_email_sync() -> None:
     gmail_accounts   = [a for a in accounts if a["provider"] == "gmail"   and a.get("sync_email")]
     outlook_accounts = [a for a in accounts if a["provider"] == "outlook" and a.get("sync_email")]
 
+    # A backfill of several thousand messages is progress, not a hang, and the
+    # watchdog cannot tell the difference from the outside. Beating while the
+    # sync is actually moving says so — and says nothing when it stops moving,
+    # which is the case the watchdog exists for.
+    def _beat() -> None:
+        _touch_heartbeat("email")
+
     total = 0
     for acct in gmail_accounts:
         print(f"[email-sync] Gmail email: {acct['email_address']}")
-        n = gmail_mod.sync_email(acct, INGESTOR_URL)
+        n = gmail_mod.sync_email(acct, INGESTOR_URL, progress=_beat)
         print(f"[email-sync]   → {n} messages ingested")
         total += n
+        _beat()
 
     for acct in outlook_accounts:
         print(f"[email-sync] Outlook email: {acct['email_address']}")
         n = outlook_mod.sync_email(acct, INGESTOR_URL)
         print(f"[email-sync]   → {n} messages ingested")
         total += n
+        _beat()
 
     print(f"[email-sync] Email pass complete — {total} total messages ingested")
 
@@ -337,17 +368,13 @@ if __name__ == "__main__":
     t_wd = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
     t_wd.start()
 
-    # Run first pass immediately on startup
-    try:
-        run_email_sync()
-    except Exception as e:
-        print(f"[email-sync] Initial email sync error: {e}")
-
-    try:
-        run_calendar_sync()
-    except Exception as e:
-        print(f"[email-sync] Initial calendar sync error: {e}")
-
+    # The first pass used to run here, synchronously, before any loop thread
+    # existed — so the watchdog was measuring loops that had not been created
+    # yet against a baseline that started ticking the moment the process did.
+    # Every loop below runs its body immediately and only then sleeps, so this
+    # was a duplicate first pass as well as the thing that made a slow startup
+    # look like a hang. Starting the threads is the first pass.
+    #
     # Start background loops
     t_email  = threading.Thread(target=email_loop,     daemon=True, name="email-loop")
     t_cal    = threading.Thread(target=calendar_loop,  daemon=True, name="calendar-loop")

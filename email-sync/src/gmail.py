@@ -73,6 +73,11 @@ import time as _time
 _service_cache: dict[tuple, tuple] = {}   # (account_id, api) -> (service, cached_at)
 _SERVICE_CACHE_TTL_SECS = 1800   # rebuild periodically so credential refresh is picked up
 
+# How often a long sync reports that it is still moving. Small enough that the
+# caller's watchdog never waits a whole poll interval for news, large enough
+# that it costs nothing per message.
+_PROGRESS_EVERY = 25
+
 
 def _cached_service(account: dict, api: str, version: str):
     key = (account["id"], api)
@@ -392,12 +397,18 @@ def swap_ingested_label(account: dict, svc, msg_id: str, remove_category: str, a
         print(f"[gmail] Failed to swap label for {msg_id}: {e}")
 
 
-def sync_email(account: dict, ingestor_url: str) -> int:
+def sync_email(account: dict, ingestor_url: str, progress=None) -> int:
     """
     Sync new emails for a Gmail account.
     Uses history-based incremental sync (historyId cursor in sync_cursor field).
     Falls back to listing recent messages if no cursor exists.
     Returns number of messages submitted to ingestor.
+
+    `progress` is called every _PROGRESS_EVERY messages while the sync is
+    moving. A full backfill runs for far longer than the caller's watchdog
+    allows for a steady-state pass, and from outside there is no way to tell
+    that from a stalled socket — so it is told, periodically, by the only code
+    that knows.
     """
     import requests as req
 
@@ -451,7 +462,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
                 for added in h.get("messagesAdded", []):
                     msg_ids.append(added["message"]["id"])
 
-        for msg_id in msg_ids:
+        for seen, msg_id in enumerate(msg_ids, 1):
+            if progress and seen % _PROGRESS_EVERY == 0:
+                progress()
             if db.is_already_ingested(account_id, msg_id):
                 continue
             try:
@@ -530,7 +543,9 @@ def sync_email(account: dict, ingestor_url: str) -> int:
             retry_ids = db.get_retryable_messages(account_id, limit=RETRY_BATCH)
         if retry_ids:
             print(f"[gmail] retrying {len(retry_ids)} error/pending messages for {account['email_address']}")
-        for msg_id in retry_ids:
+        for seen, msg_id in enumerate(retry_ids, 1):
+            if progress and seen % _PROGRESS_EVERY == 0:
+                progress()
             try:
                 msg = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
                 parsed = _parse_message(msg)
