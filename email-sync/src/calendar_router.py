@@ -57,6 +57,11 @@ _BILLS_KW = [
     "rates", "rent", "overdue", "balance due", "tax invoice",
     "utility", "electricity", "water", "internet", "phone bill",
     "council rates", "body corporate", "strata levy",
+    # A renewal notice is a bill. RACQ roadside cover came through as a
+    # family-admin entry because nothing here matched "Renew ... membership",
+    # even with the amount written in the body.
+    "renew", "renewal", "membership", "premium", "policy", "insurance",
+    "roadside", "amount due", "pay $", "subscription",
 ]
 
 _HOLIDAY_KW = [

@@ -1060,8 +1060,23 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
     event_type = rule.get("event_type", "TASK")
     if event_type == "BIN_NIGHT" and asset_facts:
         title = _bin_night_title(target_date, asset_facts)
+    elif event_type == "LEASE_NOTICE" and asset_facts:
+        expiry = _fact_anchor(rule, asset_facts)
+        title = (_lease_notice_title(asset_facts.get("address") or "this property", expiry)
+                 if expiry else rule.get("event_label", event_type))
     else:
         title = rule.get("event_label", event_type)
+
+    # Generated events carry no notes as a rule — the title says it all for a
+    # bin night. A lease notice is the exception: the window it opens and the
+    # date it closes are the whole content, and they have to travel with the
+    # entry onto whatever calendar it lands on.
+    notes = None
+    if event_type == "LEASE_NOTICE" and asset_facts:
+        expiry = _fact_anchor(rule, asset_facts)
+        if expiry:
+            notes = _lease_notice_body(
+                asset_facts.get("address") or "this property", expiry, target_date)
 
     rule_id = rule.get("name", event_type)
 
@@ -1078,12 +1093,12 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               title, event_type, starts_at, ends_at, effective_date,
               status, provenance, asset_id, person_id, calendar_source,
               slot_key, slot_class, blocks_person, precedence_rank,
-              gen_asset_id, gen_rule_id, occurrence_date
+              gen_asset_id, gen_rule_id, occurrence_date, notes
             ) VALUES (
               %s, %s, %s, %s, %s,
               'generated', 'rule', %s, %s, 'asset_rules',
               %s, %s, %s, %s,
-              %s, %s, %s
+              %s, %s, %s, %s
             )
             ON CONFLICT (gen_asset_id, gen_rule_id, occurrence_date) WHERE provenance = 'rule'
             DO UPDATE SET
@@ -1098,6 +1113,7 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               superseded_by_event_id  = NULL,
               gcal_event_id           = NULL,
               gcal_calendar_id        = NULL,
+              notes                   = coalesce(EXCLUDED.notes, personal.event.notes),
               updated_at              = now()
             WHERE personal.event.status IN ('generated', 'superseded')
               AND NOT EXISTS (
@@ -1115,8 +1131,47 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
             title, event_type, starts_at, ends_at, target_date,
             asset_id, person_id,
             slot_key, slot_class, blocks_person, rank,
-            asset_id, rule_id, target_date,
+            asset_id, rule_id, target_date, notes,
         ))
+
+
+def _fact_anchor(rule: dict, facts: dict) -> date | None:
+    """The date in the asset's facts that this rule counts back from.
+
+    trigger_source has been sitting in the rules for ages — "facts.lease_expiry"
+    on every property's rent review — and nothing ever read it. The anchor was
+    always asset.last_event_date, which is why Doveton's rent review landed in
+    July 2027 while its lease actually ends in December 2026.
+    """
+    source = str(rule.get("trigger_source") or "")
+    if not source.startswith("facts."):
+        return None
+    raw = (facts or {}).get(source.split(".", 1)[1])
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def _lease_notice_title(asset_name: str, expiry: date) -> str:
+    """Name the property and the date, because the notice is useless without both.
+
+    Whoever reads this has to act on it inside a legal window: decide the
+    rent, or serve notice to end the tenancy. "Rent review due" tells them
+    neither which house nor by when.
+    """
+    return f"{asset_name}: lease ends {expiry.strftime('%-d %b %Y')} — review rent or serve notice"
+
+
+def _lease_notice_body(asset_name: str, expiry: date, notice_date: date) -> str:
+    days = (expiry - notice_date).days
+    return (f"Lease for {asset_name} expires {expiry.isoformat()} "
+            f"({expiry.strftime('%A %-d %B %Y')}).\n"
+            f"This is {days} days out, so the 60-day window is still open: "
+            f"a rent review or a notice to leave served from today is in time.\n"
+            f"Decide now whether to review the rent, re-sign, or end the tenancy.")
 
 
 def _bin_night_title(target_date: date, facts: dict) -> str:
@@ -1162,6 +1217,17 @@ def _generate_dates(rule: dict, anchor: date, horizon: date, now: date) -> list[
             if current >= now:
                 dates.append(current)
             current += relativedelta(years=1)
+
+    elif recurrence == "before_fact":
+        # One occurrence per lease term, a fixed distance before the date in
+        # the facts. The anchor is already the fact date here, so the offset
+        # is simply subtracted. A notice whose date has passed is not
+        # generated: it would arrive claiming a window that has closed.
+        target = (anchor
+                  - relativedelta(months=int(rule.get("months_before") or 0))
+                  - timedelta(days=int(rule.get("days_before") or 0)))
+        if now <= target <= horizon:
+            dates.append(target)
 
     elif recurrence == "weekdays":
         current = anchor + timedelta(days=1)
@@ -1248,7 +1314,13 @@ def task_generate_events() -> dict:
                 holiday_immune = rule.get("holiday_immune", False)
                 rule_id      = rule.get("name", rule.get("event_type", "TASK"))
 
-                for target_date in _generate_dates(rule, anchor, horizon, now):
+                # A rule may count from a date in the asset's facts rather
+                # than from the last event: a lease notice is positioned by
+                # when the lease ends, which has nothing to do with when this
+                # property last generated anything.
+                rule_anchor = _fact_anchor(rule, facts) or anchor
+
+                for target_date in _generate_dates(rule, rule_anchor, horizon, now):
                     suspend_reason = None
                     suspend_source_id = None
 
@@ -1321,6 +1393,29 @@ def _format_asset_notes(asset: dict, upcoming: list[dict]) -> str:
         if key in facts:
             label = key.replace("_", " ").title()
             lines.append(f"{label}: {facts[key]}")
+
+    # How long the tenancy has left. The expiry date on its own makes the
+    # reader do the arithmetic, and the whole question — review the rent,
+    # re-sign, or give notice — turns on how many days are left to do it in.
+    # A date already past is said plainly rather than as a negative number:
+    # it means the lease rolled over or the fact was never updated, and
+    # either way somebody should look.
+    lease_raw = facts.get("lease_expiry")
+    if lease_raw:
+        try:
+            expiry = date.fromisoformat(str(lease_raw)[:10])
+        except ValueError:
+            expiry = None
+        if expiry:
+            days = (expiry - date.today()).days
+            if days > 0:
+                window = " — inside the 60-day notice window" if days <= 60 else ""
+                lines.append(f"Lease ends: {expiry.strftime('%-d %b %Y')} "
+                             f"({days} days away){window}")
+            else:
+                lines.append(f"Lease ends: {expiry.strftime('%-d %b %Y')} "
+                             f"— passed {abs(days)} days ago, so this lease has "
+                             f"either rolled over or the date is out of date")
 
     if upcoming:
         lines.append("Upcoming events:")
@@ -2719,6 +2814,142 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Jobs for things that have already happened ───────────────────────────────
+# A disco was on Thursday. Returning the permission slip for it is not
+# something anybody can usefully do on Friday, and leaving the job open does
+# not undo the missed deadline — it just leaves a list that is mostly things
+# nobody can act on, which is how a list stops being read.
+#
+# So a job tied to a date that has passed closes itself, quietly. Two kinds
+# qualify: a task linked to an appointment whose day is over, and a task of
+# its own whose due date is past and whose subject is plainly an occasion.
+#
+# A bill is never one of these, whatever its due date says. An overdue
+# payment is still owed, and closing it would be the system deciding the
+# family had paid something it has not paid.
+PASSED_EVENT_TASK_GRACE_DAYS = int(os.environ.get("PASSED_EVENT_TASK_GRACE_DAYS", "1"))
+
+# Occasions: a day that happens and is then over. Anchored on word
+# boundaries, Postgres's \y rather than  — without it "camp" matches
+# "Varsity College Primary Campus" and every campus notice becomes an
+# occasion that expires.
+_OCCASION_WORDS = (
+    r"\y(disco|birthday|party|holiday|concert|recital|carnival|fete|assembly"
+    r"|excursion|incursion|parade|graduation|photo day|book week|sports day"
+    r"|dress[- ]?up|casual clothes|free dress|performance|showcase|camp)\y"
+)
+# Anything owed in money stays owed. Anchored for the same reason, and it
+# needed it: "rent" matched the "cur-rent" in "a current Blue Card", so five
+# volunteer requests for a disco that had already happened were being spared
+# as though they were bills.
+_MONEY_WORDS = (
+    r"\y(pay|payable|invoice|premium|renew|overdue|arrears|bpay|instal"
+    r"|subscription|membership|levy|rates|rent|bill)\y"
+)
+
+
+def task_close_passed_event_tasks() -> dict:
+    """Close jobs whose occasion has been and gone."""
+    conn = _conn()
+    closed_linked, closed_dated = 0, 0
+    try:
+        with conn.cursor() as cur:
+            # Linked to an appointment that is over.
+            cur.execute(
+                """UPDATE personal.event t
+                      SET task_status = 'done', updated_at = now()
+                     FROM personal.event parent
+                    WHERE t.parent_event_id = parent.id
+                      AND t.event_type = 'task'
+                      AND coalesce(t.task_status, 'open') IN ('open', 'in_progress')
+                      AND parent.effective_date IS NOT NULL
+                      AND parent.effective_date < current_date - %s::int
+                      AND t.title !~* %s
+                      AND coalesce(t.notes, '') !~* %s
+                RETURNING t.id, t.title, parent.effective_date""",
+                (PASSED_EVENT_TASK_GRACE_DAYS, _MONEY_WORDS, _MONEY_WORDS),
+            )
+            for row in cur.fetchall():
+                closed_linked += 1
+                print(f"[maintenance] closed task {row['id']} '{row['title'][:40]}' — "
+                      f"its event was {row['effective_date']}")
+
+            # Its own due date is past and it is plainly an occasion.
+            cur.execute(
+                """UPDATE personal.event t
+                      SET task_status = 'done', updated_at = now()
+                    WHERE t.event_type = 'task'
+                      AND coalesce(t.task_status, 'open') IN ('open', 'in_progress')
+                      AND t.effective_date IS NOT NULL
+                      AND t.effective_date < current_date - %s::int
+                      AND (t.title ~* %s OR coalesce(t.notes, '') ~* %s)
+                      AND t.title !~* %s
+                      AND coalesce(t.notes, '') !~* %s
+                RETURNING t.id, t.title, t.effective_date""",
+                (PASSED_EVENT_TASK_GRACE_DAYS, _OCCASION_WORDS, _OCCASION_WORDS,
+                 _MONEY_WORDS, _MONEY_WORDS),
+            )
+            for row in cur.fetchall():
+                closed_dated += 1
+                print(f"[maintenance] closed task {row['id']} '{row['title'][:40]}' — "
+                      f"occasion was {row['effective_date']}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"closed_with_event": closed_linked, "closed_by_own_date": closed_dated}
+
+
+def task_link_orphan_tasks() -> dict:
+    """Give existing tasks the appointment they were always about.
+
+    parent_event_id was never written, so every task in the system is an
+    orphan. Going forward the decomposer links them as it makes them; these
+    are the ones already on the list, matched through the email they came
+    from — the one piece of evidence that is certain, because the same letter
+    produced both.
+    """
+    conn = _conn()
+    linked = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidate AS (
+                    SELECT t.id AS task_id, e.id AS event_id,
+                           row_number() OVER (
+                               PARTITION BY t.id
+                               ORDER BY (SELECT count(*) FROM (
+                                   SELECT unnest(string_to_array(lower(t.title), ' '))
+                                   INTERSECT
+                                   SELECT unnest(string_to_array(lower(e.title), ' '))
+                               ) shared) DESC, e.id) AS rank
+                      FROM personal.event t
+                      JOIN personal.event e
+                        ON e.source_email_id = t.source_email_id
+                       AND e.id <> t.id
+                       AND e.event_type <> 'task'
+                       AND e.status NOT IN ('cancelled', 'superseded')
+                     WHERE t.event_type = 'task'
+                       AND t.parent_event_id IS NULL
+                       AND t.source_email_id IS NOT NULL
+                )
+                UPDATE personal.event t
+                   SET parent_event_id = c.event_id, updated_at = now()
+                  FROM candidate c
+                 WHERE t.id = c.task_id AND c.rank = 1
+             RETURNING t.id, t.title, c.event_id
+                """
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        for row in rows:
+            linked += 1
+            print(f"[maintenance] task {row['id']} '{row['title'][:36]}' -> event {row['event_id']}")
+    finally:
+        conn.close()
+    return {"linked": linked}
+
+
 # ── What the auditor keeps asking for ────────────────────────────────────────
 # Each audit ends with one suggestion for the extractor, and on its own a
 # suggestion about one email is an anecdote. The same suggestion three times
@@ -3292,7 +3523,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "asset_summary",
         "review_query_flags", "query_flags_report",
         "spot_check", "apply_audit_patches", "money_drift",
-        "connector_health", "audit_rollup",
+        "connector_health", "audit_rollup", "close_passed_event_tasks",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -3517,6 +3748,12 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         else:
             results["spot_check"] = {"skipped": "throttled"}
             print("[maintenance] spot_check skipped (throttled)")
+
+    if "close_passed_event_tasks" in all_tasks:
+        results["close_passed_event_tasks"] = _run_with_timeout(
+            task_close_passed_event_tasks, 60, "close_passed_event_tasks")
+        print(f"[maintenance] close_passed_event_tasks done: "
+              f"{results['close_passed_event_tasks']}")
 
     if "audit_rollup" in all_tasks:
         # Cheap, and only ever as interesting as the findings behind it.

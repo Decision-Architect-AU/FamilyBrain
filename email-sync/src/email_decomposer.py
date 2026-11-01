@@ -578,6 +578,58 @@ def _create_note(cur, email_id: int, title: str, body: str,
     return row["id"] if row else None
 
 
+def _link_task_to_event(cur, task_id: int, title: str, detail: str,
+                        title_to_event_id: dict | None) -> int | None:
+    """Attach a task to the appointment it is about, if this email made one.
+
+    personal.event.parent_event_id has existed since Increment 5, and the
+    calendar writer already renders a parent's tasks into its description —
+    but nothing ever set it. All 74 tasks had a null parent, so every one of
+    them was an orphan: "Return Spooky Disco Permission Slip" sitting in a
+    list with no way to know which disco, and the disco with no way to know
+    anything was owed on it.
+
+    An email that produces both a job and an appointment almost always means
+    them to be about each other, so the candidates are the events this same
+    email produced, and the link needs a word in common beyond the ones every
+    task shares. Where nothing matches, the task stays unlinked rather than
+    being guessed onto the nearest event.
+    """
+    if not title_to_event_id:
+        return None
+    text = f"{title or ''} {detail or ''}".lower()
+    words = {w for w in re.findall(r"[a-z]{4,}", text)} - _TASK_LINK_NOISE
+    if not words:
+        return None
+
+    best_id, best_overlap = None, 0
+    for ev_title, ev_id in title_to_event_id.items():
+        if ev_id == task_id:
+            continue
+        ev_words = {w for w in re.findall(r"[a-z]{4,}", (ev_title or "").lower())}
+        ev_words -= _TASK_LINK_NOISE
+        overlap = len(words & ev_words)
+        if overlap > best_overlap:
+            best_id, best_overlap = ev_id, overlap
+    if not best_id or best_overlap < 1:
+        return None
+
+    cur.execute(
+        "UPDATE personal.event SET parent_event_id = %s, updated_at = now() WHERE id = %s",
+        (best_id, task_id),
+    )
+    print(f"[decompose] task {task_id} '{(title or '')[:34]}' belongs to event {best_id}")
+    return best_id
+
+
+# Words that appear in a job and in an appointment without connecting them.
+_TASK_LINK_NOISE = {
+    "urgent", "return", "signed", "please", "form", "forms", "slip", "note",
+    "payment", "school", "olivia", "elliana", "shannon", "glenn", "family",
+    "term", "week", "date", "today", "tomorrow", "reminder", "confirm",
+}
+
+
 def _find_duplicate_task(cur, title: str, effective_date) -> dict | None:
     """An open task that is already the same job.
 
@@ -617,6 +669,31 @@ def _find_duplicate_task(cur, title: str, effective_date) -> dict | None:
     )
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+# An amount of money, written the way a biller writes it.
+_HAS_AN_AMOUNT = re.compile(r'\$\s?\d[\d,]*(?:\.\d{2})?\b')
+# The language of being asked for money, rather than being asked to do a job.
+_BILL_LANGUAGE = re.compile(
+    r'\b(pay|payable|renew|renewal|premium|invoice|due|overdue|arrears'
+    r'|membership|subscription|direct debit|bpay|instal?ment)\b', re.I)
+
+
+def _looks_like_a_bill(title: str, detail: str) -> bool:
+    """Is this "task" actually a request for money?
+
+    "Renew RACQ Ultra Care" with "Pay $218.15" arrived as a task and sat
+    among the family's jobs — return the permission slip, book the haircut —
+    when it is a bill, and bills have their own pipeline, their own calendar
+    and their own reckoning. The extractor is not wrong that somebody has to
+    act; it is wrong about what kind of thing it is.
+
+    An amount plus the language of being billed is enough. A job with no
+    price on it stays a task, which is why "Return the signed form" is
+    unaffected.
+    """
+    text = f"{title or ''} {detail or ''}"
+    return bool(_HAS_AN_AMOUNT.search(text)) and bool(_BILL_LANGUAGE.search(text))
 
 
 def _create_task_event(cur, email_id: int, title: str, detail: str,
@@ -2193,6 +2270,13 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                           f"({received_at[:10]}) — keeping as observation, not an event")
                     itype = "observation"
 
+            # A bill that came through as a job to do belongs in the money
+            # pipeline, not on the family's task list.
+            if itype == "task" and _looks_like_a_bill(title, detail):
+                print(f"[decompose] '{title[:40]}' names an amount and asks for "
+                      f"payment — recording as a bill, not a task")
+                itype = "payment"
+
             with psycopg2.connect(DB_URL) as wconn:
                 with wconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as wcur:
                     if itype == "calendar_event":
@@ -2214,6 +2298,10 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                         priority = item.get("priority", "normal")
                         task_event_id = _create_task_event(wcur, email_id, title, detail,
                                                             item.get("date"), priority)
+                        # Tie it to the appointment it is about, so the job and
+                        # the thing it is for can find each other.
+                        _link_task_to_event(wcur, task_event_id, title, detail,
+                                            title_to_event_id)
                         # Increment 4, 4b — does this task concern an existing
                         # Product with a documented knowledge gap (e.g. no
                         # warranty on file)? Same transaction/connection as

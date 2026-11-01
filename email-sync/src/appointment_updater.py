@@ -557,6 +557,7 @@ def _write_outlook(outlook_acct: dict, ev: dict, outlook_ac=None, route: str = "
             "body": {"contentType": "html", "content": outlook_body},
             "start": _fmt(starts),
             "end":   _fmt(ends),
+            "isReminderOn": False,
         }
         if ev.get("location"):
             body["location"] = {"displayName": ev["location"]}
@@ -913,6 +914,18 @@ def _find_orphan_fb_event(cal_svc, cal_id: str, ev: dict, title: str,
     return None
 
 
+# FamilyBrain writes a lot of entries, and an entry it wrote is not a reason
+# to interrupt somebody. Neither calendar was being told anything about
+# reminders, so both applied their own defaults and every generated school
+# day, every rent reminder and every enriched routine arrived as a
+# notification on somebody's phone. The calendar is a record to consult, not
+# a thing that shouts: anything written from here is silent, and a reminder
+# the family wants on an entry they care about is theirs to set by hand (and
+# survives, because an event we patch keeps the reminders it was given — we
+# only ever set them at insert).
+REMINDERS_OFF_GCAL = {"useDefault": False, "overrides": []}
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
     """Upsert event into GCal, return gcal event id.
 
@@ -938,6 +951,7 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         "description": description,
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
+        "reminders":   REMINDERS_OFF_GCAL,
     }
     if ev.get("location"):
         body["location"] = ev["location"]
@@ -945,6 +959,10 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         body.update(_gcal_extended_props(fb_id))
     if color_id:
         body["colorId"] = color_id
+
+    # Everything that patches rather than inserts leaves reminders alone, so a
+    # reminder the family set by hand survives the next enrichment pass.
+    patch_body = {k: v for k, v in body.items() if k != "reminders"}
 
     if ev_id:
         stable_id = _stable_gcal_id(ev_id)
@@ -955,7 +973,7 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         except Exception as e:
             if "409" in str(e) or "conflict" in str(e).lower():
                 try:
-                    cal_svc.events().patch(calendarId=cal_id, eventId=stable_id, body=body).execute()
+                    cal_svc.events().patch(calendarId=cal_id, eventId=stable_id, body=patch_body).execute()
                     return stable_id
                 except Exception:
                     pass  # fall through to fresh insert below
@@ -967,7 +985,7 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
             if fb_id:
                 existing_id = _find_gcal_event_by_fb_id(cal_svc, cal_id, fb_id, starts)
                 if existing_id:
-                    cal_svc.events().patch(calendarId=cal_id, eventId=existing_id, body=body).execute()
+                    cal_svc.events().patch(calendarId=cal_id, eventId=existing_id, body=patch_body).execute()
                     return existing_id
             result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
             return result["id"]
@@ -975,7 +993,7 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         # No DB backing — check for orphan before inserting
         orphan_id = _find_orphan_fb_event(cal_svc, cal_id, ev, title, starts, ends)
         if orphan_id:
-            cal_svc.events().patch(calendarId=cal_id, eventId=orphan_id, body=body).execute()
+            cal_svc.events().patch(calendarId=cal_id, eventId=orphan_id, body=patch_body).execute()
             return orphan_id
         result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
         return result["id"]
@@ -1020,7 +1038,9 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
                 if existing_id:
                     cal_svc.events().patch(calendarId=cal_id, eventId=existing_id, body=body).execute()
                     return existing_id
-            result = cal_svc.events().insert(calendarId=cal_id, body=body).execute()
+            result = cal_svc.events().insert(
+                calendarId=cal_id,
+                body={**body, "reminders": REMINDERS_OFF_GCAL}).execute()
             return result["id"]
         else:
             raise
@@ -1179,6 +1199,14 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 -- inserting a new one.
                 AND (calendar_source NOT LIKE 'gmail:%%' OR source_email_id IS NOT NULL)
                 AND starts_at >= now() - INTERVAL '1 hour'  -- skip past events; NULL (dateless obligations) excluded automatically
+                -- A routine marked calendar_silent is a fact about the week,
+                -- not an appointment: school attendance, a daily medication.
+                -- The rows stay — they are what makes a clash detectable —
+                -- but nobody needs 66 school days on their phone.
+                AND NOT EXISTS (
+                      SELECT 1 FROM personal.asset sa
+                       WHERE sa.calendar_silent
+                         AND sa.id IN (e.gen_asset_id, e.asset_id))
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
                 """,
@@ -1196,6 +1224,14 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 WHERE gcal_event_id IS NOT NULL
                   AND (
                     status IN ('cancelled', 'superseded')
+                    -- Newly silenced routines: their entries are already on
+                    -- the calendar from before, and silence has to apply to
+                    -- what is there as well as what comes next, or the
+                    -- setting does nothing for months.
+                    OR EXISTS (
+                          SELECT 1 FROM personal.asset sa
+                           WHERE sa.calendar_silent
+                             AND sa.id IN (e.gen_asset_id, e.asset_id))
                     -- A suspended occurrence belongs on Tentative and nowhere
                     -- else. The write path below reroutes future ones, but it
                     -- skips anything already past, so a fortnight of school-day

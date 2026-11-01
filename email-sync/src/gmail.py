@@ -144,6 +144,69 @@ def create_draft(account: dict, to: str, subject: str, body_text: str, body_html
     return result["id"], result["message"]["threadId"], result["message"]["id"]
 
 
+
+# ── Sending, where sending is ours to do ──────────────────────────────────────
+# Everything FamilyBrain composed used to stop in the drafts folder, which is
+# the right default for mail that leaves the household — a cancellation to
+# Olivia's speech therapist carries the family's name and cannot be unsent, so
+# a person reads it first.
+#
+# Mail to ourselves is a different thing. A weekly digest or a follow-up note
+# addressed to one of our own connected inboxes is a message from the system
+# to the household, and leaving it in drafts means nobody sees it unless they
+# go looking. Those send.
+#
+# The test is the recipient, not the message: an address belonging to one of
+# the connected accounts is us. Nothing else is, however familiar it looks.
+
+
+def _household_inboxes() -> frozenset[str]:
+    """Addresses of our own connected accounts."""
+    try:
+        with db.conn() as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT lower(email_address) AS a FROM personal.email_account")
+                return frozenset(r["a"] for r in cur.fetchall() if r.get("a"))
+    except Exception as e:
+        # Fail closed: unknown means not ours, so the mail waits in drafts
+        # rather than being sent to somebody on a guess.
+        print(f"[gmail] could not read household inboxes, will draft only: {e}")
+        return frozenset()
+
+
+def deliver(account: dict, to: str, subject: str, body_text: str,
+            body_html: str | None = None) -> tuple[str, bool]:
+    """Send to one of our own inboxes, draft anything else.
+
+    Returns (id, sent): the message id when sent, the draft id when drafted.
+    """
+    recipients = {a.strip().lower() for a in (to or "").replace(";", ",").split(",") if a.strip()}
+    ours = _household_inboxes()
+    if not recipients or not recipients.issubset(ours):
+        draft_id, _thread, _msg = create_draft(account, to, subject, body_text, body_html)
+        outside = ", ".join(sorted(recipients - ours)) or "(no recipient)"
+        print(f"[gmail] drafted '{subject[:50]}' for review — goes to {outside}")
+        return draft_id, False
+
+    import base64 as _b64
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    svc = _gmail_service(account)
+    if body_html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body_text, "plain"))
+        msg.attach(MIMEText(body_html, "html"))
+    else:
+        msg = MIMEText(body_text)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = _b64.urlsafe_b64encode(msg.as_bytes()).decode()
+    result = svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+    print(f"[gmail] sent '{subject[:50]}' to {to}")
+    return result["id"], True
+
+
 # ── Email ──────────────────────────────────────────────────────────────────────
 
 def _extract_body(payload: dict) -> str:

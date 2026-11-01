@@ -40,6 +40,11 @@ export async function GET(req: NextRequest) {
       FROM decision_os.co_comment cm WHERE cm.capture_id=$1 ORDER BY cm.id`, [id]);
     return NextResponse.json({ ...cap, comments });
   }
+  // ?days=N keeps only threads whose POST was published in the last N days.
+  // The publish time is decoded from the URL's snowflake id (X status,
+  // LinkedIn activity), falling back to first_seen_at. Filtering here, not in
+  // the client, so the LIMIT can't push brand-new unscored threads off the list.
+  const days = Number(req.nextUrl.searchParams.get('days')) || null;
   const rows = await q(`
     SELECT c.*,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
@@ -48,6 +53,10 @@ export async function GET(req: NextRequest) {
       (SELECT count(DISTINCT ss.signal_id) FROM decision_os.co_signal_source ss
         JOIN decision_os.co_comment cm ON cm.id=ss.comment_id WHERE cm.capture_id=c.id) AS n_signals
     FROM decision_os.co_capture c WHERE c.status='active'
+      AND ($1::int IS NULL OR coalesce(
+        to_timestamp((div(substring(c.post_url from '/status/(\\d{15,})')::numeric, 4194304) + 1288834974657) / 1000.0),
+        to_timestamp(div(substring(lower(c.post_url) from '(?:activity|ugcpost|share)(?::|%3a)(\\d{15,})')::numeric, 4194304) / 1000.0),
+        c.first_seen_at) > now() - make_interval(days => $1::int))
     ORDER BY
       -- priority: threads where Glenn posted and others replied after him
       (SELECT count(*) FROM decision_os.co_comment o
@@ -57,7 +66,7 @@ export async function GET(req: NextRequest) {
       -- (first_seen_at, immune to re-capture bumps) outrank stale high-impact
       (c.impact + CASE WHEN c.first_seen_at > now() - interval '24 hours' THEN 2
                        WHEN c.first_seen_at > now() - interval '72 hours' THEN 0.8 ELSE 0 END) DESC,
-      c.first_seen_at DESC LIMIT 100`);
+      c.first_seen_at DESC LIMIT 100`, [days]);
   return NextResponse.json(rows);
 }
 

@@ -534,9 +534,16 @@ def build_digest_body(days: int = 7) -> tuple[str, str, str]:
 
 
 def send_weekly_digest(account: dict) -> str | None:
-    """Builds and saves the digest as a Gmail draft in `account`'s own mailbox."""
+    """Builds the digest and delivers it to the household.
+
+    This used to stop in the drafts folder, where a weekly summary is no use
+    to anybody: it has to be opened on purpose to be read, which is the one
+    thing a digest exists to avoid. It goes to one of our own inboxes, so it
+    sends — gmail.deliver() is what decides that, by looking at who the
+    recipient is, and it still drafts anything addressed outside the house.
+    """
     subject, text_body, html_body = build_digest_body()
     to = DIGEST_TO_ADDRESS or account["email_address"]
-    draft_id, _thread_id, _msg_id = gmail_mod.create_draft(account, to, subject, text_body, html_body)
-    print(f"[digest] saved draft '{subject}' (draft {draft_id}) to {account['email_address']}")
-    return draft_id
+    msg_id, sent = gmail_mod.deliver(account, to, subject, text_body, html_body)
+    print(f"[digest] {'sent' if sent else 'drafted'} '{subject}' to {to}")
+    return msg_id

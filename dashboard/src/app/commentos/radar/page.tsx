@@ -144,7 +144,7 @@ function postedAt(c: any): number | null {
   const url = c.post_url || '';
   let m = url.match(/\/status\/(\d{15,})/);
   if (m) return Number(BigInt(m[1]) >> BigInt(22)) + 1288834974657;
-  m = url.match(/activity(?::|%3A)(\d{15,})/i);
+  m = url.match(/(?:activity|ugcPost|share)(?::|%3A)(\d{15,})/i);
   if (m) return Number(BigInt(m[1]) >> BigInt(22));
   const seen = c.first_seen_at || c.captured_at;
   return seen ? new Date(seen).getTime() : null;
@@ -201,7 +201,8 @@ export default function RadarPage() {
     setDaysState(d); setSel(null);
     try { localStorage.setItem('radar.postDays', d == null ? 'any' : String(d)); } catch {}
   };
-  const { data: captures, mutate: mutList } = useSWR('/api/commentos/captures', fetcher, { refreshInterval: 15000 });
+  const { data: captures, mutate: mutList } = useSWR(
+    `/api/commentos/captures${days ? `?days=${days}` : ''}`, fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
 
   useEffect(() => {
@@ -232,7 +233,7 @@ export default function RadarPage() {
   };
 
   if (!captures) return <div className="animate-pulse text-gray-500">Loading radar…</div>;
-  if (!captures.length)
+  if (!captures.length && !days)
     return <div className="text-center py-24 text-gray-500"><div className="text-5xl mb-4">📡</div>
       <p>No captures yet — run a scrape or recheck from the bridge.</p></div>;
 
