@@ -1116,12 +1116,13 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               title, event_type, starts_at, ends_at, effective_date,
               status, provenance, asset_id, person_id, calendar_source,
               slot_key, slot_class, blocks_person, precedence_rank,
-              gen_asset_id, gen_rule_id, occurrence_date, notes
+              gen_asset_id, gen_rule_id, occurrence_date, notes,
+              location, reminder_minutes
             ) VALUES (
               %s, %s, %s, %s, %s,
               'generated', 'rule', %s, %s, 'asset_rules',
               %s, %s, %s, %s,
-              %s, %s, %s, %s
+              %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (gen_asset_id, gen_rule_id, occurrence_date) WHERE provenance = 'rule'
             DO UPDATE SET
@@ -1137,6 +1138,8 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               gcal_event_id           = NULL,
               gcal_calendar_id        = NULL,
               notes                   = coalesce(EXCLUDED.notes, personal.event.notes),
+              location                = coalesce(EXCLUDED.location, personal.event.location),
+              reminder_minutes        = EXCLUDED.reminder_minutes,
               updated_at              = now()
             WHERE personal.event.status IN ('generated', 'superseded')
               AND NOT EXISTS (
@@ -1155,6 +1158,11 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
             asset_id, person_id,
             slot_key, slot_class, blocks_person, rank,
             asset_id, rule_id, target_date, notes,
+            # A routine's place and its reminder belong to the rule, not to
+            # each occurrence: where roller skating happens and how long
+            # before it somebody needs telling are the same every Tuesday.
+            rule.get("location") or (asset_facts or {}).get("location"),
+            rule.get("reminder_minutes"),
         ))
 
 

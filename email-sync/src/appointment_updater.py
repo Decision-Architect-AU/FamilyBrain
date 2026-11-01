@@ -557,8 +557,10 @@ def _write_outlook(outlook_acct: dict, ev: dict, outlook_ac=None, route: str = "
             "body": {"contentType": "html", "content": outlook_body},
             "start": _fmt(starts),
             "end":   _fmt(ends),
-            "isReminderOn": False,
+            "isReminderOn": ev.get("reminder_minutes") is not None,
         }
+        if ev.get("reminder_minutes") is not None:
+            body["reminderMinutesBeforeStart"] = int(ev["reminder_minutes"])
         if ev.get("location"):
             body["location"] = {"displayName": ev["location"]}
 
@@ -926,6 +928,21 @@ def _find_orphan_fb_event(cal_svc, cal_id: str, ev: dict, title: str,
 REMINDERS_OFF_GCAL = {"useDefault": False, "overrides": []}
 
 
+def _gcal_reminders(ev: dict) -> dict:
+    """Silent unless this event asked to be noisy.
+
+    Off by default is only a sane default if something can override it. An
+    event carrying reminder_minutes gets exactly that one popup — never the
+    calendar's defaults, which is what produced the complaint in the first
+    place.
+    """
+    minutes = ev.get("reminder_minutes")
+    if minutes is None:
+        return REMINDERS_OFF_GCAL
+    return {"useDefault": False,
+            "overrides": [{"method": "popup", "minutes": int(minutes)}]}
+
+
 def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> str:
     """Upsert event into GCal, return gcal event id.
 
@@ -951,7 +968,7 @@ def _write_gcal(cal_svc, cal_id: str, ev: dict, color_id: str | None = None) -> 
         "description": description,
         "start":       _fmt_cal_dt(starts),
         "end":         _fmt_cal_dt(ends),
-        "reminders":   REMINDERS_OFF_GCAL,
+        "reminders":   _gcal_reminders(ev),
     }
     if ev.get("location"):
         body["location"] = ev["location"]
@@ -1040,7 +1057,7 @@ def _patch_gcal(cal_svc, cal_id: str, gcal_id: str, ev: dict,
                     return existing_id
             result = cal_svc.events().insert(
                 calendarId=cal_id,
-                body={**body, "reminders": REMINDERS_OFF_GCAL}).execute()
+                body={**body, "reminders": _gcal_reminders(ev)}).execute()
             return result["id"]
         else:
             raise
@@ -1146,7 +1163,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                        calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
                        updated_at, status, suspended_reason, source_email_id, calendar_event_id,
-                       settled_at
+                       settled_at, reminder_minutes
                 FROM personal.event
                 WHERE (
                     -- Obligations must NEVER take the bare "gcal_event_id IS NULL /
