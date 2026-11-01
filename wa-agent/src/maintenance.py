@@ -2863,6 +2863,109 @@ def task_spot_check() -> dict:
     return {"checked": checked, "agreed": agreed, "raised": raised, "skipped": skipped}
 
 
+# ── Birthdays, from the register rather than from memory ─────────────────────
+# Seventeen birthday entries were spread across three calendars, several of
+# them duplicated between Outlook and Gmail, with titles like "Ingas
+# Birthday's birthday" and "Happy birthday!" — no name attached. The register
+# now holds the dates, so the entries can be generated from it: one per person
+# per year, in the family's own words, and the same next year without anyone
+# retyping them.
+#
+# What this must not do is add a second entry for a birthday already on the
+# calendar. Those entries came from the phones and are what the family
+# actually looks at, so an existing birthday-ish event naming the person on
+# that day wins and nothing is created. The register is the source of truth
+# for the date; the calendar keeps whatever it already had.
+BIRTHDAY_YEARS_AHEAD = int(os.environ.get("BIRTHDAY_YEARS_AHEAD", "2"))
+
+
+def _next_birthdays(month: int, day: int, years: int) -> list[date]:
+    """The next few anniversaries, starting with the one still to come."""
+    today = date.today()
+    out = []
+    for offset in range(0, years + 1):
+        year = today.year + offset
+        try:
+            when = date(year, month, day)
+        except ValueError:
+            # 29 February in a common year: the 28th is when it is marked.
+            when = date(year, month, 28)
+        if when >= today:
+            out.append(when)
+    return out[:years]
+
+
+def task_birthday_events() -> dict:
+    """Put each person's birthday on the calendar, once."""
+    conn = _conn()
+    created, already = 0, 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, birth_month, birth_day, groups
+                     FROM personal.person
+                    WHERE birth_month IS NOT NULL AND birth_day IS NOT NULL
+                    ORDER BY name"""
+            )
+            people = [dict(r) for r in cur.fetchall()]
+
+        for person in people:
+            first = (person["name"] or "").split()[0]
+            for when in _next_birthdays(person["birth_month"], person["birth_day"],
+                                        BIRTHDAY_YEARS_AHEAD):
+                # Already on a calendar, however it was worded?
+                with conn.cursor() as cur:
+                    # Matching the whole first name was too strict in both
+                    # directions: "Elliana" never matched the calendar's
+                    # "Ellies birthday", and "Happy birthday!" carries no name
+                    # to match at all. So a stem of the first name counts, and
+                    # so does a nameless birthday entry on the very same day —
+                    # whoever wrote it meant somebody, and a second entry on
+                    # that date helps nobody.
+                    cur.execute(
+                        """SELECT id FROM personal.event
+                            WHERE effective_date = %s
+                              AND status NOT IN ('cancelled', 'superseded')
+                              AND calendar_source <> 'person_register'
+                              AND title ~* 'birthday|b-?day'
+                              AND (title ILIKE %s
+                                   OR title ~* '^[[:space:]]*happy[[:space:]]+birthday')
+                            LIMIT 1""",
+                        (when, f"%{first[:4]}%"),
+                    )
+                    if cur.fetchone():
+                        already += 1
+                        continue
+
+                key = f"birthday:{person['id']}:{when.year}"
+                title = f"{person['name']}'s birthday"
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO personal.event
+                               (title, event_type, status, provenance, calendar_source,
+                                starts_at, effective_date, person_id, notes,
+                                calendar_event_id)
+                           VALUES (%s, 'BIRTHDAY', 'confirmed', 'rule', 'person_register',
+                                   %s, %s, %s, %s, %s)
+                           ON CONFLICT (calendar_event_id) DO NOTHING
+                        RETURNING id""",
+                        (title,
+                         datetime.combine(when, datetime.min.time()).replace(tzinfo=timezone.utc),
+                         when, person["id"],
+                         f"From the people register. Groups: "
+                         f"{', '.join(person['groups'] or []) or 'none'}.",
+                         key),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+                if row:
+                    created += 1
+                    print(f"[maintenance] birthday: {title} on {when}")
+    finally:
+        conn.close()
+    return {"birthdays_added": created, "already_on_a_calendar": already}
+
+
 # ── Selling a property is a list, not an event ───────────────────────────────
 # A sale settles and then a dozen things have to be unwound, each with its own
 # counterparty and its own deadline: the mortgage discharged with the lender,
@@ -4393,7 +4496,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
         "learn_tenancy_dates", "new_tenancy_followup", "settle_paid_policies",
-        "track_insurance_policies", "property_sale_checklist",
+        "track_insurance_policies", "property_sale_checklist", "birthday_events",
     ]
     # An explicit task list means somebody asked for it by name — honour it.
     # An automatic cycle outside the window drops the model-heavy work.
@@ -4625,6 +4728,11 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         results["learn_tenancy_dates"] = _run_with_timeout(
             task_learn_tenancy_dates, 120, "learn_tenancy_dates")
         print(f"[maintenance] learn_tenancy_dates done: {results['learn_tenancy_dates']}")
+
+    if "birthday_events" in all_tasks:
+        results["birthday_events"] = _run_with_timeout(
+            task_birthday_events, 60, "birthday_events")
+        print(f"[maintenance] birthday_events done: {results['birthday_events']}")
 
     if "property_sale_checklist" in all_tasks:
         results["property_sale_checklist"] = _run_with_timeout(

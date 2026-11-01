@@ -312,6 +312,60 @@ _DATE_PATTERN_RE = re.compile(
 )
 
 
+# ── Mail from the family, about the family ────────────────────────────────────
+# "Emails from within the family group should not be judged on subject alone,
+# we don't send ourselves emails for fun." Quite so: "Olivia's report" was
+# skipped twice, and so were "Olivia west additional support needed" and
+# "Olivia West" — 394 emails from our own addresses naming one of the children
+# or each other, thrown away on the strength of subjects that say little
+# because the sender assumed the reader already knew.
+#
+# A blanket rule for household mail is not the answer: 2,570 of our own
+# messages are currently discarded, most of them our side of a conversation
+# with an agent or a newsletter forwarded on, and pushing all of that through
+# decomposition is how the GPU was saturated in the first place. So the rule
+# is household sender AND a family member named — which is the case the
+# instruction was actually about, and which the people register can now
+# answer.
+_FAMILY_NAMES: re.Pattern | None = None
+
+
+def _family_name_pattern() -> re.Pattern | None:
+    """Names of the people in the family group, from the register."""
+    global _FAMILY_NAMES
+    if _FAMILY_NAMES is not None:
+        return _FAMILY_NAMES
+    try:
+        import psycopg2
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT name FROM personal.person
+                        WHERE 'family' = ANY(groups) OR 'extended' = ANY(groups)"""
+                )
+                names = [r[0] for r in cur.fetchall() if r[0]]
+    except Exception as e:
+        print(f"[triage] could not load family names: {e}")
+        return None
+    # First names: "Olivia's report" names Olivia without her surname.
+    firsts = {n.split()[0].lower() for n in names if n.split()}
+    firsts = {f for f in firsts if len(f) >= 3}
+    if not firsts:
+        return None
+    _FAMILY_NAMES = re.compile(
+        r"\b(" + "|".join(sorted(re.escape(f) for f in firsts)) + r")\b", re.I)
+    return _FAMILY_NAMES
+
+
+def _names_a_family_member(subject: str, body: str) -> str | None:
+    """Which of our own people this email is about, if any."""
+    pattern = _family_name_pattern()
+    if not pattern:
+        return None
+    hit = pattern.search(f"{subject or ''}\n{(body or '')[:2000]}")
+    return hit.group(1).lower() if hit else None
+
+
 def _forwarded_annotation(body: str) -> str:
     """Return the human-written text above a forwarded/quoted-message marker, if any."""
     m = _FORWARD_MARKER_RE.search(body)
@@ -382,9 +436,15 @@ def _content_already_processed(subject: str) -> bool:
     # (Notice to Leave)" — counts as processed. A miss here only costs a
     # redundant decomposition pass; a false match re-creates the incident.
     tokens = list(dict.fromkeys(re.findall(r'[a-z0-9]{4,}', key.lower())))
-    if not tokens:
+    if len(tokens) < 3:
+        # Too little to go on. "Olivia's report" reduces to olivia + report,
+        # and some event titled "Olivia ... report" exists for almost any
+        # month, so a two-token subject matched something every time and the
+        # forward was dropped as already handled. This function's own rule is
+        # to fail toward reprocessing; a short subject is exactly when it
+        # should.
         return False
-    need = max(2, len(tokens) - 1) if len(tokens) >= 2 else 1
+    need = max(2, len(tokens) - 1)
     try:
         import psycopg2
         with psycopg2.connect(DB_URL) as conn:
@@ -469,6 +529,15 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     if ours:
         print(f"[triage] names our property '{ours}' — ingesting: {subj[:60]}")
         return "ingest"
+
+    # 0c. From one of us, about one of us. Low volume and high value: this is
+    # the family talking to itself about the children, which is never
+    # marketing and rarely says much in the subject line.
+    if sender in _household_addresses():
+        who = _names_a_family_member(subj, body_text)
+        if who:
+            print(f"[triage] from the household and about {who} — ingesting: {subj[:60]}")
+            return "ingest"
 
     # 1. Known noise senders — always skip
     if _ALWAYS_SKIP_SENDERS.search(sender):
