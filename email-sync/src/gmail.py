@@ -92,10 +92,14 @@ _SERVICE_CACHE_TTL_SECS = 1800   # rebuild periodically so credential refresh is
 # thread that starts at once refreshes the same account separately.
 _creds_lock = threading.Lock()
 
-# How often a long sync reports that it is still moving. Small enough that the
-# caller's watchdog never waits a whole poll interval for news, large enough
-# that it costs nothing per message.
-_PROGRESS_EVERY = 25
+# A long sync reports after every message, not every Nth.
+#
+# "Every 25" sounded frugal and meant "every twenty minutes" in practice: when
+# the ingestor is backlogged a single message can spend two minutes in
+# attachment extraction alone, so twenty-five of them outlived the caller's
+# 1200s staleness threshold and the watchdog killed a sync that was working
+# perfectly well. Confirmed live. The report is a few bytes written to tmpfs —
+# it was never the expensive part of handling a message.
 
 
 def _cached_service(account: dict, api: str, version: str):
@@ -428,11 +432,10 @@ def sync_email(account: dict, ingestor_url: str, progress=None) -> int:
     Falls back to listing recent messages if no cursor exists.
     Returns number of messages submitted to ingestor.
 
-    `progress` is called every _PROGRESS_EVERY messages while the sync is
-    moving. A full backfill runs for far longer than the caller's watchdog
-    allows for a steady-state pass, and from outside there is no way to tell
-    that from a stalled socket — so it is told, periodically, by the only code
-    that knows.
+    `progress` is called once per message while the sync is moving. A full
+    backfill runs for far longer than the caller's watchdog allows for a
+    steady-state pass, and from outside there is no way to tell that from a
+    stalled socket — so it is told, by the only code that knows.
     """
     import requests as req
 
@@ -486,8 +489,8 @@ def sync_email(account: dict, ingestor_url: str, progress=None) -> int:
                 for added in h.get("messagesAdded", []):
                     msg_ids.append(added["message"]["id"])
 
-        for seen, msg_id in enumerate(msg_ids, 1):
-            if progress and seen % _PROGRESS_EVERY == 0:
+        for msg_id in msg_ids:
+            if progress:
                 progress()
             if db.is_already_ingested(account_id, msg_id):
                 continue
@@ -567,8 +570,8 @@ def sync_email(account: dict, ingestor_url: str, progress=None) -> int:
             retry_ids = db.get_retryable_messages(account_id, limit=RETRY_BATCH)
         if retry_ids:
             print(f"[gmail] retrying {len(retry_ids)} error/pending messages for {account['email_address']}")
-        for seen, msg_id in enumerate(retry_ids, 1):
-            if progress and seen % _PROGRESS_EVERY == 0:
+        for msg_id in retry_ids:
+            if progress:
                 progress()
             try:
                 msg = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
