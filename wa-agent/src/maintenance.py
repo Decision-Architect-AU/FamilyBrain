@@ -1037,10 +1037,15 @@ _AEST = timezone(timedelta(hours=10))
 
 
 def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
-                  asset_facts: dict | None = None) -> None:
+                  asset_facts: dict | None = None) -> bool:
     """
     Upsert a generated event using the deterministic genkey (gen_asset_id, gen_rule_id, occurrence_date).
     Only updates display fields on conflict — never touches status if already superseded.
+
+    Returns whether a row was actually written. Most calls change nothing: the
+    generator recomputes the same occurrences every five minutes, and saying so
+    is the difference between a log line that reads 350 forever and one that
+    reports what the run did.
     """
     from datetime import time as dtime
     start_time_str = rule.get("start_time")
@@ -1142,6 +1147,53 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               reminder_minutes        = EXCLUDED.reminder_minutes,
               updated_at              = now()
             WHERE personal.event.status IN ('generated', 'superseded')
+              -- Only when the rule actually produced something different.
+              --
+              -- This runs every five minutes over every occurrence of every
+              -- rule, and almost every time it recomputes exactly what is
+              -- already stored. Updating anyway cost nothing visible until
+              -- you notice what the SET does: it blanks gcal_event_id and
+              -- bumps updated_at. Those two columns are how the appointment
+              -- updater knows what still needs writing — so a no-op upsert
+              -- was telling it, 350 events at a time, twelve times an hour,
+              -- that the entire calendar had never been written.
+              --
+              -- Hence the comparison leaves out gcal_event_id and
+              -- updated_at: they are the consequence of a change, not
+              -- evidence of one, and including them would make every
+              -- already-written event differ from itself forever.
+              --
+              -- notes and location are compared in their coalesced form,
+              -- because that is what the SET stores: a rule that supplies
+              -- neither must not read as a change against a row that has
+              -- both.
+              AND (
+                    personal.event.title,
+                    personal.event.starts_at,
+                    personal.event.ends_at,
+                    personal.event.slot_key,
+                    personal.event.slot_class,
+                    personal.event.blocks_person,
+                    personal.event.precedence_rank,
+                    personal.event.status,
+                    personal.event.superseded_by_event_id,
+                    personal.event.notes,
+                    personal.event.location,
+                    personal.event.reminder_minutes
+                  ) IS DISTINCT FROM (
+                    EXCLUDED.title,
+                    EXCLUDED.starts_at,
+                    EXCLUDED.ends_at,
+                    EXCLUDED.slot_key,
+                    EXCLUDED.slot_class,
+                    EXCLUDED.blocks_person,
+                    EXCLUDED.precedence_rank,
+                    'generated',
+                    NULL::bigint,
+                    coalesce(EXCLUDED.notes, personal.event.notes),
+                    coalesce(EXCLUDED.location, personal.event.location),
+                    EXCLUDED.reminder_minutes
+                  )
               AND NOT EXISTS (
                 SELECT 1 FROM personal.event conf
                 WHERE conf.provenance = 'email'
@@ -1164,6 +1216,7 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
             rule.get("location") or (asset_facts or {}).get("location"),
             rule.get("reminder_minutes"),
         ))
+        return cur.rowcount > 0
 
 
 def _fact_anchor(rule: dict, facts: dict) -> date | None:
@@ -1405,9 +1458,9 @@ def task_generate_events() -> dict:
                         continue
 
                     _reinstate_if_suspended(conn, asset_id, rule_id, target_date)
-                    _insert_event(conn, asset_id, person_id, rule, target_date, facts)
-                    asset_created += 1
-                    total_created += 1
+                    if _insert_event(conn, asset_id, person_id, rule, target_date, facts):
+                        asset_created += 1
+                        total_created += 1
 
             # Update events_generated_until to the furthest horizon we just computed
             max_horizon = max(
