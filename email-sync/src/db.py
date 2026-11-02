@@ -164,6 +164,23 @@ def mark_skipped(account_id: int, provider_msg_id: str, from_address: str,
         c.commit()
 
 
+# Every status that means "this message has been dealt with". Two services
+# write them and they do not share a vocabulary: email-sync's own filter marks
+# a message 'skipped' before it ever leaves here, while the ingestor's triage
+# marks one 'skip' or 'marketing' after looking at it. Only the first spelling
+# was listed below.
+#
+# The consequence was not a wrong answer, it was a slow one: 11,446 'skip' and
+# 7,883 'marketing' rows — 19,329 messages — were unrecognised, so every full
+# sync re-fetched and re-triaged all of them from Gmail. That is why a 6,156
+# message backfill never finished, which is why the history cursor was never
+# stored, which is why the next sync was another full one.
+#
+# 'error' and 'pending' are deliberately absent: those are unfinished, and
+# get_retryable_messages exists to come back to them.
+_SETTLED_INGEST_STATUS = ('ingested', 'skipped', 'skip', 'marketing', 'confirmed')
+
+
 def is_already_ingested(account_id: int, provider_msg_id: str) -> bool:
     """Returns True if message has already been ingested or intentionally skipped."""
     with conn() as c:
@@ -171,8 +188,8 @@ def is_already_ingested(account_id: int, provider_msg_id: str) -> bool:
             cur.execute(
                 """SELECT id FROM personal.email_message
                    WHERE account_id = %s AND provider_msg_id = %s
-                     AND ingest_status IN ('ingested', 'skipped')""",
-                (account_id, provider_msg_id),
+                     AND ingest_status = ANY(%s)""",
+                (account_id, provider_msg_id, list(_SETTLED_INGEST_STATUS)),
             )
             return cur.fetchone() is not None
 

@@ -27,6 +27,7 @@ def _load_filters() -> dict[str, list[str]]:
         "domain_block":  [],
         "keyword_block": [],
         "sender_allow":  [],
+        "sender_tentative": [],
     }
     for row in rows:
         ft = row["filter_type"]
@@ -148,3 +149,26 @@ def should_ingest(
                 return False, f"marketing body signal: {signal!r}"
 
     return True, ""
+
+
+def is_tentative_sender(from_address: str) -> bool:
+    """Does mail from here describe things we have not committed to?
+
+    Property education is the case this exists for. School of Property and
+    Positive Real Estate send invitations a week or two ahead — a live Q&A, a
+    Lunch & Learn, a bus tour. Each one states a real date, so the decomposer
+    reads it correctly and writes it to the family calendar as though
+    attendance were settled. It is not: an invitation is an option, and a
+    month of options on the real calendar is how the real calendar stops
+    being believed.
+
+    This is a fact about the sender rather than about the wording. No phrase
+    in "You're Invited to The School of Property LIVE Q&A" distinguishes it
+    from an appointment, and _is_unbooked_promo only knows about theatre.
+    """
+    if not from_address:
+        return False
+    f = _filters()
+    addr = from_address.lower()
+    domain = _domain_of(from_address)
+    return addr in f["sender_tentative"] or bool(domain and domain in f["sender_tentative"])

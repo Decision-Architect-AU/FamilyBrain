@@ -22,6 +22,7 @@ import requests as req
 from .llm_caller import caller_headers
 from .ingest_client import inference_busy
 from .audience import resolve_audience
+from .filters import is_tentative_sender
 
 from datetime import datetime, timezone, date, timedelta
 
@@ -1927,9 +1928,20 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         # a person (concerts, family events, etc. have no person but are still valid).
         # Exception: a show we were merely advertised goes in suspended, which
         # the calendar writer routes to Tentative with the reason attached.
+        _sender = (email_meta or {}).get("from_address") or ""
         if _is_unbooked_promo(title, detail, email_body or ""):
             ev_status, susp_reason = "suspended", "advertised show — no booking held"
             print(f"[decompose] '{title[:40]}' looks advertised, not booked — routing to Tentative")
+        elif is_tentative_sender(_sender):
+            # An invitation states a real date, so every test for "did the
+            # email actually say when" passes and the entry lands on the
+            # family calendar as though attendance were settled. For a
+            # provider who sends a session every week or two, that is how a
+            # calendar fills with things nobody agreed to go to.
+            ev_status = "suspended"
+            susp_reason = f"invitation from {_sender} — nothing booked"
+            print(f"[decompose] '{title[:40]}' is an invitation from {_sender} — "
+                  f"routing to Tentative")
         elif not _date_is_stated(item, email_body or ""):
             # The third destination. The gate used to be binary — a confident
             # entry on the real calendar, or nothing — so a date the model
