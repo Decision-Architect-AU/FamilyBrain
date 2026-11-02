@@ -911,6 +911,21 @@ def _next_weekday(from_date: date, weekday_name: str) -> date:
     return from_date + timedelta(days=days_ahead or 7)
 
 
+def _nth_weekday_of_month(year: int, month: int, weekday_name: str, nth: int) -> date | None:
+    """The nth given weekday of a month — "first Thursday", "third Monday".
+
+    Returns None when the month does not have that many: asking for the fifth
+    Thursday of a 30-day month should produce no occurrence rather than
+    silently rolling into the next month, which would put the session on the
+    wrong date and look deliberate.
+    """
+    target = _WEEKDAYS.get(weekday_name, 0)
+    first = date(year, month, 1)
+    offset = (target - first.weekday()) % 7
+    day = first + timedelta(days=offset + 7 * (nth - 1))
+    return day if day.month == month else None
+
+
 def _horizon_date(rule: dict, asset_facts: dict, now: date) -> date:
     """Calculate the generation horizon date for a rule."""
     months = rule.get("horizon_months") or _EVENT_HORIZONS.get(rule.get("event_type", ""), 3)
@@ -1146,16 +1161,27 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               status, provenance, asset_id, person_id, calendar_source,
               slot_key, slot_class, blocks_person, precedence_rank,
               gen_asset_id, gen_rule_id, occurrence_date, notes,
-              location, reminder_minutes
+              location, reminder_minutes, calendar_route, generated_title
             ) VALUES (
               %s, %s, %s, %s, %s,
               'generated', 'rule', %s, %s, 'asset_rules',
               %s, %s, %s, %s,
-              %s, %s, %s, %s, %s, %s
+              %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (gen_asset_id, gen_rule_id, occurrence_date) WHERE provenance = 'rule'
             DO UPDATE SET
-              title                   = EXCLUDED.title,
+              -- Only when the rule's own label changed. Enrichment improves
+              -- these titles from the graph and spreads the answer across the
+              -- series; reasserting the rule's wording over the top of that
+              -- every five minutes is how the two of them ended up rewriting
+              -- 220 events at each other indefinitely.
+              title                   = CASE
+                  WHEN personal.event.generated_title
+                       IS DISTINCT FROM EXCLUDED.generated_title
+                  THEN EXCLUDED.title
+                  ELSE personal.event.title
+              END,
+              generated_title         = EXCLUDED.generated_title,
               starts_at               = EXCLUDED.starts_at,
               ends_at                 = EXCLUDED.ends_at,
               slot_key                = EXCLUDED.slot_key,
@@ -1169,6 +1195,7 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               notes                   = coalesce(EXCLUDED.notes, personal.event.notes),
               location                = coalesce(EXCLUDED.location, personal.event.location),
               reminder_minutes        = EXCLUDED.reminder_minutes,
+              calendar_route          = EXCLUDED.calendar_route,
               updated_at              = now()
             WHERE personal.event.status IN ('generated', 'superseded')
               -- Only when the rule actually produced something different.
@@ -1192,7 +1219,7 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               -- neither must not read as a change against a row that has
               -- both.
               AND (
-                    personal.event.title,
+                    personal.event.generated_title,
                     personal.event.starts_at,
                     personal.event.ends_at,
                     personal.event.slot_key,
@@ -1203,9 +1230,10 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
                     personal.event.superseded_by_event_id,
                     personal.event.notes,
                     personal.event.location,
-                    personal.event.reminder_minutes
+                    personal.event.reminder_minutes,
+                    personal.event.calendar_route
                   ) IS DISTINCT FROM (
-                    EXCLUDED.title,
+                    EXCLUDED.generated_title,
                     EXCLUDED.starts_at,
                     EXCLUDED.ends_at,
                     EXCLUDED.slot_key,
@@ -1216,7 +1244,8 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
                     NULL::bigint,
                     coalesce(EXCLUDED.notes, personal.event.notes),
                     coalesce(EXCLUDED.location, personal.event.location),
-                    EXCLUDED.reminder_minutes
+                    EXCLUDED.reminder_minutes,
+                    EXCLUDED.calendar_route
                   )
               AND NOT EXISTS (
                 SELECT 1 FROM personal.event conf
@@ -1239,6 +1268,11 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
             # before it somebody needs telling are the same every Tuesday.
             rule.get("location") or (asset_facts or {}).get("location"),
             rule.get("reminder_minutes"),
+            # Where this belongs is the rule's to state, not the calendar
+            # router's to guess from the wording of the title.
+            rule.get("calendar_route"),
+            # What the rule called it, kept beside what it is now called.
+            title,
         ))
         return cur.rowcount > 0
 
@@ -1362,6 +1396,20 @@ def _generate_dates(rule: dict, anchor: date, horizon: date, now: date) -> list[
                   - timedelta(days=int(rule.get("days_before") or 0)))
         if now <= target <= horizon:
             dates.append(target)
+
+    elif recurrence == "monthly_nth_weekday":
+        # "First Thursday of the month" — a shape the interval and weekly
+        # rules cannot express. Thirty days from the first Thursday of
+        # October is not the first Thursday of November, and a webinar series
+        # that drifts a day or two each month is a series nobody trusts.
+        day_name = rule.get("recurrence_day", "Thursday")
+        nth = int(rule.get("recurrence_nth") or 1)
+        cursor = date(anchor.year, anchor.month, 1)
+        while cursor <= horizon:
+            occurrence = _nth_weekday_of_month(cursor.year, cursor.month, day_name, nth)
+            if occurrence and now <= occurrence <= horizon and occurrence > anchor:
+                dates.append(occurrence)
+            cursor += relativedelta(months=1)
 
     elif recurrence == "weekdays":
         current = anchor + timedelta(days=1)

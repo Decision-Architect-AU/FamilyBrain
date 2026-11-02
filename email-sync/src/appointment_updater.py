@@ -1163,7 +1163,7 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                        calendar_source, notes, person_id, location,
                        gcal_event_id, gcal_calendar_id, calendar_written_at, next_update_at,
                        updated_at, status, suspended_reason, source_email_id, calendar_event_id,
-                       settled_at, reminder_minutes
+                       settled_at, reminder_minutes, calendar_route
                 FROM personal.event e
                 WHERE (
                     -- Obligations must NEVER take the bare "gcal_event_id IS NULL /
@@ -1304,10 +1304,14 @@ def run_appointment_updater(accounts: list[dict]) -> int:
         ev_id       = ev["id"]
         notes       = ev["notes"] or ""
         person_name = people.get(ev.get("person_id"))
-        title       = _enrich_title(ev["title"] or "", person_name, notes, school_yr_map)
-
-        # Graph-backed enrichment for thin/vague titles
-        title, notes = _try_enrich(title, notes, ev["starts_at"])
+        # Graph-backed enrichment first, on the stored title, because
+        # _try_enrich persists its answer across the whole series. Prefixing
+        # the person's name is a display choice for the calendar entry — run
+        # the other way round it was being written back to the database, so
+        # "Neurology referral renewal due - Olivia" became "Olivia Neurology
+        # referral renewal due - Olivia" and stayed that way.
+        title, notes = _try_enrich(ev["title"] or "", notes, ev["starts_at"])
+        title = _enrich_title(title, person_name, notes, school_yr_map)
 
         try:
             # Detect partner-sourced events — route to Family cal by default
@@ -1358,6 +1362,12 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 reason = ev.get("suspended_reason")
                 if reason and reason not in notes:
                     notes = f"[{reason}]\n{notes}" if notes else f"[{reason}]"
+            elif ev.get("calendar_route"):
+                # The rule that generated this said where it belongs. A
+                # routine is set up deliberately and where its entries go is
+                # part of what was set up — classify_event only exists to
+                # guess for mail, where nobody declared anything.
+                route = ev["calendar_route"]
             else:
                 route = classify_event(title, notes, source_is_partner=source_is_partner)
             cal_id   = target_calendar_id(ac, route)
@@ -1381,7 +1391,9 @@ def run_appointment_updater(accounts: list[dict]) -> int:
             # it eligible to be written again next cycle: write, delete, write,
             # delete, for every suspended occurrence of every school holiday.
             if route == "tentative" and cal_id != ac.tentative_cal_id:
-                print(f"[appt] '{title[:40]}' is suspended and "
+                why = ("is suspended" if ev.get("status") == "suspended"
+                       else "belongs on Tentative")
+                print(f"[appt] '{title[:40]}' {why} and "
                       f"{ac.email_address} has no Tentative calendar — "
                       f"leaving it off the calendar entirely")
                 continue
