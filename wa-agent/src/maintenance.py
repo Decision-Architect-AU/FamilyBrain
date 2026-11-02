@@ -1019,6 +1019,30 @@ def _suspend_generated_event(conn, asset_id: int, rule_id: str, occurrence_date:
         """, (reason, suspended_by_event_id, asset_id, rule_id, occurrence_date))
 
 
+def _already_suspended(conn, asset_id: int, rule_id: str, occurrence_date: date,
+                       reason: str, suspended_by_event_id: int | None) -> bool:
+    """Is this occurrence already suspended for exactly this reason?
+
+    The suspend path upserts the occurrence and then suspends it, which is
+    right the first time and pointless every time after. The upsert resets
+    status to 'generated' and clears gcal_event_id, and the suspend sets it
+    straight back — so 129 occurrences were flipped generated/suspended every
+    five minutes, each flip telling the appointment updater they had changed
+    and had never been written. One cheap read stops the whole cycle.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM personal.event
+             WHERE gen_asset_id = %s AND gen_rule_id = %s AND occurrence_date = %s
+               AND provenance = 'rule'
+               AND status = 'suspended'
+               AND suspended_reason IS NOT DISTINCT FROM %s
+               AND suspended_by_event_id IS NOT DISTINCT FROM %s
+             LIMIT 1
+        """, (asset_id, rule_id, occurrence_date, reason, suspended_by_event_id))
+        return cur.fetchone() is not None
+
+
 def _reinstate_if_suspended(conn, asset_id: int, rule_id: str, occurrence_date: date) -> None:
     """Auto-reinstatement: the gap that suspended this occurrence no longer
     applies (holiday ended, or the sweep no longer finds an overlap) — clear
@@ -1451,9 +1475,11 @@ def task_generate_events() -> dict:
                                 suspend_source_id = gap.get("source_event_id")
 
                     if suspend_reason:
-                        _insert_event(conn, asset_id, person_id, rule, target_date, facts)
-                        _suspend_generated_event(conn, asset_id, rule_id, target_date,
-                                                  suspend_reason, suspend_source_id)
+                        if not _already_suspended(conn, asset_id, rule_id, target_date,
+                                                  suspend_reason, suspend_source_id):
+                            _insert_event(conn, asset_id, person_id, rule, target_date, facts)
+                            _suspend_generated_event(conn, asset_id, rule_id, target_date,
+                                                      suspend_reason, suspend_source_id)
                         total_suspended += 1
                         continue
 
