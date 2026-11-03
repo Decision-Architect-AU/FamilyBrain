@@ -1076,7 +1076,8 @@ _AEST = timezone(timedelta(hours=10))
 
 
 def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
-                  asset_facts: dict | None = None) -> bool:
+                  asset_facts: dict | None = None, asset_name: str = "",
+                  asset_amount=None, asset_frequency=None) -> bool:
     """
     Upsert a generated event using the deterministic genkey (gen_asset_id, gen_rule_id, occurrence_date).
     Only updates display fields on conflict — never touches status if already superseded.
@@ -1116,6 +1117,14 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
         renews = _fact_anchor(rule, asset_facts)
         title = (_policy_renewal_title(asset_facts, renews)
                  if renews else rule.get("event_label", event_type))
+    elif event_type in ("RENEWAL", "SUBSCRIPTION_RENEWAL") and asset_facts is not None:
+        # target_date is this occurrence's own renewal date. Using the date
+        # out of the facts instead meant every entry in the series announced
+        # the first renewal: four reminders through 2027, each insisting the
+        # subscription renewed on 15 December 2026.
+        title = _subscription_renewal_title(
+            asset_name, asset_facts or {}, asset_amount, asset_frequency,
+            target_date)
     else:
         title = rule.get("event_label", event_type)
 
@@ -1302,10 +1311,82 @@ def _fact_anchor(rule: dict, facts: dict) -> date | None:
     raw = (facts or {}).get(source.split(".", 1)[1])
     if not raw:
         return None
+    # Renewal and expiry dates come off invoices in whatever shape the sender
+    # used, so this reads 19-Oct-2026 and 15/04/2025 as readily as an ISO one.
+    return _loose_date(raw)
+
+
+_FREQUENCY_DAYS = {
+    "weekly": 7, "fortnightly": 14, "monthly": 30, "bimonthly": 60,
+    "quarterly": 91, "half_yearly": 182, "semiannual": 182,
+    "annual": 365, "yearly": 365,
+}
+
+
+def _period_days(frequency) -> int | None:
+    """Days between occurrences, or None when nobody said."""
+    if not frequency:
+        return None
+    return _FREQUENCY_DAYS.get(str(frequency).strip().lower().replace("-", "_"))
+
+
+def _loose_date(raw) -> date | None:
+    """Read a date somebody else wrote.
+
+    renewal_date arrives from invoices and confirmation emails in whatever
+    shape the sender used: 2026-12-02, 19-Oct-2026, 15/04/2025, 10/08/2026.
+    date.fromisoformat handles exactly the first and returns None for the
+    rest, which is why three quarters of the subscriptions had no usable
+    renewal date and fell back to a generic title.
+
+    Day-first for the slashed forms, because these are Australian documents
+    and 15/04 is April, not the 4th of a fifteenth month.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y",
+                "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text[:11].strip(), fmt).date()
+        except ValueError:
+            continue
     try:
-        return date.fromisoformat(str(raw)[:10])
+        return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _money(amount, frequency) -> str:
+    """"$10 monthly", or nothing at all rather than a hollow "$0"."""
+    if amount in (None, ""):
+        return ""
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    shown = f"${value:,.2f}".rstrip("0").rstrip(".")
+    return f"{shown} {frequency}" if frequency else shown
+
+
+def _subscription_renewal_title(name: str, facts: dict, amount, frequency,
+                                renews_on: "date | None") -> str:
+    """Say what renews, when, and for how much.
+
+    "Subscription renewal due" told you one of sixty-one things wanted
+    attention. Putting the name in front of it was an improvement and still
+    left "Netflix Standard renewal due", which describes a filing category
+    rather than an event. What this entry is actually for is the fortnight of
+    warning before money leaves the account — so it should say whose money,
+    when, and how much, which is everything needed to decide whether to let
+    it happen.
+    """
+    base = (name or facts.get("provider") or "Subscription").strip()
+    cost = _money(amount, frequency)
+    when = f" renews {renews_on.strftime('%-d %b %Y')}" if renews_on else " renews"
+    return f"{base}{when}" + (f" - {cost}" if cost else "")
 
 
 def _policy_renewal_title(facts: dict, renews_on: date) -> str:
@@ -1376,7 +1457,12 @@ def _generate_dates(rule: dict, anchor: date, horizon: date, now: date) -> list[
 
     if recurrence == "interval":
         days = int(rule.get("recurrence_days") or 30)
-        current = anchor + timedelta(days=days)
+        # Start one period on from the anchor, unless the anchor is itself
+        # still ahead of us. "Last serviced in June" means the next one is a
+        # period later; "renews on 15 December" means 15 December, and
+        # stepping past it produced a reminder for the renewal after the one
+        # the document was actually telling us about.
+        current = anchor if anchor >= now else anchor + timedelta(days=days)
         while current <= horizon:
             if current >= now:
                 dates.append(current)
@@ -1407,6 +1493,13 @@ def _generate_dates(rule: dict, anchor: date, horizon: date, now: date) -> list[
                   - timedelta(days=int(rule.get("days_before") or 0)))
         if now <= target <= horizon:
             dates.append(target)
+
+    elif recurrence == "once":
+        # One occurrence, on the date the document gave, and only if it is
+        # still ahead of us. Used where a rule knows when the thing falls due
+        # but nobody has said how often it comes round.
+        if now <= anchor <= horizon:
+            dates.append(anchor)
 
     elif recurrence == "monthly_nth_weekday":
         # "First Thursday of the month" — a shape the interval and weekly
@@ -1453,7 +1546,8 @@ def task_generate_events() -> dict:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, name, asset_type, person_id, facts, rules,
-                       last_event_date, events_generated_until
+                       last_event_date, events_generated_until,
+                       amount, frequency
                 FROM personal.asset
                 WHERE status IN ('active') AND event_gen_enabled = true
                   AND rules != '[]'::jsonb
@@ -1511,7 +1605,38 @@ def task_generate_events() -> dict:
                 # than from the last event: a lease notice is positioned by
                 # when the lease ends, which has nothing to do with when this
                 # property last generated anything.
-                rule_anchor = _fact_anchor(rule, facts) or anchor
+                # A rule that says what it counts from gets nothing when
+                # that fact is missing.
+                #
+                # Falling back to the asset's generic anchor — which for a new
+                # asset is today — is what put a renewal on 2 December for
+                # fourteen different things at once. Every subscription with
+                # no readable renewal_date counted thirty days from the moment
+                # it was created, so they all landed on the same square, none
+                # of them for a reason connected to the subscription.
+                #
+                # "Renews in thirty days" is not a weaker version of the right
+                # answer. It is a date this system invented and then put on a
+                # calendar as though somebody had been told it.
+                if rule.get("trigger_source"):
+                    rule_anchor = _fact_anchor(rule, facts)
+                    if rule_anchor is None:
+                        continue
+                    # How often it comes round is the asset's to say, not this
+                    # rule's to assume. _generate_dates defaults a missing
+                    # interval to thirty days, which turned "renewed on 1 Nov
+                    # 2024" into a reminder every month for two years, each
+                    # one announcing a renewal date already long past.
+                    #
+                    # With a frequency on file, use it. Without one, we know a
+                    # date and not a cycle, so say the date once and stop.
+                    if rule.get("recurrence", "interval") == "interval" \
+                            and not rule.get("recurrence_days"):
+                        period = _period_days(asset.get("frequency"))
+                        rule = {**rule, "recurrence_days": period} if period \
+                            else {**rule, "recurrence": "once"}
+                else:
+                    rule_anchor = anchor
 
                 for target_date in _generate_dates(rule, rule_anchor, horizon, now):
                     suspend_reason = None
@@ -1536,14 +1661,18 @@ def task_generate_events() -> dict:
                     if suspend_reason:
                         if not _already_suspended(conn, asset_id, rule_id, target_date,
                                                   suspend_reason, suspend_source_id):
-                            _insert_event(conn, asset_id, person_id, rule, target_date, facts)
+                            _insert_event(conn, asset_id, person_id, rule, target_date,
+                                          facts, asset["name"], asset.get("amount"),
+                                          asset.get("frequency"))
                             _suspend_generated_event(conn, asset_id, rule_id, target_date,
                                                       suspend_reason, suspend_source_id)
                         total_suspended += 1
                         continue
 
                     _reinstate_if_suspended(conn, asset_id, rule_id, target_date)
-                    if _insert_event(conn, asset_id, person_id, rule, target_date, facts):
+                    if _insert_event(conn, asset_id, person_id, rule, target_date,
+                                     facts, asset["name"], asset.get("amount"),
+                                     asset.get("frequency")):
                         asset_created += 1
                         total_created += 1
 
