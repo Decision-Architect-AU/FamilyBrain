@@ -4270,6 +4270,93 @@ def task_close_passed_event_tasks() -> dict:
     return {"closed_with_event": closed_linked, "closed_by_own_date": closed_dated}
 
 
+# How long a bill or a renewal can go unmentioned before it is treated as
+# settled. The reasoning is the family's, and it is sound: nobody who is owed
+# money goes quiet about it. Rent, a subscription, an insurance premium — the
+# people chasing these send a second notice, and a third. Two weeks of silence
+# means it was paid, or cancelled, or was never really owed; and if it is
+# somehow still outstanding, the next notice will arrive and make the job
+# again, with a current date on it.
+UNCHASED_OBLIGATION_DAYS = int(os.environ.get("UNCHASED_OBLIGATION_DAYS", "14"))
+
+
+def task_close_unchased_obligations() -> dict:
+    """Close jobs that nobody has mentioned since.
+
+    The family's rule, and it is a better one than the rule it replaces:
+    nobody who wants something from you goes quiet about it. Rent, a
+    subscription, a form the school needs back - whoever is waiting sends a
+    second notice, and a third. A fortnight of silence means it was paid, or
+    cancelled, or was never really owed. And if it somehow is still
+    outstanding, the next notice makes the job again with a current date on
+    it, which is a better list than one carrying every unanswered request
+    since 2024.
+
+    This deliberately reverses the money carve-out in
+    task_close_passed_event_tasks. That rule protects anything with money in
+    the title - "anything owed in money stays owed" - which is right for a
+    bill that arrived yesterday and wrong for one whose due date passed two
+    years ago and which has not been mentioned since. The protection assumed
+    a debt is permanent until paid. What is actually permanent is the
+    chasing; its absence is the evidence.
+
+    Silence is measured from the last notice received, not from updated_at.
+    updated_at moves whenever anything internal touches the row - a sync, a
+    repair, a backfill - so it answers "when did we last write to this
+    record", which is a different question and, on a day spent fixing the
+    task pipeline, a misleading one. The date on the email that asked is the
+    honest signal, and no amount of internal churn can disturb it.
+
+    Only notification-driven jobs qualify. A task somebody typed by hand has
+    nobody sending reminders about it, so silence there means nothing either
+    way.
+    """
+    conn = _conn()
+    closed = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidate AS (
+                    SELECT e.id, e.title, e.effective_date,
+                           coalesce(em.received_at::date, e.created_at::date)
+                               AS last_notified
+                      FROM personal.event e
+                      LEFT JOIN personal.email_message em
+                             ON em.id = e.source_email_id
+                     WHERE e.event_type = 'task'
+                       AND coalesce(e.task_status, 'open') IN ('open', 'in_progress')
+                       AND e.status NOT IN ('cancelled', 'superseded')
+                       AND e.provenance = 'email'
+                )
+                UPDATE personal.event t
+                   SET task_status  = 'done',
+                       settled_at   = now(),
+                       settled_note = 'nothing further received since '
+                                      || c.last_notified::text
+                                      || ' - treated as settled or cancelled',
+                       updated_at   = now()
+                  FROM candidate c
+                 WHERE t.id = c.id
+                   AND c.last_notified < current_date - %(days)s::int
+                   -- A due date still in the future is not silence, it is
+                   -- waiting. Count from whichever came later.
+                   AND coalesce(c.effective_date, c.last_notified)
+                       < current_date - %(days)s::int
+             RETURNING t.id, t.title, c.effective_date, c.last_notified""",
+                {"days": UNCHASED_OBLIGATION_DAYS},
+            )
+            for row in cur.fetchall():
+                closed += 1
+                print(f"[maintenance] closed task {row['id']} "
+                      f"'{row['title'][:44]}' - last notice "
+                      f"{row['last_notified']}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"closed_unchased": closed}
+
+
 def task_link_orphan_tasks() -> dict:
     """Give existing tasks the appointment they were always about.
 
@@ -4895,6 +4982,7 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
         "review_query_flags", "query_flags_report",
         "spot_check", "apply_audit_patches", "money_drift",
         "connector_health", "audit_rollup", "close_passed_event_tasks",
+        "close_unchased_obligations",
         "learn_tenancy_dates", "new_tenancy_followup", "settle_paid_policies",
         "track_insurance_policies", "property_sale_checklist", "birthday_events",
         "learn_class_allocation", "roll_school_year",
@@ -5179,6 +5267,12 @@ def _run_maintenance_locked(tasks: list[str] | None = None) -> dict:
             task_close_passed_event_tasks, 60, "close_passed_event_tasks")
         print(f"[maintenance] close_passed_event_tasks done: "
               f"{results['close_passed_event_tasks']}")
+
+    if "close_unchased_obligations" in all_tasks:
+        results["close_unchased_obligations"] = _run_with_timeout(
+            task_close_unchased_obligations, 60, "close_unchased_obligations")
+        print(f"[maintenance] close_unchased_obligations done: "
+              f"{results['close_unchased_obligations']}")
 
     if "audit_rollup" in all_tasks:
         # Cheap, and only ever as interesting as the findings behind it.
