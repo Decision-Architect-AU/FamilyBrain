@@ -1221,10 +1221,20 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                 -- not an appointment: school attendance, a daily medication.
                 -- The rows stay — they are what makes a clash detectable —
                 -- but nobody needs 66 school days on their phone.
-                AND NOT EXISTS (
+                --
+                -- Unless the week is not normal. Silence is about the routine
+                -- running as expected; a suspended occurrence is the opposite
+                -- of that and is the entry actually worth seeing. Term-time
+                -- routines were reaching Tentative for the summer break
+                -- while school itself was not, because silence applied to the
+                -- cancellation as readily as to the attendance — so the one
+                -- thing a holiday ought to put on the calendar was the one
+                -- thing it could not.
+                AND (e.status = 'suspended'
+                     OR NOT EXISTS (
                       SELECT 1 FROM personal.asset sa
                        WHERE sa.calendar_silent
-                         AND sa.id IN (e.gen_asset_id, e.asset_id))
+                         AND sa.id IN (e.gen_asset_id, e.asset_id)))
                 ORDER BY effective_date ASC NULLS LAST
                 LIMIT %s
                 """,
@@ -1246,10 +1256,14 @@ def run_appointment_updater(accounts: list[dict]) -> int:
                     -- the calendar from before, and silence has to apply to
                     -- what is there as well as what comes next, or the
                     -- setting does nothing for months.
-                    OR EXISTS (
+                    -- Suspended is exempt, same as in the selection above:
+                    -- a cancelled school day is news. Without the exemption
+                    -- this sweep deleted from Tentative exactly what the
+                    -- write path had just put there, every cycle.
+                    OR (status <> 'suspended' AND EXISTS (
                           SELECT 1 FROM personal.asset sa
                            WHERE sa.calendar_silent
-                             AND sa.id IN (e.gen_asset_id, e.asset_id))
+                             AND sa.id IN (e.gen_asset_id, e.asset_id)))
                     -- A suspended occurrence belongs on Tentative and nowhere
                     -- else. The write path below reroutes future ones, but it
                     -- skips anything already past, so a fortnight of school-day
