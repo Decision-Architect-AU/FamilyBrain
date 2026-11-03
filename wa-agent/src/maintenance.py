@@ -4332,17 +4332,24 @@ def task_close_unchased_obligations() -> dict:
                 UPDATE personal.event t
                    SET task_status  = 'done',
                        settled_at   = now(),
-                       settled_note = 'nothing further received since '
+                       settled_note = 'review fell due '
+                                      || coalesce(t.review_date::text, 'n/a')
+                                      || ' with nothing further received since '
                                       || c.last_notified::text
                                       || ' - treated as settled or cancelled',
                        updated_at   = now()
                   FROM candidate c
                  WHERE t.id = c.id
+                   -- The job's own review date has come and gone. That date
+                   -- is pushed forward by every fresh notice, so reaching it
+                   -- means nothing has been heard since it was last set.
+                   AND coalesce(t.review_date,
+                                coalesce(c.effective_date, c.last_notified)
+                                    + %(days)s::int) < current_date
+                   -- Belt and braces for a job whose review date was set by
+                   -- hand to something optimistic: silence is still measured
+                   -- from the last notice actually received.
                    AND c.last_notified < current_date - %(days)s::int
-                   -- A due date still in the future is not silence, it is
-                   -- waiting. Count from whichever came later.
-                   AND coalesce(c.effective_date, c.last_notified)
-                       < current_date - %(days)s::int
              RETURNING t.id, t.title, c.effective_date, c.last_notified""",
                 {"days": UNCHASED_OBLIGATION_DAYS},
             )

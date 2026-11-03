@@ -631,6 +631,16 @@ _TASK_LINK_NOISE = {
 }
 
 
+# How far ahead a job without an action date is set to be looked at again.
+#
+# A job is not an appointment: "chase the lease" has no moment it happens, so
+# effective_date is empty and nothing could ever judge it stale. review_date
+# is the date to pick it up and decide, and every fresh notice about the same
+# job pushes it out again — so a job only comes up for review once whoever
+# wanted it has gone quiet.
+TASK_REVIEW_DAYS = int(os.environ.get("TASK_REVIEW_DAYS", "14"))
+
+
 # Phrasing that asks for a reminder about a job, rather than naming the job.
 #
 # The whole point of this system is that it remembers things, so "Set a
@@ -800,31 +810,47 @@ def _create_task_event(cur, email_id: int, title: str, detail: str,
         # Already on the list. If this telling of it carries a due date the
         # first one lacked, that is new information and worth keeping; the
         # task itself is not created twice.
+        # Whatever else this notice does, it is a notice: somebody is still
+        # asking, so the job is not stale and the review moves out.
+        next_review = effective_date or (date.today() + timedelta(days=TASK_REVIEW_DAYS))
         if effective_date and not existing["effective_date"]:
             cur.execute(
                 """UPDATE personal.event
-                      SET effective_date = %s, starts_at = %s, updated_at = now()
+                      SET effective_date = %s, starts_at = %s,
+                          review_date = %s, updated_at = now()
                     WHERE id = %s""",
-                (effective_date, starts_at, existing["id"]),
+                (effective_date, starts_at, next_review, existing["id"]),
             )
             cur.connection.commit()
             print(f"[decompose] task {existing['id']} already open — "
                   f"added its due date {effective_date}")
         else:
+            cur.execute(
+                """UPDATE personal.event
+                      SET review_date = greatest(coalesce(review_date, %s), %s),
+                          updated_at = now()
+                    WHERE id = %s""",
+                (next_review, next_review, existing["id"]),
+            )
+            cur.connection.commit()
             print(f"[decompose] task {existing['id']} already open — "
-                  f"not creating a second '{display_title[:50]}'")
+                  f"not creating a second '{display_title[:50]}', "
+                  f"review moved to {next_review}")
         return existing["id"]
 
     cur.execute(
         """
         INSERT INTO personal.event
             (title, event_type, status, provenance, calendar_source, notes,
-             task_status, starts_at, effective_date, source_email_id)
+             task_status, starts_at, effective_date, source_email_id, review_date)
         VALUES (%s, 'task', 'confirmed', 'email', 'email:decompose', %s,
-                'open', %s, %s, %s)
+                'open', %s, %s, %s, %s)
         RETURNING id
         """,
-        (display_title, detail[:2000], starts_at, effective_date, email_id),
+        (display_title, detail[:2000], starts_at, effective_date, email_id,
+         # Reviewed on its action date when it has one, otherwise a fortnight
+         # from now — the point at which silence starts to mean something.
+         effective_date or (date.today() + timedelta(days=TASK_REVIEW_DAYS))),
     )
     event_id = cur.fetchone()["id"]
     # channel_resolver.materialise() opens its own separate connection and
