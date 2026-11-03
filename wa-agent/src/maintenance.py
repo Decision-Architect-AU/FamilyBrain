@@ -1190,8 +1190,19 @@ def _insert_event(conn, asset_id: int, person_id, rule: dict, target_date: date,
               precedence_rank         = EXCLUDED.precedence_rank,
               status                  = 'generated',
               superseded_by_event_id  = NULL,
-              gcal_event_id           = NULL,
-              gcal_calendar_id        = NULL,
+              -- gcal_event_id is deliberately NOT cleared here.
+              --
+              -- Clearing it looked like "force a fresh write", and it is how
+              -- 97 entries ended up on two calendars at once. The pointer is
+              -- the only record of where the entry already is: with it, the
+              -- writer patches in place, or deletes the old one before
+              -- inserting elsewhere when the route changes. Without it the
+              -- writer has nothing to delete, writes a new entry, and the old
+              -- one stays on the old calendar forever with nothing left that
+              -- knows it exists.
+              --
+              -- updated_at below is what asks for the rewrite. That was
+              -- always sufficient.
               notes                   = coalesce(EXCLUDED.notes, personal.event.notes),
               location                = coalesce(EXCLUDED.location, personal.event.location),
               reminder_minutes        = EXCLUDED.reminder_minutes,
