@@ -104,6 +104,21 @@ def push_outbound(accounts: list[dict]) -> int:
                        AND sm.source_account_id = %(account_id)s
                 WHERE e.event_type = 'task'
                   AND e.status NOT IN ('cancelled', 'superseded')
+                  -- A finished job with no remote mapping has nothing to sync.
+                  --
+                  -- This is the round trip that made 71 copies of "Attend Year
+                  -- 3 Assembly". Deleting a task in Google Tasks is how a
+                  -- person says they are done with it, so push_outbound drops
+                  -- the mapping and marks it done here — and then this clause
+                  -- saw a task with sm.id IS NULL, decided it had never been
+                  -- pushed, and created it in Google Tasks all over again.
+                  -- Every fifteen minutes. The copies came back through
+                  -- pull_inbound as brand new local tasks with no source email,
+                  -- which is why they multiplied rather than merely repeating.
+                  --
+                  -- Creating a remote task purely to mark it complete is work
+                  -- for nobody. If it is done and unmapped, leave it alone.
+                  AND NOT (coalesce(e.task_status, 'open') = 'done' AND sm.id IS NULL)
                   AND (
                         sm.id IS NULL
                         OR (e.next_update_at IS NOT NULL AND e.next_update_at <= %(now)s)

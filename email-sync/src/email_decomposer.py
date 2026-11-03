@@ -631,6 +631,73 @@ _TASK_LINK_NOISE = {
 }
 
 
+# Phrasing that asks for a reminder about a job, rather than naming the job.
+#
+# The whole point of this system is that it remembers things, so "Set a
+# reminder for electricity payment" is an instruction to do what has already
+# been done. The job is "Pay electricity". Stripping the wrapper leaves a list
+# that reads like a list of jobs instead of a list of notes about jobs.
+_REMINDER_PREFIX = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:set(?:\s+up)?|create|add|make|put)\s+"
+    r"(?:a|an|yourself\s+a)?\s*"
+    r"(?:calendar\s+)?(?:reminder|note|alert)\s+"
+    r"(?:to|for|about|that)\s+",
+    re.I)
+_REMEMBER_PREFIX = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:remember|don'?t\s+forget|make\s+sure)\s+(?:to|that\s+you)\s+",
+    re.I)
+# "... for the electricity payment" — a noun phrase, not a verb. Turn the
+# subject back into the job it describes.
+_PAYMENT_NOUN = re.compile(r"^(?:the\s+)?(.+?)\s+(?:payment|bill|invoice)$", re.I)
+
+
+def _plain_job_title(title: str) -> str:
+    """Say the job, not that a reminder about the job is wanted."""
+    if not title:
+        return title
+    urgent = ""
+    m = re.match(r"^(\[URGENT\]\s*)", title, re.I)
+    if m:
+        urgent, title = m.group(1), title[m.end():]
+
+    stripped = _REMINDER_PREFIX.sub("", title)
+    if stripped == title:
+        stripped = _REMEMBER_PREFIX.sub("", title)
+    if stripped == title:
+        return urgent + title
+
+    stripped = stripped.strip()
+    # Only when what is left is a noun phrase. "pay the water bill" is already
+    # the job, and running it through here produced "Pay pay the water".
+    noun = _PAYMENT_NOUN.match(stripped)
+    if noun and not re.match(r"^(pay|settle|renew|transfer)\b", stripped, re.I):
+        stripped = f"Pay {noun.group(1)}"
+    if stripped:
+        stripped = stripped[0].upper() + stripped[1:]
+    return urgent + (stripped or title)
+
+
+# Jobs that belong to the sender's footer, not to the reader.
+#
+# Every bulk email carries an unsubscribe line, so "Contact to stop emails"
+# was being extracted over and over from mail that had nothing else in it.
+# The prompt already says to ignore unsubscribe footers; a model following an
+# instruction most of the time is not a filter.
+_BOILERPLATE_TASK = re.compile(
+    r"\b(unsubscrib\w*|opt[- ]?out|stop (?:receiving |getting )?(?:these )?emails?"
+    r"|manage (?:your )?(?:email )?preferences|update (?:your )?preferences"
+    r"|do not reply|no action (?:is )?(?:required|needed)"
+    r"|view (?:this|it) in (?:your )?browser|add us to your address book)\b",
+    re.I)
+
+
+def _is_boilerplate_task(title: str, detail: str = "") -> bool:
+    """Is this the mailing-list footer rather than a job?"""
+    return bool(_BOILERPLATE_TASK.search(f"{title} {detail}"))
+
+
 def _find_duplicate_task(cur, title: str, effective_date) -> dict | None:
     """An open task that is already the same job.
 
@@ -2307,7 +2374,13 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                         _create_note(wcur, email_id, title, detail, itype, [], received_at)
 
                     elif itype == "task":
+                        if _is_boilerplate_task(title, detail):
+                            print(f"[decompose] '{title[:50]}' is mailing-list "
+                                  f"boilerplate, not a job — dropped")
+                            continue
                         priority = item.get("priority", "normal")
+                        # Say the job, not that a reminder about it is wanted.
+                        title = _plain_job_title(title)
                         task_event_id = _create_task_event(wcur, email_id, title, detail,
                                                             item.get("date"), priority)
                         # Tie it to the appointment it is about, so the job and

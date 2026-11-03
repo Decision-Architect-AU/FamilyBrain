@@ -129,7 +129,12 @@ def default_rules_for_type(asset_type: str) -> list:
             {
                 "name": "Renewal reminder",
                 "event_type": "RENEWAL",
-                "event_label": "Subscription renewal due",
+                # {asset} is filled in with the asset's own name when the rule
+                # is attached. A fixed "Subscription renewal due" told you that
+                # one of sixty-one things needed renewing, which on 2 December
+                # meant fourteen identical entries in a column and no way to
+                # tell which was the gym and which was the tax software.
+                "event_label": "{asset} renewal due",
                 "trigger_source": "facts.renewal_date",
                 "lead_time_days": 14,
                 "recurrence": "interval",
@@ -234,6 +239,26 @@ def build_asset_facts(asset_type: str, extracted_fields: dict) -> dict:
             if k not in known:
                 audit_log("UNKNOWN_FACT_KEY", f"{asset_type}: unknown key '{k}' stored")
     return facts
+
+
+def _name_rules(rules: list, asset_name: str) -> list:
+    """Put the asset's name into any rule label that asks for it.
+
+    A rule template is shared by every asset of its type, so its label can
+    only describe the kind of thing — "Subscription renewal due" — and the
+    resulting calendar entry says nothing about which subscription. The
+    template carries a {asset} placeholder and this fills it in once, at the
+    point where the name is known, rather than leaving every reader of the
+    event to go and look it up.
+    """
+    named = []
+    for rule in rules:
+        rule = dict(rule)
+        label = rule.get("event_label")
+        if label and "{asset}" in label:
+            rule["event_label"] = label.replace("{asset}", asset_name).strip()
+        named.append(rule)
+    return named
 
 
 def _derive_asset_name(asset_type: str, facts: dict, fields: dict) -> str:
@@ -376,13 +401,14 @@ def upsert_asset(asset_route: dict, extracted_fields: dict, source: str) -> dict
         elif existing:
             asset = existing
         else:
+            asset_name = _derive_asset_name(asset_type, facts, extracted_fields)
             asset_id = _insert_asset({
-                "name":       _derive_asset_name(asset_type, facts, extracted_fields),
+                "name":       asset_name,
                 "asset_type": asset_type,
                 "subtype":    asset_route.get("asset_subtype"),
                 "status":     "active",
                 "facts":      facts,
-                "rules":      default_rules_for_type(asset_type),
+                "rules":      _name_rules(default_rules_for_type(asset_type), asset_name),
             }, conn)
             conn.commit()
             asset = _fetch_asset(asset_id, conn)
