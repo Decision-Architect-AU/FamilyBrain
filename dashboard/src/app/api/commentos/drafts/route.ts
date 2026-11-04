@@ -8,6 +8,14 @@ const STRATEGIES = [
   ['agree-extend', 'Short. Agree with the strongest part, extend it one step with an ED insight. No questions.'],
 ];
 
+// A comment on a post stands in front of the author's audience, so it leads
+// with its own point rather than acknowledging theirs.
+const POST_STRATEGIES = [
+  ['point-of-view', 'First sentence: the point the post misses — a consequence, a condition it depends on, or where it breaks. Then one sentence tying it back to their argument.'],
+  ['question-back', 'First sentence: the tension inside their argument, stated plainly. End with one sharp question that reframes it through the ED lenses.'],
+  ['extend', 'Short. Take their argument one step further than they did — what it implies next that they did not say. No questions.'],
+];
+
 export async function GET(req: NextRequest) {
   const commentId = req.nextUrl.searchParams.get('comment_id');
   const due = req.nextUrl.searchParams.get('due');
@@ -18,25 +26,33 @@ export async function GET(req: NextRequest) {
       WHERE cm.is_own AND cm.next_update_at <= now() ORDER BY cm.next_update_at LIMIT 20`);
     return NextResponse.json(rows);
   }
-  const rows = await q(
-    `SELECT * FROM decision_os.co_draft WHERE comment_id=$1 ORDER BY id DESC LIMIT 12`, [commentId]);
+  const captureId = req.nextUrl.searchParams.get('capture_id');
+  const rows = captureId
+    ? await q(`SELECT * FROM decision_os.co_draft WHERE capture_id=$1 ORDER BY id DESC LIMIT 12`, [captureId])
+    : await q(`SELECT * FROM decision_os.co_draft WHERE comment_id=$1 ORDER BY id DESC LIMIT 12`, [commentId]);
   return NextResponse.json(rows);
 }
 
 // POST {comment_id, steering?} → generate 3 variants with grounding
+// POST {capture_id, steering?} → the same, as a top-level comment on the post
 export async function POST(req: NextRequest) {
   const b = await req.json();
-  const [cm] = await q(`
-    SELECT cm.*, cap.post_title, cap.post_body, cap.platform FROM decision_os.co_comment cm
-    JOIN decision_os.co_capture cap ON cap.id=cm.capture_id WHERE cm.id=$1`, [b.comment_id]);
-  if (!cm) return NextResponse.json({ error: 'comment not found' }, { status: 404 });
+  const onPost = !b.comment_id && !!b.capture_id;
+  const [cm] = onPost
+    ? await q(`
+        SELECT NULL::bigint AS id, cap.id AS capture_id, cap.post_body AS body,
+               cap.post_author AS author_name, NULL AS author_handle, false AS is_reply,
+               cap.post_title, cap.post_body, cap.platform, cap.brand
+        FROM decision_os.co_capture cap WHERE cap.id=$1`, [b.capture_id])
+    : await q(`
+        SELECT cm.*, cap.post_title, cap.post_body, cap.platform, cap.brand FROM decision_os.co_comment cm
+        JOIN decision_os.co_capture cap ON cap.id=cm.capture_id WHERE cm.id=$1`, [b.comment_id]);
+  if (!cm?.body) return NextResponse.json({ error: onPost ? 'post not found' : 'comment not found' }, { status: 404 });
 
   // Grounding source depends on the capture's brand: personal = ED book
   // concepts; decision-architect = the property persona's themes/frameworks.
   const vec = await embed(cm.body.slice(0, 800));
-  const [capBrand] = await q(`SELECT brand FROM decision_os.co_capture cap
-    JOIN decision_os.co_comment c ON c.capture_id = cap.id WHERE c.id=$1`, [b.comment_id]);
-  const brand = capBrand?.brand || 'personal';
+  const brand = cm.brand || 'personal';
   const concepts = brand === 'decision-architect'
     ? await q(`
         SELECT id::text AS graph_node_id, name, description,
@@ -50,7 +66,7 @@ export async function POST(req: NextRequest) {
         ORDER BY embedding <=> $1::vector LIMIT 5`, [vec]);
   const signals = await q(`
     SELECT s.id, s.signal_type, s.canonical_text FROM decision_os.co_signal s
-    JOIN decision_os.co_signal_source ss ON ss.signal_id=s.id WHERE ss.comment_id=$1`, [b.comment_id]);
+    JOIN decision_os.co_signal_source ss ON ss.signal_id=s.id WHERE ss.comment_id=$1`, [cm.id]);
   // Translation map: foreign-framework vocabulary detected near this comment,
   // bridged to ED concepts (ed_core confirmed mappings + knowledge crosswalk).
   const synonyms = await q(`
@@ -88,12 +104,15 @@ export async function POST(req: NextRequest) {
     [campaign] = await q(`SELECT id, name, goal, tone FROM decision_os.campaign WHERE id=$1`, [b.campaign_id]);
   }
 
-  // Full conversation so far — post, Glenn's comments, the reply chain.
-  const thread = await q(`
-    SELECT author_name, is_own, left(body, 350) AS body
-    FROM decision_os.co_comment WHERE capture_id = (
-      SELECT capture_id FROM decision_os.co_comment WHERE id=$1)
-    AND id <= (SELECT id FROM decision_os.co_comment WHERE id=$1) ORDER BY id`, [b.comment_id]);
+  // Full conversation so far — post, Glenn's comments, the reply chain. On a
+  // post, the comments already there, so the new one doesn't repeat them.
+  const thread = onPost
+    ? await q(`
+        SELECT author_name, is_own, left(body, 200) AS body
+        FROM decision_os.co_comment WHERE capture_id=$1 ORDER BY id LIMIT 12`, [cm.capture_id])
+    : await q(`
+        SELECT author_name, is_own, left(body, 350) AS body
+        FROM decision_os.co_comment WHERE capture_id=$1 AND id <= $2 ORDER BY id`, [cm.capture_id, cm.id]);
   const transcript = thread.map((t: any) =>
     `${t.is_own ? 'GLENN' : (t.author_name || 'commenter')}: ${t.body}`).join('\n');
 
@@ -121,21 +140,29 @@ export async function POST(req: NextRequest) {
       + related.map((r: any) => `${r.name}${r.description ? ` (${r.description.slice(0, 80)})` : ''}`).join(' | ') + '\n'
     : '';
   const results = [];
-  for (const [label, strategy] of STRATEGIES) {
+  for (const [label, strategy] of onPost ? POST_STRATEGIES : STRATEGIES) {
     try {
       const persona = brand === 'decision-architect'
         ? `You draft a LinkedIn reply for the Decision Architect brand — property investment decision systems (NDIS/SDA housing, deal analysis, portfolio construction). Practical, numbers-aware, systems-thinking voice.`
         : `You draft a LinkedIn reply for Glenn West, author of the Effective Decision framework (lenses: maturity, trust, scope, impact).`;
-      const author = cm.author_name || cm.author_handle || 'the commenter';
-      const raw = await generate(
-        `${persona}
-Post: "${(cm.post_title || cm.post_body || '').slice(0, 300)}"
+      const author = cm.author_name || cm.author_handle || (onPost ? 'the author' : 'the commenter');
+      const context = onPost
+        ? `"${author}" wrote this LinkedIn post. You are writing a top-level comment on it, where their audience will read it:
+"${cm.body.slice(0, 1500)}"
+${transcript ? `Comments already on the post — say something none of them said:
+${transcript}
+` : ''}The comment must add a point of view the post doesn't make: a consequence, a tension, a missing condition, or where it breaks. Open with that point itself — never with agreement or a compliment ("Agree", "You're right", "Great post", "Spot on", "Love this").
+`
+        : `Post: "${(cm.post_title || cm.post_body || '').slice(0, 300)}"
 The conversation so far (in order — GLENN lines are Glenn's own earlier comments):
 ${transcript}
 Your reply must continue THIS conversation — build on what Glenn already said, don't repeat it, and respond to how the discussion has evolved.
 A LinkedIn user named "${author}" wrote the latest comment${cm.is_reply ? " (it is a reply to Glenn's earlier comment — if it starts with the name \"Glenn West\", that is an @-mention addressing Glenn, NOT the author's name)" : ''}:
 "${cm.body.slice(0, 800)}"
-${synBlock}HOW TO THINK (do this silently, output only the reply): 1) restate their point to yourself in ED terms using the map; 2) name what is actually failing (a decision function, a trust/maturity/scope/impact gap); 3) follow the links — which related ED ideas below does this connect to, and what concern do they surface that the commenter hasn't seen yet; 4) write the reply in plain conversational language carrying that logic, with a LIGHT touch of ED — at most one ED idea named explicitly, the rest carried as reasoning, translating back toward their vocabulary where it helps them hear it.
+`;
+      const raw = await generate(
+        `${persona}
+${context}${synBlock}HOW TO THINK (do this silently, output only the reply): 1) restate their point to yourself in ED terms using the map; 2) name what is actually failing (a decision function, a trust/maturity/scope/impact gap); 3) follow the links — which related ED ideas below does this connect to, and what concern do they surface that the commenter hasn't seen yet; 4) write the reply in plain conversational language carrying that logic, with a LIGHT touch of ED — at most one ED idea named explicitly, the rest carried as reasoning, translating back toward their vocabulary where it helps them hear it.
 ${relatedLine}
 You are writing GLENN'S reply TO ${author}. Address them directly as "you" — never use their name or refer to them in the third person, and never address, thank, or refer to Glenn (Glenn is the writer). Do not open with thanks or praise ("Thank you for...", "Great point...") — go straight to substance. NEVER open by naming a framework or chart ("Given the Effective Decision framework...", "The maturity-trust chart shows...") — the concepts ground your thinking, but the reply speaks plainly, like a sharp practitioner talking, and only names a framework if it genuinely earns a mention mid-thought.
 ${campaign ? `Campaign tone (${campaign.name}): ${campaign.tone}` : ''}
@@ -156,9 +183,9 @@ Reply ONLY JSON: {"text": "the reply, ${cm.platform === 'x' ? '1-2 sentences, ST
       const text = extractJson(raw).text;
       if (!text) continue;
       const [row] = await q(`
-        INSERT INTO decision_os.co_draft (comment_id, variant_label, text, steering_note, grounding)
-        VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [b.comment_id, label, text, b.steering || null, JSON.stringify(grounding)]);
+        INSERT INTO decision_os.co_draft (comment_id, capture_id, variant_label, text, steering_note, grounding)
+        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [cm.id, onPost ? cm.capture_id : null, label, text, b.steering || null, JSON.stringify(grounding)]);
       results.push(row);
     } catch { /* skip failed variant */ }
   }
@@ -169,7 +196,7 @@ Reply ONLY JSON: {"text": "the reply, ${cm.platform === 'x' ? '1-2 sentences, ST
     fetch(`${process.env.COMMENTOS_SVC_URL || 'http://commentos:4004'}/api/ingest`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ domain: 'glenn-angles', text: b.steering.trim(),
-                             source: `studio angle (comment:${b.comment_id})` }),
+                             source: onPost ? `studio angle (post:${b.capture_id})` : `studio angle (comment:${b.comment_id})` }),
     }).catch(() => {});
   }
   return NextResponse.json({ variants: results, grounding });
@@ -182,17 +209,28 @@ export async function PATCH(req: NextRequest) {
     await q(`UPDATE decision_os.co_draft SET text=$1 WHERE id=$2`, [b.text, b.id]);
   if (b.action === 'approve') {
     await q(`UPDATE decision_os.co_draft SET status='approved', approved_at=now() WHERE id=$1`, [b.id]);
-    const [d] = await q(`SELECT comment_id FROM decision_os.co_draft WHERE id=$1`, [b.id]);
-    await q(`UPDATE decision_os.co_draft SET status='discarded' WHERE comment_id=$1 AND id != $2 AND status='draft'`,
-            [d.comment_id, b.id]);
+    const [d] = await q(`SELECT comment_id, capture_id FROM decision_os.co_draft WHERE id=$1`, [b.id]);
+    await q(`UPDATE decision_os.co_draft SET status='discarded'
+             WHERE (comment_id=$1 OR capture_id=$2) AND id != $3 AND status='draft'`,
+            [d.comment_id, d.capture_id, b.id]);
   }
   if (b.action === 'posted') {
-    const [d] = await q(`SELECT status, comment_id FROM decision_os.co_draft WHERE id=$1`, [b.id]);
+    const [d] = await q(`SELECT status, comment_id, capture_id, text FROM decision_os.co_draft WHERE id=$1`, [b.id]);
     if (d?.status !== 'approved')
       return NextResponse.json({ error: 'approve before marking posted' }, { status: 400 });
     await q(`UPDATE decision_os.co_draft SET status='posted', posted_at=now() WHERE id=$1`, [b.id]);
-    await q(`UPDATE decision_os.co_comment SET outcome='checking', next_update_at=now() + interval '2 days'
-             WHERE id=$1`, [d.comment_id]);
+    if (d.capture_id && !d.comment_id) {
+      // a comment on the post: record Glenn's comment in the thread, and link
+      // the draft to it, so replies to it count as its concepts resonating
+      const [own] = await q(`
+        INSERT INTO decision_os.co_comment (capture_id, author_name, body, is_own, outcome, next_update_at)
+        VALUES ($1, 'Glenn West', $2, true, 'checking', now() + interval '2 days') RETURNING id`,
+        [d.capture_id, d.text]);
+      await q(`UPDATE decision_os.co_draft SET comment_id=$1 WHERE id=$2`, [own.id, b.id]);
+    } else {
+      await q(`UPDATE decision_os.co_comment SET outcome='checking', next_update_at=now() + interval '2 days'
+               WHERE id=$1`, [d.comment_id]);
+    }
   }
   if (b.action === 'discard')
     await q(`UPDATE decision_os.co_draft SET status='discarded' WHERE id=$1`, [b.id]);

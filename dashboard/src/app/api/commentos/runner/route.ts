@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { q } from '@/lib/commentos/db';
+import { targetSettings } from '@/lib/commentos/targets';
 
 // Runner protocol (bridge runner.py, localhost only).
 // GET ?action=next-run             → claim next queued run (marks running)
@@ -26,8 +27,13 @@ export async function GET(req: NextRequest) {
   if (!run) return NextResponse.json({ run: null });
   const [ch] = await q(`SELECT slug, pacing, search_url_template FROM decision_os.co_channel WHERE id=$1`, [run.channel_id]);
   const keywords = await q(`SELECT id, phrase, brand FROM decision_os.co_keyword WHERE id = ANY($1) ORDER BY priority DESC`, [run.keyword_ids]);
+  const targets = run.kind === 'targets'
+    ? await q(`SELECT id, profile_url, display_name FROM decision_os.co_target
+               WHERE id = ANY($1) AND status='active'`, [run.target_ids])
+    : [];
   return NextResponse.json({ run: { ...run, channel: ch.slug, pacing: ch.pacing,
-    search_url_template: ch.search_url_template, keywords } });
+    search_url_template: ch.search_url_template, keywords, targets,
+    target_settings: run.kind !== 'keywords' ? await targetSettings() : undefined } });
 }
 
 export async function POST(req: NextRequest) {
@@ -71,9 +77,17 @@ export async function POST(req: NextRequest) {
     if (run.status === 'aborted') return NextResponse.json({ directive: 'abort', reason: run.abort_reason });
     return NextResponse.json({ directive: 'continue' });
   }
-  // dedup precheck: {action:'precheck', url}
+  // dedup precheck: {action:'precheck', url, target_id?, target_name?}. A target
+  // run claims a post it finds already captured (e.g. by a keyword run) when
+  // the author is the target.
   if (b.action === 'precheck') {
     const [hit] = await q(`SELECT id FROM decision_os.co_capture WHERE post_url=$1`, [b.url]);
+    if (hit && b.target_id && b.target_name)
+      await q(`UPDATE decision_os.co_capture SET target_id=$2,
+                 engagement = CASE WHEN $4::int IS NULL THEN engagement
+                                   ELSE engagement || jsonb_build_object('followers', $4::int) END
+               WHERE id=$1 AND target_id IS NULL AND lower(trim(post_author))=lower(trim($3))`,
+              [hit.id, b.target_id, b.target_name, b.target_followers ?? null]);
     return NextResponse.json({ dup: !!hit });
   }
   return NextResponse.json({ error: 'unknown action' }, { status: 400 });

@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { q } from '@/lib/commentos/db';
+import { targetSettings, upsertTargetFromAuthor } from '@/lib/commentos/targets';
+
+// When the post went up: decoded from the URL's snowflake id (X status,
+// LinkedIn activity), falling back to first_seen_at.
+const POSTED_AT = `coalesce(
+  to_timestamp((div(substring(c.post_url from '/status/(\\d{15,})')::numeric, 4194304) + 1288834974657) / 1000.0),
+  to_timestamp(div(substring(lower(c.post_url) from '(?:activity|ugcpost|share)(?::|%3a)(\\d{15,})')::numeric, 4194304) / 1000.0),
+  c.first_seen_at)`;
 
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('id');
@@ -41,22 +49,38 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...cap, comments });
   }
   // ?days=N keeps only threads whose POST was published in the last N days.
-  // The publish time is decoded from the URL's snowflake id (X status,
-  // LinkedIn activity), falling back to first_seen_at. Filtering here, not in
-  // the client, so the LIMIT can't push brand-new unscored threads off the list.
+  // Filtering here, not in the client, so the LIMIT can't push brand-new
+  // unscored threads off the list.
   const days = Number(req.nextUrl.searchParams.get('days')) || null;
+  // ?targets=1: posts by target people over the follower threshold, ranked by
+  // reach and recency — log10(followers) loses a point for each day of age
+  if (req.nextUrl.searchParams.get('targets')) {
+    const { min_followers } = await targetSettings();
+    const rows = await q(`
+      SELECT c.*, t.followers AS target_followers, t.role AS target_role, t.sector AS target_sector,
+        (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
+        (SELECT count(DISTINCT ss.signal_id) FROM decision_os.co_signal_source ss
+          JOIN decision_os.co_comment cm ON cm.id=ss.comment_id WHERE cm.capture_id=c.id) AS n_signals,
+        EXISTS (SELECT 1 FROM decision_os.co_draft d
+                WHERE d.capture_id=c.id AND d.status='posted') AS commented
+      FROM decision_os.co_capture c JOIN decision_os.co_target t ON t.id=c.target_id
+      WHERE c.status='active' AND t.status='active' AND coalesce(t.followers, 0) >= $2
+        AND ($1::int IS NULL OR ${POSTED_AT} > now() - make_interval(days => $1::int))
+      ORDER BY log(greatest(t.followers, 10)) - extract(epoch FROM now() - ${POSTED_AT}) / 86400 DESC
+      LIMIT 100`, [days, min_followers]);
+    return NextResponse.json(rows);
+  }
   const rows = await q(`
-    SELECT c.*,
+    SELECT c.*, t.followers AS target_followers, t.role AS target_role, t.sector AS target_sector,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage='relevant') AS n_relevant,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage IS NULL) AS n_pending,
       (SELECT count(DISTINCT ss.signal_id) FROM decision_os.co_signal_source ss
         JOIN decision_os.co_comment cm ON cm.id=ss.comment_id WHERE cm.capture_id=c.id) AS n_signals
-    FROM decision_os.co_capture c WHERE c.status='active'
-      AND ($1::int IS NULL OR coalesce(
-        to_timestamp((div(substring(c.post_url from '/status/(\\d{15,})')::numeric, 4194304) + 1288834974657) / 1000.0),
-        to_timestamp(div(substring(lower(c.post_url) from '(?:activity|ugcpost|share)(?::|%3a)(\\d{15,})')::numeric, 4194304) / 1000.0),
-        c.first_seen_at) > now() - make_interval(days => $1::int))
+    FROM decision_os.co_capture c
+    LEFT JOIN decision_os.co_target t ON t.id=c.target_id AND t.status='active'
+    WHERE c.status='active'
+      AND ($1::int IS NULL OR ${POSTED_AT} > now() - make_interval(days => $1::int))
     ORDER BY
       -- priority: threads where Glenn posted and others replied after him
       (SELECT count(*) FROM decision_os.co_comment o
@@ -75,10 +99,15 @@ export async function POST(req: NextRequest) {
   const b = await req.json();
   const brand = b.brand || ((b.tags || []).some((t: string) =>
     /property|ndis|sda|deal|investment/i.test(t)) ? 'decision-architect' : 'personal');
+  // a target run names its target; any other LinkedIn capture may have found
+  // one, by the author's headline
+  const targetId = b.target_id || ((b.platform || 'linkedin') === 'linkedin'
+    ? await upsertTargetFromAuthor(b.author_profile_url, b.post_author, b.author_headline) : null);
   const [cap] = await q(`
-    INSERT INTO decision_os.co_capture (platform, post_author, post_title, post_body, post_url, tags, brand, run_id, keyword_id, engagement)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    INSERT INTO decision_os.co_capture (platform, post_author, post_title, post_body, post_url, tags, brand, run_id, keyword_id, engagement, target_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (post_url) DO UPDATE SET captured_at = now(), brand = EXCLUDED.brand,
+      target_id = coalesce(EXCLUDED.target_id, co_capture.target_id),
       engagement = CASE WHEN EXCLUDED.engagement != '{}'::jsonb THEN EXCLUDED.engagement ELSE co_capture.engagement END,
       -- re-capture may have expanded truncated content — keep the longer text
       post_body = CASE WHEN length(coalesce(EXCLUDED.post_body,'')) > length(coalesce(co_capture.post_body,''))
@@ -88,7 +117,7 @@ export async function POST(req: NextRequest) {
     RETURNING id`,
     [b.platform || 'linkedin', b.post_author || null, b.post_title || null,
      b.post_body || null, b.post_url || null, b.tags || [], brand,
-     b.run_id || null, b.keyword_id || null, JSON.stringify(b.engagement || {})]);
+     b.run_id || null, b.keyword_id || null, JSON.stringify(b.engagement || {}), targetId || null]);
   let n = 0;
   for (const c of b.comments || []) {
     if (!c.body) continue;

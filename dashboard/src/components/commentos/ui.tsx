@@ -68,6 +68,7 @@ export function CaptureHealthDot() {
 export const NAV = [
   ['/commentos/playbook', 'Playbook'],
   ['/commentos/radar', 'Radar'],
+  ['/commentos/targets', 'Targets'],
   ['/commentos/market', 'Market'],
   ['/commentos/harmony', 'Harmony'],
   ['/commentos/ontology', 'Ontology'],

@@ -5,8 +5,18 @@ import { fetcher, SignalTypeBadge, timeAgo } from '@/components/commentos/ui';
 
 const BRIDGE = 'http://localhost:8765';
 
-function ReplyPane({ comment, postUrl, brand, platform, onClose }: { comment: any; postUrl: string; brand?: string; platform?: string; onClose: () => void }) {
+const ROLE_LABEL: Record<string, string> = {
+  cio: 'CIO', cdo: 'Chief Data Officer', head_of_ai: 'Head of AI', ai_governance: 'AI governance',
+};
+
+// comment.id null = a top-level comment on the post itself (comment.capture_id)
+function ReplyPane({ comment, postUrl, brand, platform, isTarget, onClose }: { comment: any; postUrl: string; brand?: string; platform?: string; isTarget?: boolean; onClose: () => void }) {
   const isX = platform === 'x';
+  const onPost = comment.id == null;
+  // comments on target posts have a daily cap — commenting in bursts is what
+  // got the X account suspended
+  const { data: today, mutate: mutToday } = useSWR(isTarget ? '/api/commentos/targets?view=today' : null, fetcher);
+  const overCap = !!today && today.posted_today >= today.cap;
   // X has no page-identity switcher; DA identity applies to LinkedIn only
   const identity = !isX && brand === 'decision-architect' ? 'Decision Architect' : undefined;
   const limit = isX ? 280 : 700;
@@ -23,7 +33,8 @@ function ReplyPane({ comment, postUrl, brand, platform, onClose }: { comment: an
   const generate = async () => {
     setBusy(true); setMsg('');
     const r = await fetch('/api/commentos/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: comment.id, steering: angle || undefined, campaign_id: campaign }) }).then((x) => x.json());
+      body: JSON.stringify({ ...(onPost ? { capture_id: comment.capture_id } : { comment_id: comment.id }),
+        steering: angle || undefined, campaign_id: campaign }) }).then((x) => x.json());
     if (r.variants?.length) {
       setDraft(r.variants[0]);
       // link back to the brand hashtags — deterministic append, editable before posting
@@ -42,6 +53,7 @@ ${tags}` : base);
       body: JSON.stringify({ id: draft.id, action: 'approve', text }) });
     await fetch('/api/commentos/drafts', { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: draft.id, action: 'posted' }) });
+    mutToday();
   };
   // Post reply = the real act: post via Chrome bridge, auto-like their comment,
   // and only then record it as posted. Nothing is marked without happening.
@@ -53,10 +65,11 @@ ${tags}` : base);
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: postUrl, text, identity }) }).then((x) => x.json());
       if (r.error) { setMsg('✗ ' + r.error); setPosting(false); return; }
-      fetch(`${BRIDGE}/like-comment`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: postUrl, snippet: comment.body?.slice(0, 60) }) }).catch(() => {});
+      if (!onPost)
+        fetch(`${BRIDGE}/like-comment`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: postUrl, snippet: comment.body?.slice(0, 60) }) }).catch(() => {});
       await markPosted();
-      setMsg('Posted ✓ (their comment liked, outcome tracking armed)');
+      setMsg(onPost ? 'Posted ✓ (outcome tracking armed)' : 'Posted ✓ (their comment liked, outcome tracking armed)');
     } catch { setMsg('✗ Bridge offline — use Copy + Open, then "I posted it manually"'); }
     setPosting(false);
   };
@@ -65,10 +78,14 @@ ${tags}` : base);
   return (
     <div className="border border-gray-700 rounded-lg p-4 bg-gray-900/60 sticky top-20">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs text-gray-500 uppercase">Reply to {comment.author_name || 'comment'}</span>
+        <span className="text-xs text-gray-500 uppercase">
+          {onPost ? `Comment on ${comment.author_name ? `${comment.author_name}'s` : 'the'} post` : `Reply to ${comment.author_name || 'comment'}`}</span>
         <button onClick={onClose} className="text-gray-500 hover:text-white">×</button>
       </div>
       <p className="text-xs text-gray-400 border-l-2 border-gray-700 pl-2 mb-3 max-h-24 overflow-y-auto">{comment.body}</p>
+      {today && (
+        <p className={`text-xs mb-2 ${overCap ? 'text-red-400' : 'text-gray-500'}`}>
+          🎯 {today.posted_today}/{today.cap} target comments today{overCap ? ' — daily limit reached' : ''}</p>)}
       <div className="flex flex-wrap gap-1 mb-2">
         {(campaigns || []).map((c: any) => (
           <button key={c.id} onClick={() => setCampaign(c.id)} title={c.tone}
@@ -81,7 +98,7 @@ ${tags}` : base);
         className="w-full bg-gray-950 border border-gray-700 rounded p-2 text-sm mb-2" />
       <button onClick={generate} disabled={busy}
         className="w-full py-2 bg-cyan-700 hover:bg-cyan-600 rounded text-sm disabled:opacity-50 mb-2">
-        {busy ? 'Drafting…' : draft ? 'Redraft' : 'Generate reply'}
+        {busy ? 'Drafting…' : draft ? 'Redraft' : onPost ? 'Generate comment' : 'Generate reply'}
       </button>
       {draft && (
         <>
@@ -89,16 +106,17 @@ ${tags}` : base);
             className="w-full bg-gray-950 border border-gray-700 rounded p-2 text-sm min-h-[140px]" />
           <div className={`text-xs text-right ${text.length > limit ? 'text-red-400 font-bold' : 'text-gray-600'}`}>
             {text.length}/{limit}{isX && text.length > limit ? ' — too long for X' : ''}</div>
-          <button onClick={postReply} disabled={posting || (isX && text.length > limit)}
+          <button onClick={postReply} disabled={posting || overCap || (isX && text.length > limit)}
             className="w-full mt-2 py-2 bg-green-700 hover:bg-green-600 rounded text-sm font-medium disabled:opacity-50">
-            {posting ? 'Posting…' : isX ? 'Post reply on 𝕏 (likes it too)' : `Post as ${identity || 'you'} (likes their comment too)`}
+            {posting ? 'Posting…' : onPost ? `Post comment as ${identity || 'you'}`
+              : isX ? 'Post reply on 𝕏 (likes it too)' : `Post as ${identity || 'you'} (likes their comment too)`}
           </button>
           <div className="grid grid-cols-3 gap-2 mt-2">
             <button onClick={copy} className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs">Copy</button>
             <a href={postUrl} target="_blank" rel="noopener"
               className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs text-center text-cyan-400">Open ↗</a>
-            <button onClick={manualPosted} title="Only if you pasted it yourself"
-              className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs">I posted it manually</button>
+            <button onClick={manualPosted} disabled={overCap} title="Only if you pasted it yourself"
+              className="py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-xs disabled:opacity-50">I posted it manually</button>
           </div>
           {draft.grounding?.ed_path ? (
             <div className="mt-3 text-xs">
@@ -125,6 +143,13 @@ function ImpactChip({ n }: { n: number }) {
   return <span title={`impact ${n}/10 — reach × engagement × signal quality`}
     className={`px-1.5 py-0.5 rounded font-bold text-xs ${hot ? 'bg-red-500/25 text-red-300' : warm ? 'bg-amber-500/20 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>
     {Number(n).toFixed(1)}</span>;
+}
+
+function TargetChip({ c }: { c: any }) {
+  const f = c.target_followers;
+  return <span title={`target: ${ROLE_LABEL[c.target_role] || c.target_role}${c.target_sector ? ` · ${c.target_sector.replace('_', ' ')}` : ''}`}
+    className="px-1.5 py-0.5 rounded text-xs bg-amber-500/15 text-amber-300 border border-amber-500/30 whitespace-nowrap">
+    🎯 {ROLE_LABEL[c.target_role] || c.target_role}{f ? ` · ${f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 0 : 1)}k` : f}` : ''}</span>;
 }
 
 function reachLabel(e: any): string {
@@ -189,6 +214,8 @@ export default function RadarPage() {
   const [replyTo, setReplyTo] = useState<any>(null);
   const [channel, setChannel] = useState<string | null>(null);
   const [newOnly, setNewOnly] = useState(false);
+  // posts by target people over the follower threshold, ranked by reach and recency
+  const [targetsOnly, setTargetsOnly] = useState(false);
   // post-date window, remembered per browser; most sessions only want the last 2 days
   const [days, setDaysState] = useState<number | null>(2);
   useEffect(() => {
@@ -201,8 +228,9 @@ export default function RadarPage() {
     setDaysState(d); setSel(null);
     try { localStorage.setItem('radar.postDays', d == null ? 'any' : String(d)); } catch {}
   };
+  const params = [targetsOnly && 'targets=1', days && `days=${days}`].filter(Boolean).join('&');
   const { data: captures, mutate: mutList } = useSWR(
-    `/api/commentos/captures${days ? `?days=${days}` : ''}`, fetcher, { refreshInterval: 15000 });
+    `/api/commentos/captures${params ? `?${params}` : ''}`, fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
 
   useEffect(() => {
@@ -212,6 +240,7 @@ export default function RadarPage() {
   useEffect(() => { setReplyTo(null); }, [sel]);
 
   const comments = detail?.comments || [];
+  const selCapture = captures?.find((c: any) => c.id === sel);
 
   // auto-like recognised comments (recognition = appreciation), deduped by flag
   useEffect(() => {
@@ -233,7 +262,7 @@ export default function RadarPage() {
   };
 
   if (!captures) return <div className="animate-pulse text-gray-500">Loading radar…</div>;
-  if (!captures.length && !days)
+  if (!captures.length && !days && !targetsOnly)
     return <div className="text-center py-24 text-gray-500"><div className="text-5xl mb-4">📡</div>
       <p>No captures yet — run a scrape or recheck from the bridge.</p></div>;
 
@@ -278,6 +307,10 @@ export default function RadarPage() {
           title="threads first seen in the last 48h, newest first"
           className={`px-3 py-1 rounded-full text-xs border ${newOnly ? 'border-emerald-500 text-emerald-300 bg-gray-800' : 'border-gray-700 text-emerald-400'}`}>
           🆕 {newCount} new</button>
+        <button onClick={() => { setTargetsOnly(!targetsOnly); setSel(null); }}
+          title="posts by people in target roles with large followings, ranked by followers and recency"
+          className={`px-3 py-1 rounded-full text-xs border ${targetsOnly ? 'border-amber-500 text-amber-300 bg-gray-800' : 'border-gray-700 text-amber-400'}`}>
+          🎯 Targets</button>
         {Object.entries(groups).map(([g, pfs]) => (
           <span key={g} className="flex gap-1.5 items-center">
             <span className="text-[10px] text-gray-600 uppercase">{g}</span>
@@ -291,8 +324,9 @@ export default function RadarPage() {
     <div className={`grid gap-4 ${replyTo ? 'grid-cols-[280px_1fr_360px]' : 'grid-cols-[300px_1fr]'}`}>
       {/* captures list */}
       <div className="space-y-2 max-h-[calc(100vh-160px)] overflow-y-auto pr-1">
-        {!shown.length && (
-          <p className="text-xs text-gray-500 p-3">No threads posted in the last {days} days — run a scrape, or widen the window.</p>)}
+        {!shown.length && (targetsOnly
+          ? <p className="text-xs text-gray-500 p-3">No target posts{days ? ` from the last ${days} days` : ''}. Add people on the <a href="/commentos/targets" className="text-cyan-400 hover:underline">Targets</a> page, or widen the window.</p>
+          : <p className="text-xs text-gray-500 p-3">No threads posted {days ? `in the last ${days} days` : 'yet'} — run a scrape, or widen the window.</p>)}
         {shown.map((c: any) => (
           <button key={c.id} onClick={() => setSel(c.id)}
             className={`w-full text-left p-3 rounded-lg border ${sel === c.id ? 'border-cyan-500 bg-gray-900' : 'border-gray-800 bg-gray-900/50 hover:border-gray-600'}`}>
@@ -315,7 +349,9 @@ export default function RadarPage() {
             <div className="text-sm font-medium truncate">{c.post_author || 'Unknown'} — {c.post_title || (c.post_body || '').slice(0, 60)}</div>
             <div className="text-xs text-gray-500 mt-1 flex items-center gap-2">
               <ImpactChip n={c.impact} />
+              {c.target_role && <TargetChip c={c} />}
               <span>{c.n_comments} comments · {c.n_signals} signals</span>
+              {c.commented && <span className="text-cyan-400" title="you've commented on this post">✓</span>}
             </div>
             {reachLabel(c.engagement) && <div className="text-[10px] text-gray-600 mt-0.5">{reachLabel(c.engagement)}</div>}
           </button>
@@ -328,8 +364,13 @@ export default function RadarPage() {
           <div>
             <div className="border border-gray-800 rounded-lg p-4 mb-4 bg-gray-900/60">
               <div className="flex justify-between">
-                <div className="font-bold">{detail.post_author}</div>
+                <div className="font-bold flex items-center gap-2">{detail.post_author}
+                  {selCapture?.target_role && <TargetChip c={selCapture} />}</div>
                 <span className="flex items-center gap-2 text-xs text-gray-500">
+                  {detail.post_url && detail.platform === 'linkedin' && (
+                    <button onClick={() => setReplyTo({ id: null, capture_id: detail.id, body: detail.post_body || detail.post_title,
+                                                       author_name: detail.post_author })}
+                      className="text-cyan-400 hover:underline font-medium text-sm">Comment on post →</button>)}
                   <ImpactChip n={detail.impact} />
                   <span>{reachLabel(detail.engagement)}</span>
                   {detail.post_url && <a href={detail.post_url} target="_blank" rel="noopener" className="text-cyan-400 text-sm">Open thread ↗</a>}
@@ -381,7 +422,8 @@ export default function RadarPage() {
       {/* reply pane */}
       {replyTo && detail && (
         <div className="max-h-[calc(100vh-120px)] overflow-y-auto">
-          <ReplyPane comment={replyTo} postUrl={detail.post_url} brand={detail.brand} platform={detail.platform} onClose={() => setReplyTo(null)} />
+          <ReplyPane key={replyTo.id ?? `post-${detail.id}`} comment={replyTo} postUrl={detail.post_url} brand={detail.brand}
+            platform={detail.platform} isTarget={!!detail.target_id && replyTo.id == null} onClose={() => setReplyTo(null)} />
         </div>
       )}
     </div>
