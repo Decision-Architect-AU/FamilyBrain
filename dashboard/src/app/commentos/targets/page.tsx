@@ -10,8 +10,14 @@ const ROLES: [string, string][] = [
 ];
 const SECTORS: [string, string][] = [['government', 'Government'], ['financial_services', 'Financial services']];
 
+const SEGMENTS: [string, string, string][] = [
+  ['business_leader', 'Business leaders', 'Business thought leaders with very large followings, chosen by you. Checked every 12 hours.'],
+  ['ai_technical', 'AI technical influencers', 'CIOs, chief data officers, heads of AI and AI governance leads. Found by a weekly LinkedIn people search in Australia, from the authors of captured posts, or pasted here.'],
+];
+
 const SETTING_FIELDS: [string, string, string][] = [
-  ['min_followers', 'Min followers', 'posts from targets below this stay out of the Targets view'],
+  ['business_min_followers', 'Min followers (business)', 'business leaders below this stay out of the Targets view'],
+  ['min_followers', 'Min followers (AI)', 'AI technical influencers below this stay out of the Targets view'],
   ['daily_comments', 'Comments / day', 'Post buttons on target posts turn off at this many'],
   ['max_post_age_days', 'Post age (days)', 'older posts are not captured'],
   ['profiles_per_run', 'Profiles / run', 'profiles visited per target run (2 runs a day)'],
@@ -19,6 +25,7 @@ const SETTING_FIELDS: [string, string, string][] = [
 
 function fmt(n: number | null) {
   if (n == null) return '—';
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
 }
 
@@ -28,14 +35,20 @@ export default function TargetsPage() {
   const [paste, setPaste] = useState('');
   const [msg, setMsg] = useState('');
   const [showDismissed, setShowDismissed] = useState(false);
-  const [settings, setSettings] = useState<Record<string, number>>({});
+  const [view, setView] = useState('business_leader');
+  const [settings, setSettings] = useState<Record<string, any>>({});
   useEffect(() => { if (data?.settings) setSettings(data.settings); }, [data?.settings]);
 
   if (!data) return <div className="animate-pulse text-gray-500">Loading targets…</div>;
-  const min = data.settings.min_followers;
-  const targets = data.targets.filter((t: any) => showDismissed || t.status === 'active');
-  const nDismissed = data.targets.filter((t: any) => t.status === 'dismissed').length;
-  const nQualified = data.targets.filter((t: any) => t.status === 'active' && (t.followers || 0) >= min).length;
+  const minFor = (segment: string) =>
+    segment === 'business_leader' ? data.settings.business_min_followers : data.settings.min_followers;
+  const min = minFor(view);
+  const inView = data.targets.filter((t: any) => t.segment === view);
+  const targets = inView.filter((t: any) => showDismissed || t.status === 'active');
+  const nDismissed = inView.filter((t: any) => t.status === 'dismissed').length;
+  const qualified = (segment: string) => data.targets.filter((t: any) =>
+    t.segment === segment && t.status === 'active' && (t.followers || 0) >= minFor(segment)).length;
+  const isAI = view === 'ai_technical';
 
   const post = (body: any) => fetch('/api/commentos/targets', { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
@@ -45,7 +58,7 @@ export default function TargetsPage() {
     mutate();
   };
   const add = async () => {
-    const r = await post({ action: 'add', text: paste });
+    const r = await post({ action: 'add', text: paste, segment: view });
     setMsg(r.found ? `${r.added} added, ${r.found - r.added} already listed` : 'No LinkedIn profile links found');
     if (r.added) setPaste('');
     mutate();
@@ -71,24 +84,27 @@ export default function TargetsPage() {
     <div className="max-w-6xl">
       <div className="flex items-baseline gap-4 mb-1">
         <h2 className="text-xl font-bold">Targets</h2>
-        <span className="text-sm text-gray-500">{nQualified} active over {fmt(min)} followers · {data.posted_today}/{data.cap} comments today</span>
+        <span className="text-sm text-gray-500">{data.posted_today}/{data.cap} target comments today · recent posts show under
+          🎯 Targets on <a href="/commentos/radar" className="text-cyan-400 hover:underline">Radar</a></span>
       </div>
-      <p className="text-sm text-gray-500 mb-4">
-        CIOs, chief data officers, heads of AI and AI governance leads with large followings. Their recent posts show under
-        🎯 Targets on <a href="/commentos/radar" className="text-cyan-400 hover:underline">Radar</a>. People are added by a weekly
-        LinkedIn people search in Australia, when a captured post's author has one of these roles in their headline, or by pasting links here.
-      </p>
+      <div className="flex gap-2 my-3">
+        {SEGMENTS.map(([s, label]) => (
+          <button key={s} onClick={() => setView(s)}
+            className={`px-3 py-1.5 rounded text-sm border ${view === s ? 'border-cyan-500 bg-gray-800 text-white' : 'border-gray-700 text-gray-400'}`}>
+            {label} <span className="text-gray-500">· {qualified(s)} over {fmt(minFor(s))}</span></button>))}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">{SEGMENTS.find(([s]) => s === view)?.[2]}</p>
 
       <div className="grid grid-cols-[1fr_auto] gap-4 mb-4">
         <div className="border border-gray-800 rounded-lg p-3 bg-gray-900/50">
           <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={3}
-            placeholder="Paste LinkedIn profile links (linkedin.com/in/…), any number, any separator"
+            placeholder={`Paste LinkedIn profile links (linkedin.com/in/…) to add as ${isAI ? 'AI technical influencers' : 'business leaders'}, any number, any separator`}
             className="w-full bg-gray-950 border border-gray-700 rounded p-2 text-sm" />
           <div className="flex gap-2 mt-2 items-center">
             <button onClick={add} disabled={!paste.trim()}
               className="px-3 py-1.5 bg-cyan-700 hover:bg-cyan-600 rounded text-sm disabled:opacity-50">Add</button>
-            <button onClick={() => runNow('target_search')} title={`LinkedIn people search in Australia for: ${(data.settings.search_queries || []).join(', ')}. Runs weekly by itself.`}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm">Find people now</button>
+            {isAI && <button onClick={() => runNow('target_search')} title={`LinkedIn people search in Australia for: ${(data.settings.search_queries || []).join(', ')}. Runs weekly by itself.`}
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm">Find people now</button>}
             <button onClick={() => runNow('targets')} title="visit the least recently checked profiles for followers and recent posts. Runs twice a day by itself."
               className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm">Check profiles now</button>
             {msg && <span className="text-xs text-cyan-300">{msg}</span>}
@@ -108,7 +124,8 @@ export default function TargetsPage() {
       <table className="w-full text-sm">
         <thead className="text-xs text-gray-500 uppercase text-left">
           <tr className="border-b border-gray-800">
-            <th className="py-2 pr-3">Person</th><th className="pr-3">Role</th><th className="pr-3">Sector</th>
+            <th className="py-2 pr-3">Person</th>
+            {isAI && <><th className="pr-3">Role</th><th className="pr-3">Sector</th></>}
             <th className="pr-3 text-right">Followers</th><th className="pr-3">Last post</th>
             <th className="pr-3 text-right" title="posts captured / commented on">Posts</th>
             <th className="pr-3">Checked</th><th></th>
@@ -126,23 +143,28 @@ export default function TargetsPage() {
                     title={t.source === 'search' ? 'found by people search' : 'found as the author of a captured post'}>{t.source === 'search' ? 'search' : 'post'}</span>}
                   {t.headline && <div className="text-xs text-gray-500 line-clamp-2">{t.headline}</div>}
                 </td>
-                <td className="pr-3">
-                  <select value={t.role || ''} onChange={(e) => patch({ id: t.id, role: e.target.value })}
-                    className="bg-transparent border border-gray-800 rounded text-xs py-0.5">
-                    <option value="">—</option>{ROLES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
-                </td>
-                <td className="pr-3">
-                  <select value={t.sector || ''} onChange={(e) => patch({ id: t.id, sector: e.target.value })}
-                    className="bg-transparent border border-gray-800 rounded text-xs py-0.5">
-                    <option value="">—</option>{SECTORS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
-                </td>
+                {isAI && <>
+                  <td className="pr-3">
+                    <select value={t.role || ''} onChange={(e) => patch({ id: t.id, role: e.target.value })}
+                      className="bg-transparent border border-gray-800 rounded text-xs py-0.5">
+                      <option value="">—</option>{ROLES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </td>
+                  <td className="pr-3">
+                    <select value={t.sector || ''} onChange={(e) => patch({ id: t.id, sector: e.target.value })}
+                      className="bg-transparent border border-gray-800 rounded text-xs py-0.5">
+                      <option value="">—</option>{SECTORS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </td>
+                </>}
                 <td className={`pr-3 text-right ${below ? 'text-gray-500' : ''}`} title={below ? `below the ${min} threshold` : ''}>{fmt(t.followers)}</td>
                 <td className="pr-3 text-xs text-gray-500">{t.last_post_at ? timeAgo(t.last_post_at) : '—'}</td>
                 <td className="pr-3 text-right text-xs text-gray-400">{t.n_posts} / {t.n_commented}</td>
                 <td className="pr-3 text-xs text-gray-500">{t.checked_at ? timeAgo(t.checked_at) : 'not yet'}</td>
-                <td className="text-right">
+                <td className="text-right whitespace-nowrap">
+                  <button onClick={() => patch({ id: t.id, segment: isAI ? 'business_leader' : 'ai_technical' })}
+                    title={`move to ${isAI ? 'business leaders' : 'AI technical influencers'}`}
+                    className="text-xs text-gray-500 hover:text-cyan-400 mr-3">Move to {isAI ? 'business' : 'AI'}</button>
                   <button onClick={() => patch({ id: t.id, status: t.status === 'active' ? 'dismissed' : 'active' })}
                     className="text-xs text-gray-500 hover:text-red-400">{t.status === 'active' ? 'Dismiss' : 'Restore'}</button>
                 </td>
@@ -150,7 +172,7 @@ export default function TargetsPage() {
           })}
         </tbody>
       </table>
-      {!data.targets.length && <p className="text-sm text-gray-500 py-6">No targets yet. Paste some profile links above.</p>}
+      {!inView.length && <p className="text-sm text-gray-500 py-6">None yet. Paste some profile links above.</p>}
       {nDismissed > 0 && (
         <button onClick={() => setShowDismissed(!showDismissed)} className="mt-3 text-xs text-gray-500 hover:text-gray-300">
           {showDismissed ? 'Hide' : 'Show'} {nDismissed} dismissed</button>)}

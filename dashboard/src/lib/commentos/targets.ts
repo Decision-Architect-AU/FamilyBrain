@@ -1,7 +1,14 @@
 import { q } from './db';
 
-// Target discovery: people in these roles with large followings are where
-// Glenn's comments reach the audience he wants. Matched on LinkedIn headlines.
+// Target discovery: two kinds of people whose posts are where Glenn's comments
+// reach the audience he wants.
+// - ai_technical: AI technical influencers — people in these roles with large
+//   followings, matched on LinkedIn headlines.
+// - business_leader: business thought leaders (Sinek, Robbins) — curated by
+//   hand, global, with far larger followings.
+export const SEGMENT_LABEL: Record<string, string> = {
+  business_leader: 'Business leader', ai_technical: 'AI technical influencer',
+};
 const ROLES: [string, RegExp][] = [
   // "Chief Information & Digital Officer", but not a CISO
   ['cio', /\b(chief information (?!security)[^|,]{0,25}officer|CIO)\b/i],
@@ -37,7 +44,7 @@ export function cleanProfileUrl(url: string): string | null {
 
 export async function targetSettings() {
   const [row] = await q(`SELECT value FROM decision_os.co_setting WHERE key='targets'`);
-  return { min_followers: 2000, daily_comments: 5, max_post_age_days: 3,
+  return { min_followers: 2000, business_min_followers: 50000, daily_comments: 5, max_post_age_days: 3,
            profiles_per_run: 12, posts_per_target: 2, search_pages: 2,
            search_queries: ['chief information officer', 'chief data officer', 'head of AI', 'AI governance'],
            ...(row?.value || {}) };

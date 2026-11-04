@@ -52,26 +52,32 @@ export async function GET(req: NextRequest) {
   // Filtering here, not in the client, so the LIMIT can't push brand-new
   // unscored threads off the list.
   const days = Number(req.nextUrl.searchParams.get('days')) || null;
-  // ?targets=1: posts by target people over the follower threshold, ranked by
-  // reach and recency — log10(followers) loses a point for each day of age
+  // ?targets=1: posts by target people over their segment's follower
+  // threshold, ranked by reach and recency — log10(followers) loses a point
+  // for each day of age. &segment= narrows to one segment.
   if (req.nextUrl.searchParams.get('targets')) {
-    const { min_followers } = await targetSettings();
+    const { min_followers, business_min_followers } = await targetSettings();
+    const segment = req.nextUrl.searchParams.get('segment');
     const rows = await q(`
       SELECT c.*, t.followers AS target_followers, t.role AS target_role, t.sector AS target_sector,
+        t.segment AS target_segment,
         (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
         (SELECT count(DISTINCT ss.signal_id) FROM decision_os.co_signal_source ss
           JOIN decision_os.co_comment cm ON cm.id=ss.comment_id WHERE cm.capture_id=c.id) AS n_signals,
         EXISTS (SELECT 1 FROM decision_os.co_draft d
                 WHERE d.capture_id=c.id AND d.status='posted') AS commented
       FROM decision_os.co_capture c JOIN decision_os.co_target t ON t.id=c.target_id
-      WHERE c.status='active' AND t.status='active' AND coalesce(t.followers, 0) >= $2
+      WHERE c.status='active' AND t.status='active'
+        AND coalesce(t.followers, 0) >= CASE WHEN t.segment='business_leader' THEN $3::int ELSE $2::int END
+        AND ($4::text IS NULL OR t.segment=$4)
         AND ($1::int IS NULL OR ${POSTED_AT} > now() - make_interval(days => $1::int))
       ORDER BY log(greatest(t.followers, 10)) - extract(epoch FROM now() - ${POSTED_AT}) / 86400 DESC
-      LIMIT 100`, [days, min_followers]);
+      LIMIT 100`, [days, min_followers, business_min_followers, segment]);
     return NextResponse.json(rows);
   }
   const rows = await q(`
     SELECT c.*, t.followers AS target_followers, t.role AS target_role, t.sector AS target_sector,
+      t.segment AS target_segment,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage='relevant') AS n_relevant,
       (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage IS NULL) AS n_pending,

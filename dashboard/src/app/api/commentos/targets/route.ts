@@ -21,11 +21,11 @@ export async function GET(req: NextRequest) {
       (SELECT count(*) FROM decision_os.co_draft d JOIN decision_os.co_capture c ON c.id=d.capture_id
        WHERE c.target_id=t.id AND d.status='posted')::int AS n_commented
     FROM decision_os.co_target t
-    ORDER BY t.status='active' DESC, t.followers DESC NULLS LAST, t.created_at DESC`);
+    ORDER BY t.status='active' DESC, t.segment='business_leader' DESC, t.followers DESC NULLS LAST, t.created_at DESC`);
   return NextResponse.json({ targets: rows, settings: await targetSettings(), ...(await today()) });
 }
 
-// POST {action:'add', text}            — paste of LinkedIn profile URLs, one or many
+// POST {action:'add', text, segment?}  — paste of LinkedIn profile URLs, one or many
 // POST {action:'found', people[]}      — runner's people-search results
 // POST {action:'checked', id, ...}     — runner visited the profile
 export async function POST(req: NextRequest) {
@@ -35,9 +35,11 @@ export async function POST(req: NextRequest) {
       (String(b.text || '').match(/linkedin\.com\/in\/[^\s/?#,]+/gi) || [])
         .map((u) => cleanProfileUrl(u)).filter(Boolean))) as string[];
     let added = 0;
+    const segment = b.segment === 'business_leader' ? 'business_leader' : 'ai_technical';
     for (const url of urls) {
-      const r = await q(`INSERT INTO decision_os.co_target (profile_url) VALUES ($1)
-                         ON CONFLICT (profile_url) DO UPDATE SET status='active' RETURNING (xmax = 0) AS inserted`, [url]);
+      const r = await q(`INSERT INTO decision_os.co_target (profile_url, segment) VALUES ($1, $2)
+                         ON CONFLICT (profile_url) DO UPDATE SET status='active', segment=EXCLUDED.segment
+                         RETURNING (xmax = 0) AS inserted`, [url, segment]);
       if (r[0]?.inserted) added++;
     }
     return NextResponse.json({ found: urls.length, added });
@@ -59,12 +61,14 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ error: 'unknown action' }, { status: 400 });
 }
 
-// PATCH {id, status?, role?, sector?} — dismiss/restore, or correct the role
+// PATCH {id, status?, role?, sector?, segment?} — dismiss/restore, or correct
+// the role, sector or segment
 export async function PATCH(req: NextRequest) {
   const b = await req.json();
   await q(`UPDATE decision_os.co_target SET status=coalesce($2, status),
              role=CASE WHEN $3::text IS NULL THEN role ELSE nullif($3, '') END,
-             sector=CASE WHEN $4::text IS NULL THEN sector ELSE nullif($4, '') END
-           WHERE id=$1`, [b.id, b.status || null, b.role ?? null, b.sector ?? null]);
+             sector=CASE WHEN $4::text IS NULL THEN sector ELSE nullif($4, '') END,
+             segment=coalesce($5, segment)
+           WHERE id=$1`, [b.id, b.status || null, b.role ?? null, b.sector ?? null, b.segment || null]);
   return NextResponse.json({ ok: true });
 }

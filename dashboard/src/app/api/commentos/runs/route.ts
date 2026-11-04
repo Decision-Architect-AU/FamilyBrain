@@ -60,8 +60,10 @@ export async function POST(req: NextRequest) {
 }
 
 // {channel_id, kind:'targets'} — visit target profiles for their recent posts.
-// Never-checked targets first, then the least recently checked. Its own daily
-// budget, so it doesn't eat into keyword discovery.
+// Business leaders not checked in 12 hours go first (they post most days and
+// are the biggest audiences), then never-checked targets, then the least
+// recently checked. Its own daily budget, so it doesn't eat into keyword
+// discovery.
 async function createTargetRun(b: any, ch: any) {
   if (ch.slug !== 'linkedin') return NextResponse.json({ error: 'target runs are LinkedIn only' }, { status: 422 });
   const maxRuns = ch.pacing?.max_target_runs_per_day ?? 2;
@@ -70,7 +72,8 @@ async function createTargetRun(b: any, ch: any) {
   if (n >= maxRuns) return NextResponse.json({ error: `daily target run budget spent (${n}/${maxRuns})` }, { status: 422 });
   const { profiles_per_run } = await targetSettings();
   const picked = await q(`SELECT id FROM decision_os.co_target WHERE status='active'
-    ORDER BY checked_at ASC NULLS FIRST, followers DESC NULLS LAST LIMIT $1`, [profiles_per_run]);
+    ORDER BY (segment='business_leader' AND coalesce(checked_at, '-infinity') < now() - interval '12 hours') DESC,
+             checked_at ASC NULLS FIRST, followers DESC NULLS LAST LIMIT $1`, [profiles_per_run]);
   if (!picked.length) return NextResponse.json({ error: 'no active targets' }, { status: 422 });
   const ids = picked.map((r: { id: number }) => r.id);
   const runKey = createHash('sha256').update(

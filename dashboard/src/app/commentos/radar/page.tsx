@@ -145,11 +145,21 @@ function ImpactChip({ n }: { n: number }) {
     {Number(n).toFixed(1)}</span>;
 }
 
+const SEGMENTS: [string | null, string][] = [[null, 'All'], ['business_leader', 'Business leaders'], ['ai_technical', 'AI technical']];
+
+function fmtFollowers(f: number) {
+  if (f >= 1e6) return `${(f / 1e6).toFixed(1)}M`;
+  return f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 0 : 1)}k` : String(f);
+}
+
 function TargetChip({ c }: { c: any }) {
   const f = c.target_followers;
-  return <span title={`target: ${ROLE_LABEL[c.target_role] || c.target_role}${c.target_sector ? ` · ${c.target_sector.replace('_', ' ')}` : ''}`}
-    className="px-1.5 py-0.5 rounded text-xs bg-amber-500/15 text-amber-300 border border-amber-500/30 whitespace-nowrap">
-    🎯 {ROLE_LABEL[c.target_role] || c.target_role}{f ? ` · ${f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 0 : 1)}k` : f}` : ''}</span>;
+  const business = c.target_segment === 'business_leader';
+  const label = business ? 'Business leader' : ROLE_LABEL[c.target_role] || c.target_role || 'AI technical';
+  return <span title={`target: ${business ? 'business leader' : `AI technical influencer · ${label}`}${c.target_sector ? ` · ${c.target_sector.replace('_', ' ')}` : ''}`}
+    className={`px-1.5 py-0.5 rounded text-xs border whitespace-nowrap ${business
+      ? 'bg-violet-500/15 text-violet-300 border-violet-500/30' : 'bg-amber-500/15 text-amber-300 border-amber-500/30'}`}>
+    🎯 {label}{f ? ` · ${fmtFollowers(f)}` : ''}</span>;
 }
 
 function reachLabel(e: any): string {
@@ -216,6 +226,7 @@ export default function RadarPage() {
   const [newOnly, setNewOnly] = useState(false);
   // posts by target people over the follower threshold, ranked by reach and recency
   const [targetsOnly, setTargetsOnly] = useState(false);
+  const [segment, setSegment] = useState<string | null>(null);
   // post-date window, remembered per browser; most sessions only want the last 2 days
   const [days, setDaysState] = useState<number | null>(2);
   useEffect(() => {
@@ -228,7 +239,8 @@ export default function RadarPage() {
     setDaysState(d); setSel(null);
     try { localStorage.setItem('radar.postDays', d == null ? 'any' : String(d)); } catch {}
   };
-  const params = [targetsOnly && 'targets=1', days && `days=${days}`].filter(Boolean).join('&');
+  const params = [targetsOnly && 'targets=1', targetsOnly && segment && `segment=${segment}`,
+                  days && `days=${days}`].filter(Boolean).join('&');
   const { data: captures, mutate: mutList } = useSWR(
     `/api/commentos/captures${params ? `?${params}` : ''}`, fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
@@ -311,6 +323,10 @@ export default function RadarPage() {
           title="posts by people in target roles with large followings, ranked by followers and recency"
           className={`px-3 py-1 rounded-full text-xs border ${targetsOnly ? 'border-amber-500 text-amber-300 bg-gray-800' : 'border-gray-700 text-amber-400'}`}>
           🎯 Targets</button>
+        {targetsOnly && SEGMENTS.map(([s, label]) => (
+          <button key={label} onClick={() => { setSegment(s); setSel(null); }}
+            className={`px-2.5 py-1 rounded-full text-xs border ${segment === s ? 'border-amber-500 text-white bg-gray-800' : 'border-gray-700 text-gray-400'}`}>
+            {label}</button>))}
         {Object.entries(groups).map(([g, pfs]) => (
           <span key={g} className="flex gap-1.5 items-center">
             <span className="text-[10px] text-gray-600 uppercase">{g}</span>
@@ -349,7 +365,7 @@ export default function RadarPage() {
             <div className="text-sm font-medium truncate">{c.post_author || 'Unknown'} — {c.post_title || (c.post_body || '').slice(0, 60)}</div>
             <div className="text-xs text-gray-500 mt-1 flex items-center gap-2">
               <ImpactChip n={c.impact} />
-              {c.target_role && <TargetChip c={c} />}
+              {c.target_segment && <TargetChip c={c} />}
               <span>{c.n_comments} comments · {c.n_signals} signals</span>
               {c.commented && <span className="text-cyan-400" title="you've commented on this post">✓</span>}
             </div>
@@ -365,7 +381,7 @@ export default function RadarPage() {
             <div className="border border-gray-800 rounded-lg p-4 mb-4 bg-gray-900/60">
               <div className="flex justify-between">
                 <div className="font-bold flex items-center gap-2">{detail.post_author}
-                  {selCapture?.target_role && <TargetChip c={selCapture} />}</div>
+                  {selCapture?.target_segment && <TargetChip c={selCapture} />}</div>
                 <span className="flex items-center gap-2 text-xs text-gray-500">
                   {detail.post_url && detail.platform === 'linkedin' && (
                     <button onClick={() => setReplyTo({ id: null, capture_id: detail.id, body: detail.post_body || detail.post_title,
