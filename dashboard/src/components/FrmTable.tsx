@@ -20,7 +20,7 @@ import { PAGE_TAGS, RETIRED_TAG } from '@/lib/frm';
 interface Field {
   key: string;
   label: string;
-  kind: 'text' | 'number' | 'money' | 'date' | 'select' | 'longtext' | 'tags';
+  kind: 'text' | 'number' | 'money' | 'date' | 'select' | 'longtext' | 'tags' | 'ref';
   source: 'column' | 'fact';
   options?: string[];
   readOnly?: boolean;

@@ -19,7 +19,7 @@
  */
 
 export type FieldKind =
-  'text' | 'number' | 'money' | 'date' | 'select' | 'longtext' | 'tags';
+  'text' | 'number' | 'money' | 'date' | 'select' | 'longtext' | 'tags' | 'ref';
 
 export interface FrmField {
   key: string;
@@ -28,11 +28,18 @@ export interface FrmField {
   source: 'column' | 'fact';
   options?: string[];
   readOnly?: boolean;
+  /**
+   * For kind 'ref': the column holding the id, and the table it points into.
+   * The page shows and accepts the other row's name; the id never appears,
+   * because nobody knows a routine by its number.
+   */
+  refColumn?: string;
+  refTable?: 'asset' | 'event';
 }
 
 export interface FrmEntity {
   label: string;
-  table: 'asset' | 'person';
+  table: 'asset' | 'person' | 'event';
   /** Fixed asset_type for rows created here, and the filter for listing. */
   assetType?: string;
   /** Rows to list, as a SQL fragment with no user input in it. */
@@ -307,6 +314,41 @@ export const FRM: Record<string, FrmEntity> = {
     ],
   },
 
+  todos: {
+    label: 'To-do',
+    table: 'event',
+    where: "e.event_type = 'task' AND e.status NOT IN ('cancelled', 'superseded')"
+         + " AND coalesce(e.task_status, 'open') <> 'done'",
+    defaults: { event_type: 'task', status: 'confirmed', provenance: 'manual',
+                calendar_source: 'frm', task_status: 'open' },
+    order: 'e.review_date NULLS LAST, e.effective_date NULLS LAST',
+    fields: [
+      { key: 'title', label: 'Job', kind: 'text', source: 'column' },
+      {
+        key: 'task_status', label: 'State', kind: 'select', source: 'column',
+        options: ['open', 'in_progress', 'done'],
+      },
+      // The two dates mean different things and the page has to show both:
+      // when the thing itself falls due, and when to look at this again.
+      { key: 'effective_date', label: 'Due', kind: 'date', source: 'column' },
+      { key: 'review_date', label: 'Review', kind: 'date', source: 'column' },
+      // What it is about. A price rise belongs to the subscription; a form
+      // belongs to this year's disco.
+      {
+        key: 'about', label: 'About', kind: 'ref', source: 'column',
+        refColumn: 'asset_id', refTable: 'asset',
+      },
+      {
+        key: 'occasion', label: 'Occasion', kind: 'ref', source: 'column',
+        refColumn: 'parent_event_id', refTable: 'event', readOnly: true,
+      },
+      // No GROUPS here: personal.event has no groups column, and a job is
+      // already filed by the thing it is about, which is the grouping that
+      // matters for a job.
+      NOTES,
+    ],
+  },
+
   contacts: {
     label: 'Contacts',
     table: 'person',
@@ -345,6 +387,7 @@ export const FRM_FACETS: Record<string, string[]> = {
   family: ['groups', 'relationship'],
   providers: ['groups', 'speciality', 'organisation'],
   contacts: ['groups', 'relationship', 'organisation'],
+  todos: ['about', 'task_status'],
 };
 
 /**
@@ -376,6 +419,7 @@ export const FRM_SECTIONS: { slug: string; label: string; entities: string[] }[]
   { slug: 'providers', label: 'Providers', entities: ['providers'] },
   { slug: 'contacts', label: 'Contacts', entities: ['contacts'] },
   { slug: 'subscriptions', label: 'Subscriptions', entities: ['subscriptions'] },
+  { slug: 'todos', label: 'To-do', entities: ['todos'] },
   { slug: 'routines', label: 'Routines', entities: ['routines'] },
 ];
 

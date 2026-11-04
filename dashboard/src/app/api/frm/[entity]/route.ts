@@ -14,11 +14,27 @@ export const dynamic = 'force-dynamic';
  * half-save.
  */
 
+/** One letter per table, used consistently in every fragment below. */
+const ALIAS: Record<string, string> = { asset: 'a', person: 'p', event: 'e' };
+
+/** Which column holds the human-readable name. event calls it title. */
+const NAME_COL: Record<string, string> = { asset: 'name', person: 'name', event: 'title' };
+
 function selectFor(entity: FrmEntity): string {
-  const alias = entity.table === 'asset' ? 'a' : 'p';
+  const alias = ALIAS[entity.table];
   const parts: string[] = [`${alias}.id`];
 
   for (const f of entity.fields) {
+    if (f.kind === 'ref') {
+      // Show the name of the row this points at. The id is what is stored and
+      // what gets written, but nobody knows a routine by its number, so the
+      // id never leaves the server.
+      const col = `${alias}.${f.refColumn}`;
+      parts.push(
+        `(SELECT r.${NAME_COL[f.refTable!]} FROM personal.${f.refTable} r WHERE r.id = ${col}) AS "${f.key}"`);
+      parts.push(`${col} AS "${f.key}__id"`);
+      continue;
+    }
     if (f.kind === 'tags') {
       // Groups come back as the array itself. They are only ever written by
       // hand, so there is no automatic value beside them to disagree with.
@@ -53,7 +69,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ entity: str
   const entity = FRM[name];
   if (!entity) return NextResponse.json({ ok: false, error: 'unknown entity' }, { status: 404 });
 
-  const alias = entity.table === 'asset' ? 'a' : 'p';
+  const alias = ALIAS[entity.table];
   const sql = `SELECT ${selectFor(entity)}
                  FROM personal.${entity.table} ${alias}
                 WHERE ${entity.where}
@@ -82,19 +98,39 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ entity: st
   const cols: string[] = [];
   const vals: unknown[] = [];
   const facts: Record<string, string> = {};
+  const refs: [FrmField, string][] = [];
 
   for (const [key, value] of Object.entries(body)) {
     const field = byKey.get(key);
     if (!field || field.readOnly) continue;
     if (value === '' || value === null || value === undefined) continue;
-    if (field.kind === 'tags') {
+    if (field.kind === 'ref') {
+      refs.push([field, String(value)]);
+    } else if (field.kind === 'tags') {
       const tags = tagList(value);
       if (tags.length) { cols.push(field.key); vals.push(tags); }
     } else if (field.source === 'fact') facts[key] = String(value);
     else { cols.push(field.key); vals.push(value); }
   }
-  if (!cols.includes('name')) {
-    return NextResponse.json({ ok: false, error: 'a name is required' }, { status: 400 });
+  // personal.event calls it title; asset and person call it name.
+  const nameCol = entity.table === 'event' ? 'title' : 'name';
+  if (!cols.includes(nameCol)) {
+    return NextResponse.json(
+      { ok: false, error: `a ${nameCol} is required` }, { status: 400 });
+  }
+
+  // Resolve each reference from the name that was typed. An unknown name is
+  // refused rather than silently dropped: a job filed against nothing looks
+  // identical to one filed against the wrong thing.
+  for (const [field, typed] of refs) {
+    const { rows } = await getPool().query(
+      `SELECT id FROM personal.${field.refTable}
+        WHERE lower(btrim(${NAME_COL[field.refTable!]})) = lower(btrim($1)) LIMIT 1`, [typed]);
+    if (!rows.length) {
+      return NextResponse.json(
+        { ok: false, error: `no ${field.refTable} called "${typed}"` }, { status: 400 });
+    }
+    cols.push(field.refColumn!); vals.push(rows[0].id);
   }
 
   if (entity.table === 'asset') {

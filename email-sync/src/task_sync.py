@@ -217,6 +217,49 @@ def pull_inbound(accounts: list[dict]) -> int:
                 )
                 existing = cur.fetchone()
 
+                if not existing and is_done:
+                    # A completed task we have no record of is history, not a
+                    # job. Importing it creates a local row that is born done
+                    # and will never be looked at, and if the mapping was lost
+                    # rather than never made, it creates a second copy of
+                    # something already here.
+                    #
+                    # Only an OPEN unmapped task is new work somebody typed
+                    # into Google Tasks themselves, which is the case this
+                    # branch exists for.
+                    continue
+
+                if not existing:
+                    # Before making a new job, see whether it is one we
+                    # already have. A remote task whose mapping was lost -
+                    # and they can be lost, by a failed repair as readily as
+                    # by anything else - is indistinguishable from a brand
+                    # new one except by its title, so match on that and
+                    # re-link rather than creating a second copy.
+                    cur.execute(
+                        """SELECT e.id FROM personal.event e
+                            WHERE e.event_type = 'task'
+                              AND e.status NOT IN ('cancelled', 'superseded')
+                              AND lower(btrim(e.title)) = lower(btrim(%s))
+                              AND NOT EXISTS (
+                                    SELECT 1 FROM personal.calendar_sync_map sm
+                                     WHERE sm.event_id = e.id
+                                       AND sm.channel = 'gtask_primary')
+                            ORDER BY e.created_at
+                            LIMIT 1""",
+                        (title,),
+                    )
+                    match = cur.fetchone()
+                    if match:
+                        db.upsert_sync_map(
+                            event_id=match["id"], source_account_id=account["id"],
+                            source_provider_id=task_id, sync_status="synced",
+                            channel="gtask_primary",
+                        )
+                        print(f"[task_sync] re-linked '{title[:44]}' to existing "
+                              f"event {match['id']} rather than creating a copy")
+                        continue
+
                 if not existing:
                     due = t.get("due")
                     effective_date = due[:10] if due else None

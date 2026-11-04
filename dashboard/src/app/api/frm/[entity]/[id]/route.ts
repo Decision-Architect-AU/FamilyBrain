@@ -36,9 +36,16 @@ export async function PATCH(
   const set: Record<string, string> = {};
   const clear: string[] = [];
   const arrays: [string, string[]][] = [];
+  const refs: [typeof entity.fields[number], string | null][] = [];
   for (const [key, value] of Object.entries(body)) {
     const field = byKey.get(key);
     if (!field || field.readOnly) continue;
+    if (field.kind === 'ref') {
+      // Written straight to its column, like groups: an id is either right or
+      // wrong, and there is no automatic writer underneath it to disagree with.
+      refs.push([field, value === null ? null : String(value)]);
+      continue;
+    }
     if (field.kind === 'tags') {
       // Groups are written to the column, not the override bag. Nothing
       // automatic maintains them, so there is nothing to protect them from,
@@ -51,7 +58,7 @@ export async function PATCH(
     if (value === null) clear.push(storeKey);
     else set[storeKey] = String(value);
   }
-  if (!Object.keys(set).length && !clear.length && !arrays.length) {
+  if (!Object.keys(set).length && !clear.length && !arrays.length && !refs.length) {
     return NextResponse.json({ ok: false, error: 'nothing to change' }, { status: 400 });
   }
 
@@ -62,6 +69,22 @@ export async function PATCH(
   for (const [col, tags] of arrays) {
     vals.push(tags);
     assignments.push(`${col} = $${vals.length}::text[]`);
+  }
+  for (const [field, typed] of refs) {
+    if (typed === null || typed === '') {
+      assignments.push(`${field.refColumn} = NULL`);
+      continue;
+    }
+    const { rows } = await getPool().query(
+      `SELECT id FROM personal.${field.refTable}
+        WHERE lower(btrim(${field.refTable === 'event' ? 'title' : 'name'}))
+              = lower(btrim($1)) LIMIT 1`, [typed]);
+    if (!rows.length) {
+      return NextResponse.json(
+        { ok: false, error: `no ${field.refTable} called "${typed}"` }, { status: 400 });
+    }
+    vals.push(rows[0].id);
+    assignments.push(`${field.refColumn} = $${vals.length}`);
   }
   const sql = `UPDATE personal.${entity.table}
                   SET ${assignments.join(', ')}, updated_at = now()
@@ -103,6 +126,19 @@ export async function DELETE(
   // the `retired` tag that hides them from it. That way the cloud's "retired"
   // chip brings them back exactly where they were, instead of leaving a
   // restored person in whichever register the fallback happens to be.
+  if (entity.table === 'event') {
+    // A job is finished, not disposed of. Closing it leaves it in the record
+    // with the date it was closed, which is what a completed job is.
+    const { rows } = await getPool().query(
+      `UPDATE personal.event SET task_status = 'done', settled_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND event_type = 'task' RETURNING id`, [rowId]);
+    if (!rows.length) {
+      return NextResponse.json({ ok: false, error: 'no such row' }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, id: rows[0].id, retired: true });
+  }
+
   const retire = entity.table === 'asset'
     ? `UPDATE personal.asset SET status = 'disposed', event_gen_enabled = false,
               updated_at = now() WHERE id = $1 RETURNING id`
