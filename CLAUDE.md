@@ -70,7 +70,35 @@ Typecheck the dashboard inside its container (there is no local `tsc`):
 docker exec familybrain-dashboard sh -c "cd /app && ./node_modules/.bin/tsc --noEmit"
 ```
 
-One pre-existing error in `api/cypher/route.ts` is expected.
+One pre-existing error in `dashboard/src/app/api/cypher/route.ts` is expected.
+
+## Keeping the knowledge true
+
+`claude-project/` is loaded as Claude project knowledge on phones and other
+machines, where nobody can check it against the code. A stale document there
+is worse than a missing one, because it is acted on.
+
+**A change to the schema or to what the system can do is not finished until
+`claude-project/` describes it.** Same change, same commit — a follow-up
+never happens.
+
+```bash
+python scripts/check_project_knowledge.py
+```
+
+Verifies the documents against the live system: every table they name, the
+columns the data model declares it depends on, asset types and event
+statuses that exist in the database, the recurrences the generator supports,
+maintenance functions the docs call, and every file path they point at. Run
+it after a migration, after adding a capability, and before committing
+changes to `claude-project/`.
+
+It checks only what it can check unambiguously, which is deliberate. An
+earlier version inferred column names from prose and reported 67 findings of
+which roughly none were real; a checker that cries wolf teaches everyone to
+skip its output. Hence the explicit block at the end of the data model
+listing the columns that document depends on — if you come to rely on
+another column, add it there.
 
 ## Habits that have paid for themselves here
 

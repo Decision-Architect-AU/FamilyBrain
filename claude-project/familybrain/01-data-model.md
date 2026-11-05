@@ -117,3 +117,44 @@ Family, Holidays (unset) and **Tentative**. A suspended occurrence goes to
 Tentative whatever it would otherwise be, and if an account has no Tentative
 calendar the entry is left off entirely rather than appearing as though it
 were going ahead.
+
+## Columns this document depends on
+
+The load-bearing ones — the columns whose behaviour is explained above and
+which other skills rely on. `scripts/check_project_knowledge.py` verifies
+this list against the live database, so if a migration removes or renames
+one of these, the check fails and this document gets corrected in the same
+change rather than quietly becoming wrong.
+
+- personal.event.effective_date
+- personal.event.review_date
+- personal.event.generated_title
+- personal.event.calendar_route
+- personal.event.gcal_event_id
+- personal.event.gcal_calendar_id
+- personal.event.calendar_written_at
+- personal.event.gen_asset_id
+- personal.event.gen_rule_id
+- personal.event.occurrence_date
+- personal.event.manual_overrides
+- personal.event.task_status
+- personal.event.suspended_reason
+- personal.event.settled_note
+- personal.event.asset_id
+- personal.event.parent_event_id
+- personal.asset.facts
+- personal.asset.rules
+- personal.asset.amount
+- personal.asset.frequency
+- personal.asset.balance
+- personal.asset.direction
+- personal.asset.groups
+- personal.asset.calendar_silent
+- personal.asset.manual_overrides
+- personal.asset.parent_asset_id
+- personal.person.groups
+- personal.person.speciality
+- personal.person.relationship
+- personal.email_message.ingest_status
+- personal.email_message.note_id
+- personal.email_filter.filter_type

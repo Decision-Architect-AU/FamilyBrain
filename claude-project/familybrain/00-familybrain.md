@@ -85,3 +85,13 @@ entries on a shared family calendar.
 
 When you report, give the numbers. "107 jobs closed, 75 open, 8 still past
 due" is useful; "cleaned up the task list" is not.
+
+## Keeping this true
+
+These documents are loaded on phones and other machines where nobody can
+check them against the code, so a stale one is worse than a missing one — it
+gets acted on.
+
+If you change the schema or what the system can do, update these files in
+the same change. On the desktop, `python scripts/check_project_knowledge.py`
+verifies them against the live system and fails if they have drifted.
