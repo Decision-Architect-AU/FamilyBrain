@@ -127,14 +127,20 @@ def main() -> int:
             problems.append(f"{task} is called in the docs but there is no such "
                             f"function in maintenance.py")
 
-    # 6. Files the documents point at.
-    for path in sorted(set(re.findall(
-            r"`([\w./-]+/[\w./-]+\.(?:py|ts|tsx|sql|md))`", all_text))):
-        if "*" in path:
-            continue
-        if not any((root / path).exists() for root in PATH_ROOTS):
-            problems.append(f"the docs point at {path}, which does not exist "
-                            f"under the repo or any service directory")
+    # 6. Files the documents point at. A path is written the way a reader
+    #    would say it, so it may be relative to the repo, to the service it
+    #    belongs to, or — in a README pointing at its own siblings — to the
+    #    directory the document itself is in.
+    for doc, body in text.items():
+        for path in sorted(set(re.findall(
+                r"`([\w./-]+/[\w./-]+\.(?:py|ts|tsx|sql|md))`", body))):
+            if "*" in path:
+                continue
+            roots = PATH_ROOTS + [doc.parent]
+            if not any((root / path).exists() for root in roots):
+                problems.append(f"{doc.name} points at {path}, which does not "
+                                f"exist under the repo, a service directory, "
+                                f"or beside the document")
 
     if problems:
         print(f"{len(problems)} thing(s) the project knowledge claims are no "
