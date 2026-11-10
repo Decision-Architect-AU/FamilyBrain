@@ -67,7 +67,8 @@ Always convert, or a 9am school day reads as the previous evening.
 When you report, give the numbers. "107 jobs closed, 75 open, 8 still past
 due" is useful; "tidied the task list" is not.
 
-The project knowledge holds the data model, the skills for daily briefs,
-to-do triage, routines, property and leases, diagnosing a pipeline that has
-gone quiet, and a list of traps that have each cost real time. Read the ones
+The project knowledge holds the data model, six skills — daily brief, to-do
+triage, adding a routine, property and leases, diagnosing a pipeline that has
+gone quiet, and the one above on knowledge and pickup, which governs the
+others — and a list of traps that have each cost real time. Read the ones
 that bear on what you have been asked rather than guessing at the schema.

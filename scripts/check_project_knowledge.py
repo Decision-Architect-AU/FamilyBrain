@@ -142,6 +142,20 @@ def main() -> int:
                                 f"exist under the repo, a service directory, "
                                 f"or beside the document")
 
+    # 7. Every knowledge file is named in the README, which is the upload list.
+    #    A file added here and not added there is silently never uploaded, so
+    #    the project keeps answering from the knowledge it had before. Counting
+    #    skills in prose does not catch that; naming each file does.
+    readme = text.get(PROJECT / "README.md", "")
+    for folder in ("familybrain", "commentos"):
+        for doc in sorted((PROJECT / folder).glob("*.md")):
+            if doc.name == "PROJECT-INSTRUCTIONS.md":
+                continue
+            if f"{folder}/{doc.name}" not in readme:
+                problems.append(f"{folder}/{doc.name} is knowledge but the "
+                                f"README does not list it, so it would never "
+                                f"be uploaded to the project")
+
     if problems:
         print(f"{len(problems)} thing(s) the project knowledge claims are no "
               f"longer true:\n")
