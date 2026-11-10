@@ -24,6 +24,23 @@ finances. Never send any of it to an external service.
 
 ## Reaching the data
 
+This project holds the knowledge, not a connection. To touch the running
+system you need the desktop session that serves it:
+
+> **FamilyBrain Live** — a pinned Claude Code session on Glenn's desktop,
+> working directory `C:\Users\Glenn\ClaudeCode\openclaw`, with Remote Control
+> on. Open it from claude.ai/code or the mobile app and continue it there.
+
+That session has the shell, `psql` and the local HTTP APIs. This project does
+not, so when a question needs live data, say so and ask for it to be put to
+*FamilyBrain Live* rather than guessing at numbers — a plausible figure here
+cannot be told apart from a real one.
+
+If it is not in the list, Remote Control has been turned off or the desktop
+is asleep; nothing can be read until it is back.
+
+Inside that session:
+
 ```bash
 docker exec familybrain-postgres psql -U geoff -d openclaw -c "<SQL>"
 ```

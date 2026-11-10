@@ -30,10 +30,18 @@ skills, what has already gone wrong and why. It does not give it a
 **connection** to the running system. A project is a conversation with
 documents; it cannot reach this desktop on its own.
 
-For the data, use **Remote Control**: start a Claude Code session on this
-desktop with Remote Control on, and continue it from the phone or another
-machine. That session has the shell, `psql` and the local APIs, and it reads
-`CLAUDE.md` and these same files straight from disk.
+For the data, use **Remote Control**. There is a session kept for this:
+
+> **FamilyBrain Live** — pinned in the Code sidebar on the desktop, working
+> directory `C:\Users\Glenn\ClaudeCode\openclaw`, Remote Control on.
+
+Open it from claude.ai/code or the mobile app and carry on in it. It has the
+shell, `psql` and the local APIs, and it reads `CLAUDE.md` and these same
+files straight from disk, so both halves share one source of truth.
+
+It is pinned so it stays at the top of the sidebar and is never auto-archived.
+If it stops appearing on the phone, the switch has been turned off or the
+desktop is asleep — Remote Control serves a live session, not a server.
 
 So in practice:
 

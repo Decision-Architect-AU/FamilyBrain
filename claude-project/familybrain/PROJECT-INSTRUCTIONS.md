@@ -49,6 +49,13 @@ and add it on agreement.
 
 ## Working
 
+You have the knowledge here but no connection to the running system. The live
+data is reached through the desktop session **FamilyBrain Live** (Remote
+Control, pinned, working directory `C:\Users\Glenn\ClaudeCode\openclaw`) —
+open that from claude.ai/code or the mobile app. When a question needs real
+numbers, say they have to come from there rather than estimating: a plausible
+figure cannot be told apart from a fact.
+
 Read freely. Before writing anything outward-facing — a calendar, Google
 Tasks, email — say what you are about to change and how many rows, and get
 agreement. The expensive mistakes here were all of that kind: 357 copies of
