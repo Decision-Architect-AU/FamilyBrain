@@ -10,6 +10,7 @@ import html
 import os
 import re
 from datetime import timedelta, timezone
+from decimal import Decimal
 
 import psycopg2
 import psycopg2.extras
@@ -66,9 +67,21 @@ def _fetch_week_events(days: int = 7) -> list[dict]:
                 """
                 SELECT e.effective_date, e.starts_at, e.title, e.event_type, e.status,
                        e.suspended_reason, e.location, e.notes, e.provenance,
-                       p.name AS person_name
+                       p.name AS person_name,
+                       a.id        AS asset_id,
+                       a.name      AS asset_name,
+                       a.amount    AS asset_amount,
+                       a.frequency AS asset_frequency,
+                       a.paid_by   AS asset_paid_by
                 FROM personal.event e
                 LEFT JOIN personal.person p ON p.id = e.person_id
+                -- The money lives on the asset, not the occurrence. `asset_id`
+                -- is set on an appointment read out of an email; `gen_asset_id`
+                -- is set on an occurrence a rule generated — a dance class is
+                -- the second kind, so taking only the first would find no cost
+                -- for any routine, which is all of a child's weekly spend.
+                LEFT JOIN personal.asset a
+                       ON a.id = coalesce(e.asset_id, e.gen_asset_id)
                 WHERE e.effective_date BETWEEN CURRENT_DATE AND CURRENT_DATE + %s
                   AND e.status NOT IN ('cancelled', 'superseded')
                 ORDER BY e.effective_date, e.starts_at
@@ -249,6 +262,17 @@ def _notable_clause(group: list[dict]) -> tuple[bool, str]:
         note_clause = _extract_note_clause(ev0.get("notes") or "", weekday).rstrip(" .!")
         if note_clause and note_clause.lower() not in title.lower() and dates[0].strftime("%a %-d %b").lower() not in note_clause.lower():
             clause += f" — {note_clause}"
+    # What it costs, where the asset behind it says so. Shown on the item
+    # rather than only in the section total, because a total nobody can break
+    # down is a total nobody trusts — and "$1,450" beside the rent is the
+    # line that gets checked against the bank.
+    priced = next((e for e in group if e.get("asset_amount") is not None
+                   and _spends_this_week(e)), None)
+    if priced is not None:
+        payer = (priced.get("asset_paid_by") or "family").lower()
+        amount = _money(priced["asset_amount"])
+        clause += f" — {amount}" if payer == "family" \
+            else f" — {amount}, paid by {_FUNDER_LABEL.get(payer, payer)}"
     if ev0.get("suspended_reason"):
         clause += f" [{ev0['suspended_reason']}]"
     urgent = any(_URGENT_RE.search(e["title"] or "") or e.get("suspended_reason") for e in group)
@@ -330,6 +354,175 @@ def _dedupe_by_title(events: list[dict]) -> list[dict]:
     return out
 
 
+# ── What the week costs ──────────────────────────────────────────────────────
+# The money is on the asset: `amount` with a `frequency`, and `paid_by` saying
+# whose money it is. Two rules decide whether a given occurrence spends any of
+# it this week, and they are different rules on purpose:
+#
+#   per_occurrence   every occurrence costs the amount. This is the basis that
+#                    fits a routine — $N a dance class — and it means a school
+#                    holiday week costs nothing, because the generator has
+#                    already suspended those occurrences.
+#
+#   anything else    a rate, not a price. A $70/month subscription does not
+#                    cost $70 because its calendar entry happens to fall this
+#                    week; it costs $70 when it is billed. So a periodic
+#                    amount counts only on the occurrence that IS the charge —
+#                    the renewal, the invoice, the rent — which is exactly
+#                    what the titles of those occurrences say.
+#
+# Pro-rating was the alternative and it is worse: a tenth of an annual premium
+# attributed to this week is a number no one can check against a bank
+# statement, and the digest's whole value is that every figure in it is one
+# somebody could verify.
+_BILLING_EVENT_RE = re.compile(
+    r"\b(due|renewal|renew\w*|bill|billed|invoice|payment|premium|levy|"
+    r"rates|rent|instal?ment)\b", re.I,
+)
+
+# How to name a funder in a sentence. Only 'family' is household spend; the
+# rest are real amounts that are not the family's money, and the digest says
+# so rather than silently dropping them — "NDIS covers $551.97 of that" is
+# the reassurance that makes the small family figure believable.
+_FUNDER_LABEL = {
+    "ndis": "NDIS",
+    "medicare": "Medicare",
+    "private_health": "private health",
+    "school": "the school",
+    "employer": "an employer",
+    "other": "elsewhere",
+}
+
+
+def _spends_this_week(ev: dict) -> bool:
+    """Does this occurrence actually spend the asset's amount in this week?"""
+    freq = (ev.get("asset_frequency") or "").lower()
+    if freq == "per_occurrence":
+        return True
+    if not freq:
+        return False
+    return bool(_BILLING_EVENT_RE.search(ev.get("title") or ""))
+
+
+def _money(amount) -> str:
+    """$1,450 rather than $1,450.00 — whole dollars read faster, and a cent
+    on a figure nobody is reconciling is just two more characters."""
+    whole = amount.quantize(Decimal("1")) if amount == amount.to_integral_value() else amount
+    return f"${whole:,.0f}" if whole == whole.to_integral_value() else f"${whole:,.2f}"
+
+
+def _week_cost(events: list[dict]) -> tuple[Decimal, dict[str, Decimal], list[str]]:
+    """(family spend, {funder: amount}, names of things with no cost recorded).
+
+    What stops a figure being counted twice differs by basis, and getting
+    this wrong is how the first run of this code reported $1,660 for a week
+    whose real bills were $1,520:
+
+      per_occurrence   one charge per asset per DAY. Two source emails
+                       describing the same Wednesday dance class must not
+                       bill the family twice, but a genuine Tuesday and
+                       Thursday session are two classes and two charges.
+
+      anything else    one charge per asset per WEEK, full stop. A $70
+                       monthly subscription is billed once a month however
+                       many renewal reminders the generator has produced for
+                       it — and it had produced three, which is exactly the
+                       over-count that found this.
+    """
+    family = Decimal("0")
+    funded: dict[str, Decimal] = {}
+    uncosted: list[str] = []
+    counted: set[tuple] = set()
+    seen_uncosted: set[int] = set()
+
+    for ev in events:
+        asset_id = ev.get("asset_id")
+        if not asset_id:
+            continue
+        amount = ev.get("asset_amount")
+        if amount is None:
+            # Linked to something we hold, which has no price on it. Worth
+            # naming: it is the difference between "this week costs $47" and
+            # "this week costs $47 that we know of", and the second is true.
+            if asset_id not in seen_uncosted:
+                seen_uncosted.add(asset_id)
+                uncosted.append(ev.get("asset_name") or ev["title"])
+            continue
+        if not _spends_this_week(ev):
+            continue
+        key = (asset_id, ev["effective_date"]) \
+            if (ev.get("asset_frequency") or "").lower() == "per_occurrence" \
+            else (asset_id,)
+        if key in counted:
+            continue
+        counted.add(key)
+        payer = (ev.get("asset_paid_by") or "family").lower()
+        if payer == "family":
+            family += amount
+        else:
+            funded[payer] = funded.get(payer, Decimal("0")) + amount
+    return family, funded, uncosted
+
+
+def _no_prices_note(person_events: list[dict]) -> str | None:
+    """Said once, at the bottom, when no child's week has a price on it.
+
+    Scoped to the people's events and not the whole week on purpose. The
+    bills are costed and the routines are not, so a note that waited for the
+    *week* to be priceless would never appear — and the spend-per-child line
+    it is explaining the absence of would just be missing, with the bills
+    total sitting there looking like the answer.
+
+    This is also the alternative to printing "Expected spend $0" under every
+    name, which reads as a fact about a quiet week rather than a gap in the
+    records. It returns None the moment any child's figure exists, so it
+    disappears by itself as the registers get filled in — a prompt that
+    cannot be turned off is one people learn to look past.
+    """
+    family, funded, uncosted = _week_cost(person_events)
+    if family or funded or not uncosted:
+        return None
+    return (
+        f"No spend per child yet: {len(uncosted)} of the children's items this week "
+        "are linked to something we hold, and none of those carries an amount — "
+        + ", ".join(sorted(uncosted)[:4])
+        + (f" and {len(uncosted) - 4} more" if len(uncosted) > 4 else "")
+        + ". Put a cost and a 'paid by' against each in the Routines register "
+          "and this becomes a per-child figure. 'Paid by' matters as much as "
+          "the number: Olivia's therapy is NDIS-funded, and counting it as "
+          "ours would overstate her week by hundreds."
+    )
+
+
+def _spend_fact(events: list[dict]) -> tuple[bool, str] | None:
+    """The one spend sentence for a section, or None when there is nothing
+    true to say.
+
+    Deliberately silent when no amount is known. A section whose whole week
+    is uncosted would otherwise read "Expected spend: $0", which is not a
+    missing number — it is a wrong one, and it is wrong in the direction
+    nobody questions. build_digest_body says it once, at the bottom, where
+    it reads as a gap in the records instead of a bill of zero.
+    """
+    family, funded, uncosted = _week_cost(events)
+    if not family and not funded:
+        return None
+    parts = []
+    if family:
+        parts.append(f"Expected spend {_money(family)}")
+    if funded:
+        covered = ", ".join(
+            f"{_money(v)} by {_FUNDER_LABEL.get(k, k)}" for k, v in sorted(funded.items())
+        )
+        parts.append(("plus " if family else "Costs this week are ") + f"{covered} — not ours to pay")
+    sentence = ", ".join(parts)
+    if uncosted:
+        named = ", ".join(sorted(uncosted)[:3])
+        more = f" and {len(uncosted) - 3} other" if len(uncosted) > 3 else ""
+        sentence += f" (nothing recorded for {named}{more}, so the real figure is higher)"
+    return False, sentence
+
+
 def _person_facts(name: str, person_events: list[dict]) -> list[tuple[bool, str]] | None:
     """Deterministic, exact facts for one person — routine activities
     folded into a single summary fact, remaining items deduped/combined and
@@ -348,12 +541,28 @@ def _person_facts(name: str, person_events: list[dict]) -> list[tuple[bool, str]
         facts.append((False, _routine_summary_line(routine)))
     exclude = frozenset({first_name.lower()})
     facts.extend(_notable_clause(group) for group in _combine_same_title(notable, exclude))
+    # Last, after the appointments it is the sum of. Computed from every one
+    # of this person's events including the routine ones folded into the
+    # summary line above — the dance class is not in the prose any more, but
+    # it is still the money.
+    spend = _spend_fact(person_events)
+    if spend:
+        facts.append(spend)
     return facts
 
 
-def _section_facts(events: list[dict]) -> list[tuple[bool, str]]:
-    events = _dedupe_by_title(events)
-    return [_notable_clause(group) for group in _combine_same_title(events)]
+def _section_facts(events: list[dict], with_spend: bool = False) -> list[tuple[bool, str]]:
+    deduped = _dedupe_by_title(events)
+    facts = [_notable_clause(group) for group in _combine_same_title(deduped)]
+    if with_spend:
+        # From `events`, not `deduped`: the dedupe keeps one of two rows
+        # describing the same bill, which is right for the prose, and
+        # _week_cost does its own one-charge-per-asset-per-day collapse that
+        # does not depend on two titles having been written the same way.
+        spend = _spend_fact(events)
+        if spend:
+            facts.append(spend)
+    return facts
 
 
 def _join_facts(sections: list[tuple[str, list[tuple[bool, str]]]]) -> str:
@@ -381,7 +590,8 @@ def _join_facts(sections: list[tuple[str, list[tuple[bool, str]]]]) -> str:
     return "\n".join(parts)
 
 
-def _html_body(sections: list[tuple[str, list[tuple[bool, str]]]], holidays: list[dict]) -> str:
+def _html_body(sections: list[tuple[str, list[tuple[bool, str]]]], holidays: list[dict],
+               no_prices: str | None = None) -> str:
     """Same exact facts as _join_facts, rendered as HTML with bold section
     headings and bold/red text for urgent (deadline/expiry-type) facts, so
     they visually stand out instead of reading as one more sentence in the
@@ -405,6 +615,14 @@ def _html_body(sections: list[tuple[str, list[tuple[bool, str]]]], holidays: lis
                 esc = f'<b style="color:#c0392b;">{esc}</b>'
             rendered.append(esc)
         parts.append(f'<p style="margin:0 0 8px;">{" ".join(rendered)}</p>')
+    if no_prices:
+        # Grey and small, like the footer it sits above: this is a note about
+        # the state of the records, not a fact about the family's week, and
+        # styling it as a finding would give it more weight than it has.
+        parts.append(
+            '<p style="margin:16px 0 0;color:#777;font-size:12px;">'
+            f'{html.escape(no_prices)}</p>'
+        )
     parts.append(
         '<p style="margin:16px 0 0;color:#777;font-size:12px;">'
         '—<br>Auto-generated weekly digest. Reply here or ask via WhatsApp if anything needs fixing.</p>'
@@ -502,7 +720,7 @@ def build_digest_body(days: int = 7) -> tuple[str, str, str]:
         if facts:
             sections.append((name.upper(), facts))
     if bills:
-        sections.append(("BILLS & FINANCES", _section_facts(bills)))
+        sections.append(("BILLS & FINANCES", _section_facts(bills, with_spend=True)))
     if weekend:
         sections.append(("WEEKEND AHEAD", _section_facts(weekend)))
     if admin:
@@ -520,12 +738,16 @@ def build_digest_body(days: int = 7) -> tuple[str, str, str]:
     elif not holidays:
         lines.append("Nothing notable this week — just the usual school/pickup routine.")
 
+    no_prices = _no_prices_note([e for evs in by_person.values() for e in evs])
+    if no_prices:
+        lines.append(no_prices)
+
     subject = f"Week Ahead — {start_date.strftime('%a %-d %b')} to {end_date.strftime('%a %-d %b')}"
     text_body = "\n".join(lines).rstrip() + \
         "\n\n—\nAuto-generated weekly digest. Reply here or ask via WhatsApp if anything needs fixing."
 
     if sections or holidays:
-        html_out = _html_body(sections, holidays)
+        html_out = _html_body(sections, holidays, no_prices)
     else:
         html_out = '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;">' \
                     'Nothing notable this week — just the usual school/pickup routine.</div>'

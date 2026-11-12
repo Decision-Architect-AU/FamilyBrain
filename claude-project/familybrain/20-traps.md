@@ -165,6 +165,59 @@ the table rather than in each writer because five paths insert events (the
 rules generator, the decomposer, the appointment updater, the task sync, and
 hand-written SQL) and a guard in four of them is not a guard.
 
+## A placeholder is not a name
+
+`event_title_is_a_name` requires a letter, so it refuses `''`, `'-'` and
+`'...'`. It does not refuse `(no title)` — and that is the one the family
+actually had: a fortnightly Monday 3pm series running to March 2027, twelve
+rows, ten of them on a calendar, all called "(no title)".
+
+Both calendar importers read the entry's name with a default standing in for
+it — `ev.get("subject", "(no title)")` on Outlook,
+`ev.get("summary", "(no title)")` on Google — and wrote the result through to
+`personal.event` and back onto the routed calendar. The same meeting had been
+read from the other parent's Gmail as "Glenn & Shannon Property Check-In",
+and *that* copy never reached a calendar. The named one is the one nobody
+got.
+
+**A placeholder is worse than a blank.** A blank fails a NOT NULL and gets
+noticed. A placeholder satisfies every check, looks like data to the
+generator, the digest and the calendar writer, and the only way to learn what
+the entry is is to hunt through two mailboxes for whatever produced it.
+
+The fix is in both places, because five paths insert events:
+`calendar_router.usable_calendar_title()` recovers a name from the body — an
+Outlook user who leaves the subject blank has usually typed the detail there
+— and skips the entry with a log line when there is nothing, rather than
+inventing a name. `personal.title_is_a_placeholder()` is the same rule on the
+table.
+
+Two things to know about that constraint. It is **NOT VALID**, because
+validating it would have meant failing until somebody deleted ten entries off
+a shared calendar, and the importers would have gone on writing new ones for
+however long that took. And NOT VALID does not mean the old rows are exempt:
+it skips them at validation time, not at write time, so they will accept no
+update except one that gives them a real name. An attempt to annotate their
+notes from inside the same migration failed on the constraint it had just
+added.
+
+## "$0" is not "we don't know"
+
+The week-ahead digest was asked for an expected spend per child. Of 22
+routines, none carried an amount and the routines register had no field to
+put one in — so the honest output was not a number. Printing "Expected
+spend: $0" under each child would have been read as a quiet week rather than
+an empty column, and nobody re-checks a figure that looks calculated.
+
+So the spend line is **absent** when there is nothing to total, and one note
+at the foot of the email says how many of the children's items are linked to
+something with no price on it, and names the first few. It returns nothing
+the moment any figure exists, so it removes itself as the register fills up
+— a prompt that cannot be turned off is one people learn to look past.
+
+The same reasoning put `paid_by` on the asset in the first place. The
+dangerous number here was never a missing one.
+
 ## Verbs are not jobs
 
 "Extract what this email asks the reader to do" gave the model a verb

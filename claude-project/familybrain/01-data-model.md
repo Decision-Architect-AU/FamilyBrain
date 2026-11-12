@@ -23,6 +23,17 @@ CHECK. An event with no name is not a record of anything: `''`, `'-'` and
 `'...'` are all refused, and there is deliberately no length rule, because
 "MRI" is a good title. See *20-traps*, "An event with no name".
 
+**And it must not be a placeholder** — `event_title_is_not_a_placeholder`,
+which refuses a title whose whole content says there is no title: `(no
+title)`, `untitled`, `(no subject)`, `TBC`, `n/a`. The test is
+`personal.title_is_a_placeholder(title)`, matched against the trimmed value
+in full and never as a substring, so "Pick up TBC forms" is a fine title and
+"MRI" and "School thing" are poor titles that stay. The constraint is
+**NOT VALID**: twelve rows already carry `(no title)` and ten of them are
+live calendar entries, which are not a migration's to delete. Nothing new
+can be written, and those twelve will accept no edit except one that names
+them. See *20-traps*, "A placeholder is not a name".
+
 ### The two dates, which are not the same date
 
 - **`effective_date` / `starts_at`** — when the thing happens or falls due.
@@ -70,6 +81,25 @@ but somebody has to put them out, on a night, outside a house.
 - `rules` (jsonb array) — what to generate. See below.
 - `amount` / `frequency` / `balance` / `direction` — the money, normalised by
   the `personal.asset_cashflow` view. A loan's balance is not its repayment.
+- **`frequency`** is `per_occurrence`, `weekly`, `fortnightly`, `monthly`,
+  `quarterly`, `annual` or `one_off`. `per_occurrence` is the one that fits a
+  routine: it says what **one session** costs, so the week's spend is the
+  occurrences that actually fall in the week times that figure. Calling a
+  dance class "weekly" charges the family for the twelve weeks a year it does
+  not run — which `collision_aware` has already suspended. `per_occurrence`
+  and `one_off` both give NULL `per_month` in the cashflow view, because
+  neither is a rate.
+- **`paid_by`** — whose money it is: `family`, `ndis`, `medicare`,
+  `private_health`, `school`, `employer`, `other`. **Only `family` is
+  household spend.** Olivia's physiotherapy is $183.99 an hour and the family
+  pays none of it, so a total that adds it in is wrong by hundreds a week in
+  the direction nobody checks. NULL reads as the family's, because an
+  ordinary bill is — set it on anything therapy-related, where that reading
+  is exactly wrong. Set to `family` on every subscription, property, loan,
+  vehicle and device that already had a direction of `out`; left NULL on
+  routines and medications on purpose, because there the answer is NDIS
+  about half the time and a default would be a guess wearing a fact's
+  clothes.
 - `manual_overrides` — as above.
 - `calendar_silent` — this routine's occurrences stay off the calendar. Does
   **not** apply when an occurrence is suspended.
@@ -151,6 +181,7 @@ change rather than quietly becoming wrong.
 - personal.asset.rules
 - personal.asset.amount
 - personal.asset.frequency
+- personal.asset.paid_by
 - personal.asset.balance
 - personal.asset.direction
 - personal.asset.groups

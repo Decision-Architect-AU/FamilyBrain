@@ -271,3 +271,54 @@ def expand_holiday_days(summary: str, starts_at, ends_at) -> list[dict]:
         label = f"{summary} — Day {i + 1} ({_DAYS[d.weekday()]} {d.day} {d.strftime('%b')})"
         result.append({"summary": label, "starts_at": d, "ends_at": d + timedelta(days=1)})
     return result
+
+
+# ── A calendar entry has to be called something ──────────────────────────────
+# Both importers read the entry's name with a default in place —
+# `ev.get("subject", "(no title)")` on Outlook, `ev.get("summary", "(no
+# title)")` on Google — and then wrote that default into the database and
+# back onto the routed calendar as though it were a name. Twelve rows carry
+# it, ten of them on a calendar: a fortnightly Monday 3pm series running to
+# March 2027 that the family sees as "(no title)" at 3pm. The same meeting
+# was read from Shannon's Gmail as "Glenn & Shannon Property Check-In" and
+# that copy never reached a calendar, so the named one is the one nobody got.
+#
+# A placeholder is worse than a refusal. It passes every NOT NULL and every
+# "has at least one letter" check, it looks like data to the generator and
+# the digest, and the only way to find out what it is is to go hunting
+# through two mailboxes.
+#
+# So: recover a name from the body where there is one — Outlook users
+# routinely put the detail in the body and leave the subject blank — and
+# otherwise return None and let the caller skip the entry and log it.
+_PLACEHOLDER_TITLES = {
+    "(no title)", "no title", "untitled", "(untitled)", "(none)", "none",
+    "(no subject)", "no subject", "n/a", "na", "-", "--", "tbc", "tba", "?",
+}
+
+
+def usable_calendar_title(raw: str | None, description: str = "") -> str | None:
+    """A name for this entry, or None if it hasn't got one.
+
+    Checked against the placeholder list as well as emptiness, because the
+    providers disagree about which they send: Graph omits `subject` entirely
+    on some delta payloads, Google sends `summary: ""`, and a person typing
+    "TBC" into a calendar has told us just as little as either.
+    """
+    title = (raw or "").strip()
+    if title and title.lower() not in _PLACEHOLDER_TITLES:
+        return title
+
+    # The body, first line only, stripped of markup. A description is often
+    # a Teams invitation block or an HTML wrapper, so anything that does not
+    # read like a name is no better than the placeholder.
+    text = re.sub(r"<[^>]+>", " ", description or "")
+    text = re.sub(r"&[a-z]+;|&#\d+;", " ", text)
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        if 3 <= len(line) <= 120 and re.search(r"[A-Za-z]", line) \
+                and line.lower() not in _PLACEHOLDER_TITLES \
+                and not line.lower().startswith(("http", "join ", "microsoft teams",
+                                                 "meeting id", "dial ", "phone conference")):
+            return line
+    return None

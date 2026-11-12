@@ -687,7 +687,8 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
     Returns number of events synced.
     """
     from .outlook import create_outlook_event
-    from .calendar_router import classify_event, load_routing, target_calendar_id, holiday_stub_summary, _TAG_COLORS
+    from .calendar_router import (classify_event, load_routing, target_calendar_id,
+                                  holiday_stub_summary, usable_calendar_title, _TAG_COLORS)
 
     all_accounts = [account] + mirror_accounts
     routing      = load_routing(all_accounts)
@@ -762,13 +763,22 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
                     print(f"[gmail] marked cancelled: {provider_id}")
                 continue
             provider_id = ev["id"]
-            summary     = ev.get("summary", "(no title)")
             starts_at   = _parse_cal_dt(ev.get("start"))
             ends_at     = _parse_cal_dt(ev.get("end"))
             description = ev.get("description", "")
             etag        = ev.get("etag")
 
             if not starts_at:
+                continue
+
+            # A nameless entry is not a record of anything — recover a name
+            # from the description, or leave the entry where it is rather
+            # than storing "(no title)" as though it were one. See
+            # calendar_router.usable_calendar_title.
+            summary = usable_calendar_title(ev.get("summary"), description)
+            if not summary:
+                print(f"[gmail] calendar entry {provider_id[:16]} has no summary "
+                      f"and nothing usable in its description — skipped")
                 continue
 
             from .calendar_router import tag_family_event

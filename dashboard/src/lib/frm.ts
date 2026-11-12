@@ -34,7 +34,7 @@ export interface FrmField {
    * because nobody knows a routine by its number.
    */
   refColumn?: string;
-  refTable?: 'asset' | 'event';
+  refTable?: 'asset' | 'event' | 'person';
 }
 
 export interface FrmEntity {
@@ -55,12 +55,42 @@ const STATUS: FrmField = {
   options: ['active', 'inactive', 'pending', 'sold', 'disposed'],
 };
 
-const MONEY_FIELDS: FrmField[] = [
+/**
+ * Whose money it is.
+ *
+ * Only `family` is household spend. Olivia's physiotherapy is a real amount
+ * and none of it is the family's — it comes out of her NDIS plan — so a
+ * total that adds it up is wrong in the direction nobody checks. Blank reads
+ * as the family's, because an ordinary bill is; a therapy session is the one
+ * case where that reading is wrong, which is why the field sits beside the
+ * amount on every register that has one.
+ */
+const PAID_BY: FrmField = {
+  key: 'paid_by', label: 'Paid by', kind: 'select', source: 'column',
+  options: ['family', 'ndis', 'medicare', 'private_health', 'school', 'employer', 'other'],
+};
+
+/** What moves each period, and whose money it is. */
+const COST_FIELDS: FrmField[] = [
   { key: 'amount', label: 'Amount', kind: 'money', source: 'column' },
   {
     key: 'frequency', label: 'Every', kind: 'select', source: 'column',
-    options: ['weekly', 'fortnightly', 'monthly', 'quarterly', 'annual', 'one_off'],
+    // per_occurrence is first because it is the honest basis for anything
+    // that happens on a day: it says what one session costs, so a school
+    // holiday with no class costs nothing instead of a week's fee.
+    options: ['per_occurrence', 'weekly', 'fortnightly', 'monthly',
+              'quarterly', 'annual', 'one_off'],
   },
+  PAID_BY,
+];
+
+/**
+ * The cost, plus what is owed or held. A routine gets COST_FIELDS without
+ * this one: a dance class has a price and no balance, and an empty "Balance
+ * / value" box on every routine invites somebody to put the term fee in it.
+ */
+const MONEY_FIELDS: FrmField[] = [
+  ...COST_FIELDS,
   { key: 'balance', label: 'Balance / value', kind: 'money', source: 'column' },
 ];
 
@@ -275,6 +305,18 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'day', label: 'Day', kind: 'text', source: 'fact' },
       { key: 'start_time', label: 'From', kind: 'text', source: 'fact' },
       { key: 'location', label: 'Location', kind: 'text', source: 'fact' },
+      // Whose routine it is. Half of them already have a person_id set by
+      // the extractors and there was no way to see or correct it here —
+      // which is why "Tuesday - After School Care" belongs to nobody, and
+      // why a spend-per-child line could not attribute it.
+      {
+        key: 'person', label: 'Whose', kind: 'ref', source: 'column',
+        refColumn: 'person_id', refTable: 'person',
+      },
+      // What one of these costs, and who pays. A routine is where a child's
+      // week actually spends money — dance, after-school care, cello — and
+      // until this was here, none of the 22 could hold a figure.
+      ...COST_FIELDS,
       { key: 'next_event_date', label: 'Next', kind: 'date', source: 'column', readOnly: true },
       { key: 'events_generated_until', label: 'Generated to', kind: 'date', source: 'column', readOnly: true },
       { key: 'calendar_silent', label: 'Off calendar', kind: 'select', source: 'column', options: ['false', 'true'] },

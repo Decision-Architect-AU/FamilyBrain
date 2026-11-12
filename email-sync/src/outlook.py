@@ -623,9 +623,20 @@ def sync_calendar(account: dict, mirror_accounts: list[dict], ingestor_url: str 
 
             for ev in data.get("value", []):
                 provider_id = ev["id"]
-                summary     = ev.get("subject", "(no title)")
                 is_all_day  = ev.get("isAllDay", False)
                 description = ev.get("body", {}).get("content", "")[:500]
+
+                # A nameless entry is not a record of anything. Recover a
+                # name from the body if the subject was left blank, and
+                # otherwise leave it alone rather than mirroring "(no
+                # title)" onto the family's calendar — see
+                # calendar_router.usable_calendar_title.
+                from .calendar_router import usable_calendar_title
+                summary = usable_calendar_title(ev.get("subject"), description)
+                if not summary:
+                    print(f"[outlook] calendar entry {provider_id[:16]} has no "
+                          f"subject and nothing usable in its body — skipped")
+                    continue
 
                 if is_all_day:
                     # Use date objects so _fmt_cal_dt writes {"date": ...} not {"dateTime": ...}

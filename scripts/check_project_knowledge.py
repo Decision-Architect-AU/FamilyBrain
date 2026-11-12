@@ -72,10 +72,29 @@ def main() -> int:
         "UNION SELECT table_schema || '.' || table_name FROM information_schema.views "
         "WHERE table_schema IN ('personal','decision_os')"
     )
+    # A document may also name a function — personal.title_is_a_placeholder(),
+    # which the placeholder-title constraint calls. Written with parentheses,
+    # which is how it is distinguished from a table below; checked against
+    # pg_proc so a renamed function is caught the same way a renamed table is.
+    live_functions = psql(
+        "SELECT n.nspname || '.' || p.proname FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname IN ('personal','decision_os')"
+    )
     for schema, table in sorted(set(re.findall(
             r"\b(personal|decision_os)\.([a-z][a-z_]{2,})\b", all_text))):
         qualified = f"{schema}.{table}"
         if qualified in live_tables:
+            continue
+        # Named with a call's parentheses somewhere in the documents: a
+        # function, not a table. Checked against pg_proc, not waved through —
+        # a function the docs call and the database has dropped is exactly
+        # the kind of stale claim this script exists to catch.
+        if re.search(rf"\b{schema}\.{table}\s*\(", all_text):
+            if qualified not in live_functions:
+                where = ", ".join(sorted(d.name for d, t in text.items() if qualified in t))
+                problems.append(
+                    f"function {qualified}() is called in {where} but does not exist")
             continue
         # personal.asset.facts and the like name a column, not a table.
         if any(t.startswith(qualified + ".") or
