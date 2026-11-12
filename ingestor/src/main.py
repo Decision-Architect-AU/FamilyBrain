@@ -512,6 +512,15 @@ def ingest_message(payload: dict) -> dict:
 
         record_ingest(schema, source)  # source = 'whatsapp' | 'voice' | 'sms' | etc.
 
+        # Route to the asset register, as the file and email channels do.
+        # try_asset_routing says "call from any ingest channel after
+        # personal.note is written" and this channel never did, so a fact the
+        # family stated — "Little Groovers is Ellie's dance school" — became a
+        # note and a graph node and touched no routine. The knowledge layer
+        # learned it and the register that drives the calendar did not.
+        if schema == "personal":
+            try_asset_routing(full_text, f"{source}:{source_id}")
+
         audit.log("write", f"Message ingested [{source}→{schema}]: {subject or source_id} from {from_handle}",
                   target_schema=schema, target_table=target_table, node_id=str(note_id),
                   metadata={"source": source, "source_id": source_id})

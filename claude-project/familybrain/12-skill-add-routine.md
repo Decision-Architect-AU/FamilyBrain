@@ -29,13 +29,21 @@ curl -s -X POST http://localhost:4002/ingest/text \
   -d '{"from":"glenn","body":"Ellie has roller skating at 5pm on Tuesdays, weekly, at Carrara Indoor Stadium. Reminder 45 minutes before."}'
 ```
 
-Then look at what it made. Often that is the whole job. See
-*15-skill-knowledge-and-pickup*.
+Then look at what it made.
+
+For a routine, expect it **not** to be the whole job yet. The pickup files
+the note and writes the graph nodes, but the asset router's prompt has no
+routine in its vocabulary — only vehicle, medication, property,
+subscription, device, pet, person — so it returns `entity_type: null` and
+the routine asset is never created or updated. Put the fact through anyway
+(the knowledge layer and the provenance are worth having), then write the
+asset by hand and say that you did. See *15-skill-knowledge-and-pickup*.
 
 ## When you do have to write the asset directly
 
-Only when ingestion has not produced a routine asset and the family has
-confirmed the detail. The shape is:
+For a routine, that is still every time, for the reason above. Otherwise:
+only when ingestion has not produced the asset and the family has confirmed
+the detail. The shape is:
 
 ```sql
 INSERT INTO personal.asset

@@ -42,6 +42,35 @@ and from there it gets everything the pipeline does: entity resolution
 against people and assets that already exist, deduplication, fact extraction,
 graph nodes and edges, audit trail, and a source you can trace back to.
 
+### What this path actually does, as of 12 Nov 2026
+
+Check the answer, not just the status line. Until 12 Nov 2026 this endpoint
+had **never saved a single message** in the life of the system: the caller
+sent `body` and `/ingest/message` requires `body_text`, so every post was
+rejected 400. Two things hid it. The family was told "⚠️ Could not save —
+ingestor unavailable", which named an outage that was not happening; and the
+ingestor answers `200` with `{"ok": false}` when the write itself fails,
+which `raise_for_status()` does not notice. A rejected message looked like an
+outage and a failed write looked saved. Both are fixed, and the reply now
+names which failure it was.
+
+It still does **not** create or update a `routine` asset. `try_asset_routing`
+is now called from this channel as it is from file and email, but the
+router's own prompt offers only vehicle, medication, property, subscription,
+device, pet and person — there is no routine in its vocabulary, so a stated
+routine fact returns `entity_type: null` and never reaches
+`classify_for_asset`, which *does* know routines. So:
+
+- a routine fact through the pickup gets a note, graph nodes and extracted
+  concepts, and touches no routine asset
+- the register that drives the calendar learns nothing from it
+
+That is a known gap, not a reason to stop using the pickup. Put the fact
+through, then write the routine by hand as *12-skill-add-routine* describes
+and say that you did. Closing it properly means teaching the router prompt a
+routine entity type and having `upsert_asset` build a rules array — and a
+wrong rules array is the churn trap, so it is not a five-minute change.
+
 A direct INSERT gets none of that. It produces a row that looks right and is
 connected to nothing — no provenance, no graph node, invisible to every
 consumer that reads the graph rather than the table.
@@ -74,6 +103,13 @@ been missed before, each of which was a defect worth fixing rather than
 routing around:
 
 - the body never stored (`note_id` empty), so no date could be read out of it
+- **a skip is irreversible.** `skip` and `marketing` mail keeps subject,
+  sender and date and **no body at all** — 27,823 messages at the last count.
+  So a wrong skip does not merely delay the content, it loses it from the
+  system permanently; the mail is still in Gmail, and nothing in FamilyBrain
+  can read it. This is why a sender who sends real dates belongs in
+  `_ALWAYS_INGEST_DOMAINS` rather than being left to the LLM, and why
+  "I will look at that email later" is not available to you.
 - a sender triaged as marketing when their mail carries real appointments
 - a lease read, but no rent projection and no chase-the-signed-copy job
 - a policy settled from a payment *reminder* rather than a receipt

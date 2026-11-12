@@ -98,6 +98,15 @@ _ALWAYS_INGEST_DOMAINS = re.compile(
     # its subjects carry no transactional keyword ("Primary Campus Spooky
     # Disco"), so without this they fell to the LLM and were skipped.
     r'compass\.email|compass\.education|ymcaqueensland|'
+    # The dance school, for the same reason. Its subjects are "Concert
+    # Tomorrow Grade 1 Varsity !!", "Class Postponed Today", "Grade 1
+    # Performance Tomorrow" — a date-critical notice with no transactional
+    # word in it, so 11 of its 13 emails fell to the LLM and were skipped.
+    # Both forms they write from, and no looser: a bare `littlegroovers`
+    # would also match a littlegroovers-anything domain, which is the
+    # substring mistake that has already cost this file four times
+    # (car/care, pro/approved, rent/current, camp/campus).
+    r'littlegrooversdanceco|littlegroovers@|'
     r'sammygordonsschoolofproperty\.com\.au)',   # property education — Q&A session reminders carry real dates/times
     re.I,
 )

@@ -39,8 +39,20 @@ def _classify_schema(text: str) -> str:
     return "personal"
 
 
-def _post_to_ingestor(schema: str, sender: str, content: str, subject: str = "") -> bool:
-    """Forward ingested content to the ingestor's /ingest/message webhook."""
+def _post_to_ingestor(schema: str, sender: str, content: str, subject: str = "") -> str | None:
+    """Forward ingested content to the ingestor's /ingest/message webhook.
+
+    Returns None on success, or a short reason on failure.
+
+    The field is `body_text`, which is what /ingest/message requires. It was
+    `body` here, so every post was rejected 400 and nothing has ever reached
+    the pickup process through this path — not one message in the whole life
+    of the system. It stayed invisible because the two ways it could be seen
+    were both wrong: a 400 was reported to the family as "ingestor
+    unavailable", and the ingestor answers 200 with {"ok": false} when the
+    write itself fails, which raise_for_status() does not notice. So a
+    rejected message looked like an outage and a failed write looked saved.
+    """
     payload = {
         "source":       "whatsapp",
         "source_id":    f"wa:{sender}:{hash(content) & 0xFFFFFFFF}",
@@ -48,27 +60,47 @@ def _post_to_ingestor(schema: str, sender: str, content: str, subject: str = "")
         "from_handle":  sender,
         "from_name":    sender,
         "subject":      subject or content[:80],
-        "body":         content,
+        "body_text":    content,
         "received_at":  "",
     }
     try:
         resp = requests.post(f"{INGESTOR_URL}/ingest/message", json=payload, timeout=30)
-        resp.raise_for_status()
-        return True
     except Exception as e:
-        print(f"[ingest] Ingestor POST failed: {e}")
-        return False
+        print(f"[ingest] Ingestor unreachable: {e}")
+        return "the ingestor could not be reached"
+
+    if resp.status_code >= 400:
+        detail = resp.text[:200].replace("\n", " ")
+        print(f"[ingest] Ingestor rejected the post: {resp.status_code} {detail}")
+        return f"the ingestor rejected it ({resp.status_code})"
+
+    try:
+        result = resp.json()
+    except ValueError:
+        print(f"[ingest] Ingestor returned non-JSON: {resp.text[:200]}")
+        return "the ingestor returned something unreadable"
+
+    if not result.get("ok"):
+        reason = str(result.get("error", "no reason given"))[:160]
+        print(f"[ingest] Ingestor accepted but did not save: {reason}")
+        return f"the ingestor could not save it: {reason}"
+
+    print(f"[ingest] ✓ saved as note {result.get('note_id')} "
+          f"({result.get('schema')})")
+    return None
 
 
 def ingest_text(sender: str, text: str) -> dict:
     """Classify and ingest a plain text message."""
     schema = _classify_schema(text)
-    ok = _post_to_ingestor(schema, sender, text)
-    if ok:
-        schema_label = {"personal": "personal notes", "property": "property research",
-                        "decision": "decision knowledge"}[schema]
+    problem = _post_to_ingestor(schema, sender, text)
+    schema_label = {"personal": "personal notes", "property": "property research",
+                    "decision": "decision knowledge"}[schema]
+    if problem is None:
         return {"response": f"✅ Saved to {schema_label}."}
-    return {"response": "⚠️ Could not save — ingestor unavailable."}
+    # Say which failure it was. "Unavailable" for everything is why a wrong
+    # field name went unnoticed for the life of the system.
+    return {"response": f"⚠️ Not saved — {problem}."}
 
 
 def _convert_to_wav(audio_bytes: bytes, mimetype: str) -> bytes | None:
@@ -149,15 +181,15 @@ def ingest_voice(sender: str, audio_b64: str, mimetype: str) -> dict:
 
     # 4. Classify and ingest
     schema = _classify_schema(transcript)
-    ok = _post_to_ingestor(schema, sender, transcript, subject=f"Voice note: {transcript[:60]}")
+    problem = _post_to_ingestor(schema, sender, transcript,
+                                subject=f"Voice note: {transcript[:60]}")
 
     schema_label = {"personal": "personal notes", "property": "property research",
                     "decision": "decision knowledge"}[schema]
 
-    if ok:
+    if problem is None:
         preview = transcript[:120] + ("…" if len(transcript) > 120 else "")
         return {"response": f'🎙️ Transcribed and saved to {schema_label}:\n\n"{preview}"'}
-    else:
-        # Still return the transcript even if ingest failed
-        preview = transcript[:200]
-        return {"response": f'🎙️ Transcribed (save failed — ingestor unavailable):\n\n"{preview}"'}
+    # Still return the transcript even if ingest failed — it is the only copy.
+    preview = transcript[:200]
+    return {"response": f'🎙️ Transcribed but not saved — {problem}:\n\n"{preview}"'}

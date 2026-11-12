@@ -72,6 +72,32 @@ said "failing", and the only symptom was that appointments stopped. When
 something is missing, confirm each stage *ran* before asking why its answer
 was wrong.
 
+## A success message is not a success
+
+`/ingest/text` reported "⚠️ Could not save — ingestor unavailable" for every
+post, for the life of the system, while the ingestor was up and answering.
+The caller sent `body`; `/ingest/message` requires `body_text`. One wrong
+field name, and because the only two ways to notice were a message naming
+the wrong cause and a `raise_for_status()` that cannot see `{"ok": false}`
+inside a `200`, nothing was ever ingested through the family's own
+conversational channel and nobody knew.
+
+Two habits come out of it. **An error message must name the failure it
+actually had** — "unavailable" for a 400 sent everyone looking at the wrong
+service. And **a 200 is not a yes**: this ingestor returns `{"ok": false,
+"error": ...}` on a failed write, so check the body, not the status.
+
+## Senders whose subjects carry no keyword
+
+Little Groovers Dance Co sends "Concert Tomorrow Grade 1 Varsity !!", "Class
+Postponed Today", "Grade 1 Performance Tomorrow" — date-critical, with not
+one transactional word in the subject. 11 of their 13 emails fell through to
+the LLM and were skipped, so a dance concert came and went with nothing on
+the calendar. Compass was the same case and was fixed the same way. **A
+provider the children actually attend belongs in
+`_ALWAYS_INGEST_DOMAINS`**, not left to a judgement call per email — and
+because a skip keeps no body, the misjudgement is unrecoverable.
+
 ## Rate limits
 
 The Google Tasks API returns 403 "Quota Exceeded" and keeps returning it. A
