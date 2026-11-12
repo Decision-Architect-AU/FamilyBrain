@@ -76,6 +76,38 @@ def _remote_task_gone(err: Exception) -> bool:
     return "403" in text and "does not have permission" in text or "404" in text
 
 
+def _consume_update_trigger(event_id: int) -> None:
+    """Clear the `next_update_at` that made this task eligible to push.
+
+    appointment_updater recomputes this column on every successful write and
+    leaves it NULL when there is nothing more to do; push_outbound read the
+    same column and never wrote it back, so a task whose trigger time had
+    passed stayed eligible forever. Eighteen tasks were being re-pushed on
+    every cycle — roughly 1,700 needless writes a day against an API that
+    answers "Quota Exceeded" and keeps answering it.
+
+    NULL rather than a new time, because for a task there is nothing to
+    revisit on a schedule: `updated_at > last_synced_at` already catches a
+    job that has actually changed, which is the only reason to push again.
+
+    **Call this before upsert_sync_map, never after.** `trg_event_updated`
+    sets `updated_at = now()` on any update to the row, so clearing the
+    trigger makes `updated_at > last_synced_at` true — the other eligibility
+    clause — and the churn loop comes straight back wearing a different
+    clause. The sync-map write that follows sets `last_synced_at = now()`,
+    which is later, and closes both.
+    """
+    with psycopg2.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE personal.event
+                      SET next_update_at = NULL
+                    WHERE id = %s AND next_update_at IS NOT NULL""",
+                (event_id,),
+            )
+        conn.commit()
+
+
 def push_outbound(accounts: list[dict]) -> int:
     """
     Push event_type='task' rows due for sync — next_update_at reached (set
@@ -140,6 +172,9 @@ def push_outbound(accounts: list[dict]) -> int:
                 task_status=row.get("task_status") or "open",
                 existing_task_id=row["task_id"],
             )
+            # Before the sync-map write, so last_synced_at lands after the
+            # updated_at this bumps. See _consume_update_trigger.
+            _consume_update_trigger(row["id"])
             db.upsert_sync_map(
                 event_id=row["id"], source_account_id=account["id"],
                 source_provider_id=task_id, sync_status="synced",

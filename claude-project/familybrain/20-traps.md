@@ -229,6 +229,34 @@ model following an instruction most of the time is not a filter. See
 *11-skill-todo-triage* for the four kinds and the two guards that stop the
 filter eating real work.
 
+## A trigger nobody clears
+
+`next_update_at` means "revisit this row at this time". `appointment_updater`
+recomputes it on every successful write and leaves it NULL when there is
+nothing more to do. `task_sync.push_outbound` read the same column as one of
+its three eligibility tests and never wrote it back — so a task whose trigger
+time had passed stayed eligible for the rest of its life. Eighteen tasks were
+being re-pushed to Google Tasks on every cycle, about 1,700 needless writes a
+day, against the one API here that answers "Quota Exceeded" and keeps
+answering it.
+
+Nothing looked wrong. The count did not grow, the list did not gain
+duplicates, no error was logged. The only symptom was `push_outbound=18`
+every fifteen minutes forever, which is the same shape as the counter that
+read 350 for hours — **a number that never changes is not a healthy number.**
+
+The fix has a trap inside it. `trg_event_updated` sets `updated_at = now()`
+on any update to `personal.event`, so clearing `next_update_at` makes the
+*other* eligibility clause — `updated_at > last_synced_at` — true, and the
+loop returns wearing a different clause. Clear the trigger **before** the
+sync-map write, never after: that write sets `last_synced_at = now()`, which
+lands later, and closes both. Verified by running the sync twice: 18, then 0.
+
+**If a column makes a row eligible for work, the work has to consume it.**
+Two readers of one trigger column, only one of which writes it back, is the
+same fault as two writers of one title column (see "Two systems both doing
+their job") seen from the other side.
+
 ## Rate limits
 
 The Google Tasks API returns 403 "Quota Exceeded" and keeps returning it. A
