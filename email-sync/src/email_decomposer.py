@@ -708,6 +708,105 @@ def _is_boilerplate_task(title: str, detail: str = "") -> bool:
     return bool(_BOILERPLATE_TASK.search(f"{title} {detail}"))
 
 
+
+
+# Verbs are not jobs.
+#
+# "Extract what this email asks the reader to do" gave the model a verb
+# detector, and a letter is full of verbs. The job list filled up with "Read
+# attached document", "Understand when payment will be received", "Notify if
+# have questions", "Visit AGL website for details", "No action required" —
+# 113 of them, 8 of which reached the family's phones through Google Tasks.
+# Not one is a thing anybody can do and then be finished with.
+#
+# Four kinds, each one the family named, and each a pattern rather than
+# another line of prompt: the prompt already says passive reminders are not
+# tasks, and a model following an instruction most of the time is not a
+# filter.
+#
+# The escape hatch goes first and is deliberate. A stated due date or a
+# dollar amount means somebody set a deadline or wants money, and that is a
+# commitment whatever verb it is wrapped in — "Review rental income
+# statement" by the 2nd is a job, "Review Premium Changes" is a newsletter.
+
+# 1. Comprehension. Reading, noting and understanding are what you do with an
+#    email, not what you do because of one.
+#
+#    "Review" needs the lookahead. On its own it is comprehension — "Review
+#    Premium Changes" is an insurer telling you your premium went up — but
+#    "Review and respond to recommendations" and "Review and sign the lease"
+#    carry a second verb that is the actual job, and dropping those would lose
+#    real work. So: review, unless something follows that has to be done.
+_PASSIVE_VERB = re.compile(
+    r'^\s*(?:please\s+)?(?:remember\s+to\s+)?'
+    r'(?:re-?read|read(?:\s+and\s+\w+)?|understand|note(?:\s+that)?|be\s+aware'
+    r'|take\s+note|familiaris[ez]e|acquaint|satisfy\s+yourself|keep\s+in\s+mind'
+    r'|bear\s+in\s+mind|consider|observe|monitor|stay\s+informed'
+    r'|review(?!\s+and\s+(?:respond|reply|sign|return|confirm|complete'
+    r'|approve|submit|provide|send|pay|action|book|arrange)))\b', re.I)
+
+# 2. Courtesy conditionals. "Let us know if you have any questions" is how a
+#    letter ends. The condition is the tell: a job nobody has to do unless
+#    something else happens first is not a job.
+_COURTESY_IF = re.compile(
+    r'\b(?:notify|contact|call|email|phone|reply|respond|get\s+in\s+touch'
+    r'|let\s+(?:us|me|them)\s+know|advise|inform)\b[^.]{0,40}?'
+    r'\bif\b[^.]{0,40}?'
+    r'\b(?:questions?|queries|concerns?|issues?|problems?|clarification'
+    r'|unsure|anything\s+else|further\s+(?:help|info\w*))\b', re.I)
+_COURTESY_PHRASE = re.compile(
+    r'\b(?:feel\s+free|do\s+not\s+hesitate|don.t\s+hesitate'
+    r'|should\s+you\s+have\s+any'
+    r'|if\s+you\s+have\s+any\s+(?:questions?|queries|concerns?)'
+    r'|here\s+to\s+help|happy\s+to\s+help)\b', re.I)
+
+# 3. Pointers at information. Being told where something is published is not a
+#    job; the job, if there is one, is whatever the information turns out to
+#    say.
+_POINTER = re.compile(
+    r'\b(?:further\s+information|for\s+more\s+information'
+    r'|more\s+details?\s+(?:at|on|in)|see\s+(?:attached|below|above|website)'
+    r'|refer\s+to|visit\s+(?:our\s+)?(?:\w+\s+)?(?:website|site|portal|page)'
+    r'|view\s+(?:online|in\s+browser)|available\s+(?:on|at)\s+(?:our\s+)?website)\b',
+    re.I)
+
+# 4. Wording, not substance. These came off a draft therapy report the family
+#    was marking up: grammar, spelling and tidying are edits the author makes
+#    in the document, and a household job list is not a change log. Narrow on
+#    purpose — "Remove GMFCS level reference" changes what the report claims
+#    about a child, and it stays.
+_WORDING_ONLY = re.compile(
+    r'\b(?:grammar|grammatical|spelling|typo(?:s|graphical)?|punctuation'
+    r'|rephras\w+|reword\w+|proofread\w*|capitalis\w+|formatting)\b', re.I)
+
+_NOT_A_JOB_TESTS = (
+    ("comprehension, not a job",  _PASSIVE_VERB),
+    ("a courtesy conditional",    _COURTESY_IF),
+    ("a courtesy conditional",    _COURTESY_PHRASE),
+    ("a pointer at information",  _POINTER),
+    ("a wording edit, not a job", _WORDING_ONLY),
+)
+
+
+def _not_a_job(title: str, detail: str = "",
+               date_str: str | None = None) -> str | None:
+    """Why this is not a job, or None if it is one.
+
+    Returns the reason rather than True or False so the log says which test
+    fired. A filter whose workings nobody can see is a filter nobody will
+    trust enough to widen later.
+    """
+    text = f"{title or ''} {detail or ''}".strip()
+    if not text:
+        return "empty"
+    if date_str or _HAS_AN_AMOUNT.search(text):
+        return None
+    for reason, pattern in _NOT_A_JOB_TESTS:
+        if pattern.search(title or ""):
+            return reason
+    return None
+
+
 def _find_duplicate_task(cur, title: str, effective_date) -> dict | None:
     """An open task that is already the same job.
 
@@ -2405,6 +2504,11 @@ def _process_one_email(email: dict, accounts: list[dict], calendar_source: str) 
                         if _is_boilerplate_task(title, detail):
                             print(f"[decompose] '{title[:50]}' is mailing-list "
                                   f"boilerplate, not a job — dropped")
+                            continue
+                        not_job = _not_a_job(title, detail, item.get("date"))
+                        if not_job:
+                            print(f"[decompose] '{title[:50]}' is {not_job} "
+                                  f"— dropped")
                             continue
                         priority = item.get("priority", "normal")
                         # Say the job, not that a reminder about it is wanted.

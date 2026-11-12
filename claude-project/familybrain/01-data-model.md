@@ -18,6 +18,11 @@ distinguished by `event_type`:
 `suspended` (paused — goes to Tentative), `superseded` (replaced by another
 row), `cancelled`, `scheduled`.
 
+**`title` must contain at least one letter** — the `event_title_is_a_name`
+CHECK. An event with no name is not a record of anything: `''`, `'-'` and
+`'...'` are all refused, and there is deliberately no length rule, because
+"MRI" is a good title. See *20-traps*, "An event with no name".
+
 ### The two dates, which are not the same date
 
 - **`effective_date` / `starts_at`** — when the thing happens or falls due.

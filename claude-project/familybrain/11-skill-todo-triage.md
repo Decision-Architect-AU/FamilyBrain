@@ -29,6 +29,37 @@ Never make a job out of a mailing-list footer. "Contact to stop emails",
 sender's boilerplate, not an ask of the reader — and they appear in every
 bulk email, so they recur endlessly if allowed through.
 
+## A verb is not a job
+
+The test is whether somebody can do it and then be finished. Four kinds fail
+that test and `_not_a_job()` in `email-sync/src/email_decomposer.py` refuses
+them:
+
+| Kind | What it looks like |
+|---|---|
+| Comprehension | "Read attached document", "Understand when payment will be received", "Be aware of the new hours", "Review Premium Changes" |
+| Courtesy conditional | "Notify if have questions", "Let us know if you have any concerns", "Feel free to reach out" |
+| Pointer at information | "Visit AGL website for details", "See attached", "Further information for parents" |
+| Wording, not substance | "Correct grammatical errors in Olivia's report", "Proofread the summary" |
+
+Two things stop that filter going too far, and both matter if you widen it:
+
+- **A date or a dollar amount outranks every one of those tests.** Somebody
+  set a deadline or wants money, which is a commitment whatever verb it wears.
+  "Review rental income statement" by the 2nd is a job; the same words with no
+  date are a newsletter.
+- **"Review" is refused only when nothing follows that has to be done.**
+  "Review and respond to recommendations" and "Review and sign the lease"
+  keep their second verb and keep their place on the list.
+
+The wording test is narrow on purpose. Grammar, spelling and formatting are
+edits the author makes in the document. "Remove GMFCS level reference"
+changes what a report claims about a child, and it stays.
+
+Of 3,704 task rows ever written, 338 fail these tests — 113 of them
+recognisably the same handful of phrases, 8 of which reached the family's
+phones through Google Tasks.
+
 ## Linking a job to what it is about
 
 A one-off job often belongs to something recurring. Netflix is billed monthly

@@ -128,6 +128,54 @@ provider the children actually attend belongs in
 `_ALWAYS_INGEST_DOMAINS`**, not left to a judgement call per email — and
 because a skip keeps no body, the misjudgement is unrecoverable.
 
+## An entry nobody can delete is an entry that keeps its reminders
+
+291 copies of "Olivia's birthday" sat on the shared family calendar from June
+2026 until the day arrived, and then the phone rang 291 times. The same
+incident left 291 "Ellies birthday", 1,006 "Speech therapy" and 349 "Physio".
+Two faults compounded:
+
+- The entries were written before `_stable_gcal_id` existed, so each got a
+  random Google id, and before `REMINDERS_OFF_GCAL` existed, so each kept
+  `useDefault: true` — the calendar's own notification settings.
+- `purge_orphan_gcal.py` cannot touch them. It only deletes an untracked
+  entry carrying an `fb_id` extended property or `#familybrain` in the
+  description, and these have neither. That caution is right — "never touch
+  events the user created manually, even if we're the creator" — but it means
+  a flood written before the tagging existed is permanent until somebody
+  identifies it another way.
+
+The other way is the shape: 291 entries with the same title, the same start
+and the same end, created inside one six-day window. Nobody hand-creates
+that. **Anything that writes to a calendar must be identifiable afterwards**
+— the fb tag is not decoration, it is the only handle a cleanup has.
+
+## An event with no name
+
+An appointment turned up with a blank title. Blank is worse than wrong: a
+wrong title can be corrected because you can read it, while an entry saying
+"(No title)" at 2pm tells the family there is something on and nothing about
+it, so the only way to find out is to go hunting through email for whatever
+produced it.
+
+`personal.event` now has `event_title_is_a_name`, a CHECK requiring at least
+one letter — `''`, `'   '`, `'-'`, `'...'` and `'???'` are all refused, and
+no length rule, because "MRI" is a perfectly good title. The constraint is on
+the table rather than in each writer because five paths insert events (the
+rules generator, the decomposer, the appointment updater, the task sync, and
+hand-written SQL) and a guard in four of them is not a guard.
+
+## Verbs are not jobs
+
+"Extract what this email asks the reader to do" gave the model a verb
+detector, and a letter is full of verbs. The job list filled with "Read
+attached document", "Understand when payment will be received", "Notify if
+have questions", "Visit AGL website for details" — 113 of them, 8 on the
+family's phones. The prompt already said passive reminders are not tasks; a
+model following an instruction most of the time is not a filter. See
+*11-skill-todo-triage* for the four kinds and the two guards that stop the
+filter eating real work.
+
 ## Rate limits
 
 The Google Tasks API returns 403 "Quota Exceeded" and keeps returning it. A
