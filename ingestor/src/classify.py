@@ -21,17 +21,38 @@ Document excerpt:
 Schema:"""
 
 
+class ClassifyUnavailable(Exception):
+    """The LLM classify step couldn't run — retry the item, don't file it."""
+
+
 def classify(text: str) -> str:
-    """Return 'personal', 'property', or 'decision'. Falls back to 'decision' on error."""
+    """Return 'personal', 'property', or 'decision'.
+
+    Raises ClassifyUnavailable if the LLM cannot be reached.
+
+    It used to return 'decision' on any error, which sent the item to
+    decision_architect.published_content — the CommentOS side, whose product
+    goes out in public under Glenn's name. So an LLM outage quietly filed the
+    household's mail, a child's medical letters included, into the published
+    schema. With the inference server down, that is every email that arrives.
+
+    An outage is not a verdict. Raising lets the caller mark the message
+    retryable, which is what the triage step already does for the same
+    reason; the item is picked up when the LLM is back. An unparseable answer
+    falls back to 'personal', the conservative destination: this is the
+    household's own mailbox, and a misfiled personal note costs a tidy-up
+    while a misfiled personal note *in the published schema* costs more.
+    """
     excerpt = text[:1500]
     client = caller_client("classify")
     try:
         resp = client.generate(model=AGENT_MODEL, prompt=PROMPT.format(excerpt=excerpt))
-        result = resp["response"].strip().lower()
-        for schema in ("personal", "property", "decision"):
-            if schema in result:
-                return schema
-        return "decision"
     except Exception as e:
-        print(f"[classify] LLM error, defaulting to 'decision': {e}")
-        return "decision"
+        print(f"[classify] LLM unreachable — deferring rather than filing: {e}")
+        raise ClassifyUnavailable(str(e)) from e
+    result = resp["response"].strip().lower()
+    for schema in ("personal", "property", "decision"):
+        if schema in result:
+            return schema
+    print(f"[classify] unparseable answer {result[:60]!r} — defaulting to 'personal'")
+    return "personal"

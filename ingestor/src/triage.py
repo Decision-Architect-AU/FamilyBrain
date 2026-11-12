@@ -290,6 +290,89 @@ def _our_property_pattern() -> re.Pattern | None:
     return _OUR_PROPERTIES
 
 
+# ── Senders the register says we deal with ───────────────────────────────────
+#
+# A hardcoded domain list is the wrong shape for this. Little Groovers was
+# added to _ALWAYS_INGEST_DOMAINS by hand and it still missed the concert,
+# because the dance school had moved to Class Manager and now writes from
+# no-reply@app.classmanager.com — a domain nobody had thought of. Meanwhile
+# the register already knew the family deals with them.
+#
+# So: if a provider's address is recorded on an active asset, their mail is
+# household business. Recording a provider is now the act that makes their
+# mail ingestible, which is what adding a provider ought to mean.
+#
+# Cached for the process, like the property patterns — these change when a
+# provider is added, not between emails.
+_PROVIDER_SENDERS: frozenset | None = None
+
+
+def _provider_senders() -> frozenset:
+    """Addresses and domains recorded as providers on active assets."""
+    global _PROVIDER_SENDERS
+    if _PROVIDER_SENDERS is not None:
+        return _PROVIDER_SENDERS
+    found: set[str] = set()
+    try:
+        import psycopg2
+        with psycopg2.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT DISTINCT lower(value)
+                         FROM personal.asset a,
+                              jsonb_each_text(a.facts) AS f(key, value)
+                        WHERE a.status = 'active'
+                          AND f.key IN ('provider_email', 'contact_email',
+                                        'sender_address', 'billing_email')
+                          AND value LIKE '%@%'"""
+                )
+                for (addr,) in cur.fetchall():
+                    addr = (addr or "").strip()
+                    if "@" not in addr or len(addr) < 6:
+                        continue
+                    found.add(addr)
+                    domain = addr.rsplit("@", 1)[1]
+                    # Never a free-mail domain: one provider on gmail.com
+                    # would make every gmail sender household business.
+                    if domain and domain not in _FREEMAIL_DOMAINS:
+                        found.add("@" + domain)
+    except Exception as e:
+        # An outage must not become a verdict; fall through to the other rules.
+        print(f"[triage] could not load provider senders: {e}")
+        return frozenset()
+    _PROVIDER_SENDERS = frozenset(found)
+    return _PROVIDER_SENDERS
+
+
+_FREEMAIL_DOMAINS = frozenset({
+    "gmail.com", "hotmail.com", "outlook.com", "live.com", "live.com.au",
+    "yahoo.com", "yahoo.com.au", "bigpond.com", "bigpond.net.au",
+    "icloud.com", "me.com", "optusnet.com.au", "tpg.com.au", "aol.com",
+})
+
+
+def _is_known_provider(from_address: str) -> str | None:
+    """The provider entry this sender matches, if the register knows them."""
+    sender = (from_address or "").lower().strip()
+    if "@" not in sender:
+        return None
+    known = _provider_senders()
+    if not known:
+        return None
+    if sender in known:
+        return sender
+    domain = sender.rsplit("@", 1)[1]
+    # Exact domain, or a subdomain of a recorded one: a provider recorded at
+    # @classmanager.com also writes from app.classmanager.com.
+    for entry in known:
+        if not entry.startswith("@"):
+            continue
+        base = entry[1:]
+        if domain == base or domain.endswith("." + base):
+            return entry
+    return None
+
+
 def _is_about_our_property(subject: str, body: str) -> str | None:
     """The address pattern this email names, if it names one of ours."""
     pattern = _our_property_pattern()
@@ -547,6 +630,16 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
         if who:
             print(f"[triage] from the household and about {who} — ingesting: {subj[:60]}")
             return "ingest"
+
+    # 0d. A provider the register says we deal with. Ahead of the marketing
+    # rules on purpose: a dance school's booking platform sends real dates
+    # wrapped in branding and an unsubscribe footer, so judged on shape alone
+    # it reads as a newsletter. "Little Groovers EOY Performance – Save The
+    # Date" carried the assembly date and nothing transactional in the words.
+    provider = _is_known_provider(sender)
+    if provider:
+        print(f"[triage] from a recorded provider ({provider}) — ingesting: {subj[:60]}")
+        return "ingest"
 
     # 1. Known noise senders — always skip
     if _ALWAYS_SKIP_SENDERS.search(sender):
