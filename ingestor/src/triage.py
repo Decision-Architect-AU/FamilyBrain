@@ -41,6 +41,33 @@ TRIAGE_MODEL = os.environ.get("MODEL_PARSER_1ST", os.environ.get("TRIAGE_MODEL",
 class TriageUnavailable(Exception):
     """The LLM triage step couldn't run — the email should be retried, not skipped."""
 
+
+# ── Our own output, which is never an input ──────────────────────────────────
+#
+# The Week Ahead digest is composed by FamilyBrain and delivered to a
+# household inbox, so triage rule 0c — "from one of us, about one of us" —
+# force-ingested it and the decomposer extracted events out of the summary.
+# FamilyBrain was reading its own homework back and marking it. Eight events
+# came from digests that way.
+#
+# Outgoing mail now carries X-FamilyBrain-Generated: 1, which reaches every
+# recipient and every mailbox. The subject fallback exists for the copies
+# already sitting in the mailboxes, sent before the header did, and for
+# Outlook, whose Graph payload does not carry custom headers.
+_SELF_SUBJECTS = re.compile(r'^\s*(week ahead\b|daily brief\b|familybrain\b)', re.I)
+
+
+def is_familybrain_generated(from_address: str, subject: str,
+                             header_flag: bool = False) -> bool:
+    """Did we write this? Our own output must never become an input."""
+    if header_flag:
+        return True
+    sender = (from_address or "").lower().strip()
+    # Only ever our own addresses: "A Biiiiig Week Ahead" from a retailer is
+    # someone else's mail and is judged on its merits like anything else.
+    return bool(_SELF_SUBJECTS.match(subject or "")
+                and sender in _household_addresses())
+
 # ── Always skip — known noise senders ────────────────────────────────────────
 # These never produce personal_brain content regardless of subject
 _ALWAYS_SKIP_SENDERS = re.compile(
@@ -593,7 +620,8 @@ Body: {body_preview}
 Decision:"""
 
 
-def triage_email(from_address: str, subject: str, body_text: str) -> str:
+def triage_email(from_address: str, subject: str, body_text: str,
+                 self_generated: bool = False) -> str:
     """Returns 'ingest', 'marketing', or 'skip'."""
     subj   = subject or ""
     body   = body_text[:1200]
@@ -602,6 +630,14 @@ def triage_email(from_address: str, subject: str, body_text: str) -> str:
     # ends, or every long newsletter reads as un-marked.
     body_edges = body_text[:1200] + "\n" + body_text[-800:]
     sender = from_address.lower()
+
+    # 00. Our own output. Ahead of everything, including the household rules
+    # below — the Week Ahead digest comes from one of our inboxes and names
+    # the children, so rule 0c read it as the family talking about itself and
+    # the decomposer made events out of FamilyBrain's own summary.
+    if is_familybrain_generated(from_address, subj, self_generated):
+        print(f"[triage] FamilyBrain wrote this — not re-ingesting: {subj[:60]}")
+        return "skip"
 
     # 0. Household-internal forward — deterministic gate, ahead of every
     # keyword/LLM rule. If one of our own connected inboxes forwarded this,

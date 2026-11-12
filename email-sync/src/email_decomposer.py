@@ -1911,7 +1911,9 @@ def _create_calendar_event(cur, item: dict, calendar_source: str, email_id: int,
         # missed it — so a whole-school notice looked like nobody's and fell
         # through to being pinned on one child by routine inheritance.
         audience_text = "\n".join([title, (email_body or "")[:20000]])
-        audience = resolve_audience(audience_text, exclude_names=sender_names)
+        audience = resolve_audience(
+            audience_text, exclude_names=sender_names,
+            sender_address=(email_meta or {}).get("from_address", ""))
         audience_note = ""
         people = audience["person_ids"]
         if len(people) == 1:

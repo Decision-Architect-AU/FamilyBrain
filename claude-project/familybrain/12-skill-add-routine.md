@@ -12,6 +12,38 @@ outside a house.
 
 If it has no time and nobody has to do anything, it is not a routine.
 
+## Record the provider — it is load-bearing, not decoration
+
+If the family names who runs it, put the provider and the address their mail
+comes from on the asset's `facts`:
+
+```json
+{"provider": "Little Groovers Dance Co",
+ "provider_email": "dance@littlegrooversdanceco.com",
+ "sender_address": "no-reply@app.classmanager.com"}
+```
+
+Two things read those fields, so recording them changes behaviour rather
+than just documenting it:
+
+- **Triage** treats mail from a recorded provider as household business,
+  ahead of the marketing rules. Without it, a booking platform's notice —
+  real dates wrapped in branding and an unsubscribe footer — is judged on
+  shape and skipped, and a skip keeps no body, so the content is gone.
+- **Audience resolution** attributes a provider's mail to the people who
+  have an active asset with that provider, rather than to every child in the
+  grades the email happens to mention.
+
+The keys read are `provider_email`, `contact_email`, `sender_address` and
+`billing_email`. Free-mail domains are ignored for the domain match, so one
+provider on gmail.com does not make every gmail sender household business —
+record the exact address for those.
+
+Worth checking what address they actually write from rather than assuming
+their own domain: Little Groovers' mail comes from `app.classmanager.com`,
+their booking platform, and a list built on the obvious domain missed every
+notice they sent.
+
 ## What you need before writing anything
 
 Day, time, who it is for, where, and whether it stops in the school holidays.

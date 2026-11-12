@@ -87,6 +87,36 @@ actually had** — "unavailable" for a 400 sent everyone looking at the wrong
 service. And **a 200 is not a yes**: this ingestor returns `{"ok": false,
 "error": ...}` on a failed write, so check the body, not the status.
 
+## FamilyBrain reading its own homework
+
+The Week Ahead digest is composed here and delivered to a household inbox.
+Triage rule 0c — "from one of us, about one of us" — then force-ingested it,
+and the decomposer extracted events out of the summary. Eight events were
+created from digests before anyone noticed, two of them live on a calendar.
+
+Outgoing mail now carries `X-FamilyBrain-Generated: 1` and triage refuses it
+ahead of every other rule. **Anything new that writes outward has to carry
+that header too**, or the loop reopens. A header was chosen over a subject
+match or a sent-message id because it reaches every recipient and every
+mailbox; the subject fallback is only for copies sent before the header
+existed, and for Outlook, whose Graph payload drops custom headers.
+
+## "Grade" is not "Year"
+
+The school writes "Year 3". The dance school writes "Grade 3/4", "Grade 2",
+"Grade 1", "Prep". The class pattern matched only `year|yr`, so none of the
+dance school's notices resolved to a child and every one of them fell
+through to the whole-school rule — which attributes a notice to *every*
+enrolled child. A Grade 3/4 dance assembly became "Olivia & Elliana" when
+only Elliana dances.
+
+And a grade reference says who the notice was *addressed* to, not who in
+this house attends. The end-of-year email covers Prep, Grade 1, Grade 2 and
+Grade 3/4, which between them cover both children. So `resolve_audience`
+now checks the sender first: **a provider's mail concerns the people who
+have an active asset with that provider.** One routine, provider Little
+Groovers, person Elliana — so Elliana, whatever grades the email lists.
+
 ## Senders whose subjects carry no keyword
 
 Little Groovers Dance Co sends "Concert Tomorrow Grade 1 Varsity !!", "Class

@@ -172,6 +172,7 @@ def create_draft(account: dict, to: str, subject: str, body_text: str, body_html
         msg = MIMEText(body_text)
     msg["to"] = to
     msg["subject"] = subject
+    msg["X-FamilyBrain-Generated"] = "1"   # see deliver(): never re-ingest our own output
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     result = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return result["id"], result["message"]["threadId"], result["message"]["id"]
@@ -234,6 +235,13 @@ def deliver(account: dict, to: str, subject: str, body_text: str,
         msg = MIMEText(body_text)
     msg["to"] = to
     msg["subject"] = subject
+    # Mark our own output so ingestion can refuse it. The Week Ahead digest
+    # goes to a household inbox, which rule 0c of triage reads as "from us,
+    # about the children" and force-ingests — so FamilyBrain was reading its
+    # own summary back in and decomposing events out of it. Eight events came
+    # from digests before anyone noticed. A header travels to every recipient,
+    # which a subject match or a sent-message id does not.
+    msg["X-FamilyBrain-Generated"] = "1"
     raw = _b64.urlsafe_b64encode(msg.as_bytes()).decode()
     result = svc.users().messages().send(userId="me", body={"raw": raw}).execute()
     print(f"[gmail] sent '{subject[:50]}' to {to}")
@@ -337,8 +345,10 @@ def _parse_message(msg: dict) -> dict:
     internal_ms  = int(msg.get("internalDate", 0))
     received_at  = datetime.fromtimestamp(internal_ms / 1000, tz=timezone.utc).isoformat()
     is_sent      = "SENT" in msg.get("labelIds", [])
+    self_made    = _header(headers, "X-FamilyBrain-Generated").strip() == "1"
     return {
         "provider_msg_id": msg["id"],
+        "familybrain_generated": self_made,
         "thread_id":       msg.get("threadId"),
         "from_address":    from_addr,
         "from_name":       from_name,

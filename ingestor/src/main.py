@@ -211,7 +211,9 @@ def ingest_email(payload: dict) -> dict:
 
     # ── Triage: gate before full extraction ──────────────────────────────────
     try:
-        triage_action = triage_email(from_address, subject, body_text)
+        triage_action = triage_email(
+            from_address, subject, body_text,
+            self_generated=bool(payload.get("familybrain_generated")))
     except TriageUnavailable as e:
         # Record as 'error' so email-sync's retry pass re-fetches and re-triages it
         try:
