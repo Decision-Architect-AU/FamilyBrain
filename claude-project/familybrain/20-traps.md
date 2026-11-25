@@ -17,6 +17,35 @@ Four separate bugs, one cause:
 Use word boundaries. In Python, `re.search(r"(?<!\w)" + re.escape(w) + r"(?!\w)", text)`.
 In Postgres, `\y` — **not** `\b`, which Postgres reads as backspace.
 
+A fifth, found later and worth its own line because it reads as the opposite
+kind of bug: the household's surname is **West**, and the test that keeps the
+family's own names out of an extracted contact used a plain `in`. So
+"Westpac Banking Corp" was excluded as though it were the family — a true
+rule, applied to the wrong span. See `contact_extract._names_the_household`.
+
+## A vocabulary list that does not converge
+
+A statement arrives as an HTML table, html2text gives every cell its own
+short line, and two capitalised words alone on a line cannot be told from a
+person's name by shape. So a list of label words was written to tell them
+apart, and it worked, one case at a time:
+
+| Refused | Promoted into its place |
+|---|---|
+| "Current Tenancy", "Shared Account" | "PDF Reader", "Job Address" |
+| "Account Type", "Key Details" | "Time Zone", "Investor Target Return" |
+| "Folio Summary", "Invoice Total AUD" | "General Advice", "Thirty-One Thousand Dollars" |
+
+Every entry bought exactly one case, because the supply of two-capitalised-word
+table cells is unbounded. **When a list has to grow once per instance, the
+test is at the wrong altitude.** `contact_extract.looks_like_document` asks
+instead whether the text as a whole is a document — mostly cells — and if it
+is, takes no name out of it at all unless the sender's own address
+corroborates one. One test, and the list stopped growing.
+
+The same shape is worth watching for anywhere a guard list is kept: ask
+whether the next ten cases are enumerable or endless.
+
 ## Backslashes through a shell heredoc
 
 Writing `\\b` inside a non-raw Python string in a `<<'PY'` heredoc produces

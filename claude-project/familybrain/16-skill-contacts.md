@@ -98,8 +98,60 @@ Three things it refuses, each a real fault it was built after:
   html2text gives each cell its own line, and two capitalised words on a line
   are indistinguishable from a name by shape alone. "Invoice Total AUD",
   "Discretionary Trust", "Conditional Approval", "Folio Summary" and
-  "Customers Signature" were every one of them read as people. Only the
-  vocabulary tells them apart, which is why there is a list of it.
+  "Customers Signature" were every one of them read as people.
+
+  **The vocabulary answer does not converge.** It was tried: refusing
+  "Current Tenancy", "Shared Account" and "Account Type" promoted "PDF
+  Reader", "Job Address", "Time Zone", "Investor Target Return", "General
+  Advice" and "Thirty-One Thousand Dollars" into their place, one new list
+  entry per case. So `looks_like_document` tests the text as a whole instead:
+  a document is mostly cells — short lines that are a label, an amount, a
+  date or a bare number — and a message somebody wrote is mostly sentences.
+  In a document the question is not which cell to take but whether to take
+  one at all, and the answer is **only a name the sender's own address
+  corroborates**. `felicia@lotussettlements.com.au` signs a settlement
+  statement "Felicia Singkang" and the local part agrees, so that is a
+  person; no cell in any of these statements looks like `emaildelivery`.
+
+  A local part that merely repeats its own domain vouches for nobody —
+  `nab@updates.nab.com.au` is a departmental address, and on the first
+  attempt at this rule its three letters corroborated "NAB Private Wealth"
+  into the person column.
+
+- **An organisation is not a person.** Thirty of the first 321 derived names
+  were organisations: "Macquarie Bank", "Brisbane City Council", "Alinta
+  Energy", "Varsity College", "Centre Of Movement", "Cancer Council", "South
+  East Water". Each arrived through the **From display name**, which
+  `_ROLE_ACCOUNT` was already guarding against for "Accounts Department" and
+  "no-reply" — the same objection, through a different door. Every one would
+  have become a person who does not exist with a provider's mail attributed
+  to them. `_NOT_A_PERSON` refuses them and `_display_organisation` files
+  them where they belong, which beats squeezing the domain into
+  "Centreofmovement".
+
+  Street types are deliberately absent from that list though `_PLACE_WORDS`
+  has them: "dr" is a street and a doctor, and the rule that decides who a
+  provider is must not be one that cannot tell "Smith Drive" from "Dr Smith".
+
+- **The household's own entity is not the sender's organisation.** An agent's
+  statement about the family's own rental names the family's own trust —
+  "West Investment Property SMSF Pty Ltd as trustee for West Investment
+  Property SMSF Trust" — and recorded against the agent's address that is the
+  "Dear Miss Olivia West" fault exactly, one column over. `_organisation`
+  takes `exclude_names` for the same reason the person column does.
+
+  Those names are matched **as words** now. "West" is the family's surname
+  and a substring of "Westpac Banking Corp", so the plain `in` test threw the
+  bank out along with the trust. Word boundaries are the first thing
+  *20-traps* asks for and this was the third call site to want them.
+
+- **A platform is not an organisation.** `samthemerchant@gmail.com` — Glenn's
+  own address — produced the organisation "Gmail", and a Google Calendar
+  invitation in Shannon's mail produced "Calendar", because the only URL in
+  the body was the RSVP link. This is the free-mail fault in the organisation
+  column; `_is_platform_host` reads `FREE_MAIL_DOMAINS` and `_HOST_PLATFORM`,
+  which sit next to each other so that a domain added to one gets considered
+  for the other.
 
 **2. Resolve** — against `personal.person`, by the two-tier rule already in
 `ingestor/src/practitioner_matcher.py`: exact match, then `pg_trgm`
@@ -182,6 +234,47 @@ only matches when it identifies an organisation.
 own copy because it is built into a different image — if you add a domain,
 add it in both.
 
+### A mailing platform is not a provider
+
+`propertytree@propertytree.com` and `emaildelivery@console.com.au` are
+real-estate software. They send every agency's statements from the one
+address and put the agency in the display name, so the sender arrives as
+"Moneybags Property" one month and another agency the next. Glenn's address
+book had recorded one of them as the platform ("PropertyTree") and the other
+as a single agency ("AH Realty Australia"); the extraction had whichever
+agency the most recent statement was about.
+
+Neither side is wrong about its own message. **The extraction's job is to say
+what this message said; noticing that one address keeps naming different
+organisations is the merge stage's.** A sender whose organisation changes
+between messages has no organisation, and recording one would churn the
+register every statement — which is the "no-op upsert that is not a no-op"
+with a different cause. Until the merge stage exists, these two addresses are
+why there is no organisation worth writing for them.
+
+## What the comparison with Outlook found
+
+Thirty-four contacts in `glenn_w_west@hotmail.com` against 478 senders the
+brain derives. Three matched on an email address, 31 were Outlook's alone,
+and 30 of those 31 have an address the brain has never derived — the cait,
+atcgc and bigpond addresses of people the household knows and does not email.
+That is the address book doing what it is good at, and the argument for
+reading it rather than believing it.
+
+The useful part was the small part. Two disagreements and five
+fields-FamilyBrain-had, across three senders, and every one of them pointed
+at the extraction rather than at a row:
+
+| Sender | Outlook said | The brain said | What it really was |
+|---|---|---|---|
+| `emaildelivery@console.com.au` | AH Realty Australia | "Current Tenancy", org "West Investment Property SMSF Pty" | a table cell, and the household's own trust |
+| `propertytree@propertytree.com` | PropertyTree | "Moneybags Property" | an organisation in the person column |
+| `shannon.garner@gmail.com` | Shannon Garner | org "Calendar" | a Google Calendar RSVP link read as a website |
+
+Three senders, four separate faults, none of them fixable in a row. That is
+the comparison earning its keep: the counts said "2 disagreements" and the
+disagreements said what was wrong with the pipeline.
+
 ## The commands
 
 Derive the candidates from mail FamilyBrain has already read:
@@ -212,8 +305,9 @@ address book.
 
 `Contacts.Read` is consented separately from mail and the calendar, and was
 not granted for years — MSAL refuses the scope with `AADSTS70000` and Graph
-answers `403 ErrorAccessDenied` on a mail token. The account has to sign in
-again:
+answers `403 ErrorAccessDenied` on a mail token. Account 1 has since signed
+in again and grants `Mail.Read`, `Mail.ReadWrite`, `Calendars.ReadWrite` and
+`Contacts.Read`. For an account that has not, or whose consent is withdrawn:
 
 ```bash
 docker exec -it familybrain-email-sync python -m src.auth_helper --outlook --save-account 1
@@ -242,10 +336,23 @@ would make a missing permission look like a household that knows nobody.
   compare; the merge in stage 3 is designed here and not built. Until it is,
   a contact worth recording goes in through the FRM or by hand, and the entry
   says `contact_source = 'manual'`.
-- **The extraction still mistakes some table cells for people** — "Current
-  Tenancy", "BPay Biller Code", "Customer Care", "Shared Account". Left
-  visible rather than hidden; `contact_extract._LABEL_WORDS` is where that is
-  fixed.
+- **Nine of 266 derived names are still not people.** Four are organisations
+  ("ME Accountants", "Y Queensland", "Luxury Escapes", "TPG Internet") and
+  three are labels ("Investor Target Return", "General Advice",
+  "Participating Restaurants+"); the remaining two are "Kiki Offer" and
+  "Kirstyn Offer", where Offer is probably a surname and the vocabulary
+  cannot tell. All nine come through a **From display name**, which no
+  structural test reaches — the body tests cannot help, because the display
+  name is not in the body. Left visible rather than hidden.
+
+  For reference, that column held 321 names before this pass and 30 of them
+  were organisations. The extraction fixes took it to 266 names: 63 dropped,
+  8 found that the junk had been hiding, 17 replaced. Every other column was
+  unchanged except organisation, which lost 20 platform names ("Gmail",
+  "Xero", "Stripe", "Calendar") and improved 36 from a domain squeeze to a
+  real name — "Brisbane" to "Brisbane City Council", "Littlegrooversdanceco"
+  to "Little Groovers Dance Co", "Ndis" to "National Disability Insurance
+  Agency".
 - **Shannon's and the other accounts' address books are not read.** The
   reader takes an account id and nothing is Outlook-specific about the
   comparison, but only account 1 has been consented.

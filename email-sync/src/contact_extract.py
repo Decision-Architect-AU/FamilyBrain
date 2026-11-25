@@ -31,6 +31,10 @@ and refuse a longer run of digits, which is what rules out `17647935479`
 **A signature is not a paragraph.** html2text leaves the labelled kind as
 `**M** 0436 614 955` and the plain kind as four short lines in a row. Both
 are read; prose is not.
+
+**And a document is not a signature at all.** See `looks_like_document`,
+which is the one test here that is not about vocabulary, because vocabulary
+was the thing that would not converge.
 """
 import re
 from typing import Optional
@@ -196,11 +200,21 @@ _SALUTATION = re.compile(
 
 
 def _website(line: str) -> Optional[str]:
-    """The first real URL on a line, or None."""
+    """The first real URL on a line, or None.
+
+    A link to a platform is not the sender's website. The only URL in a
+    Google Calendar invitation is its RSVP link, which was recorded as
+    Shannon's website and then squeezed into the organisation "Calendar".
+    `_is_platform_host` is defined below and read at call time.
+    """
     for m in _URL.finditer(line or ""):
         url = m.group(0).rstrip(".,;:")
-        if not _SAFELINK.search(url):
-            return url
+        if _SAFELINK.search(url):
+            continue
+        host = re.sub(r'^\w+://', "", url, flags=re.I).split("/")[0].split("?")[0]
+        if _is_platform_host(host):
+            continue
+        return url
     return None
 
 
@@ -213,6 +227,50 @@ def _tidy(value: str) -> str:
     value = re.sub(r'[\u200b-\u200f\ufeff\u2060]', "", value)
     value = value.replace("\u00a0", " ").replace("*", "").replace("_", "")
     return re.sub(r'\s+', " ", value).strip(" \t|-:.,;\u00b7\u2022")
+
+
+# The cells of a table, which is what html2text leaves of a statement: a bare
+# amount, a bare date, a bare month, a bare number, a dash standing in for
+# nothing.
+_BARE_CELL = re.compile(
+    r'^(?:\$\s?-?[\d,]+(?:\.\d{2})?|-?[\d,]+\.\d{2}|[\d,]{1,12}|'
+    r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}\s+\w{3,9}\s+\d{2,4}|'
+    r'\w{3}\s+\d{2,4}|nil|n/?a|[-–—]+|page \d+(?: of \d+)?)$', re.I)
+
+
+def looks_like_document(text: str) -> bool:
+    """Is this the text of a document, rather than a message somebody wrote?
+
+    A statement, invoice or quote arrives as an HTML table and html2text
+    gives every cell its own short line. Two capitalised words alone on a
+    line are then indistinguishable from a name by shape, and the vocabulary
+    answer does not converge: refusing "Current Tenancy", "Shared Account"
+    and "Account Type" promoted "PDF Reader", "Job Address", "Time Zone",
+    "Investor Target Return", "General Advice" and "Thirty-One Thousand
+    Dollars" into their place — one new list entry per case, indefinitely.
+    A register where one name in ten is a table cell is a register nobody
+    checks against, which is the cost *20-traps* puts on a checker that cries
+    wolf.
+
+    So this test is on the text as a whole rather than line by line. A
+    document is mostly cells: short lines that are a label, an amount, a date
+    or a bare number. A message somebody wrote is mostly sentences.
+
+    `--- Attachment:` says the same thing and usually says it first, but only
+    `gmail.py` and `outlook.py` write that divider. A statement that arrives
+    as an HTML body — which is how the rental agents send them, and not one
+    of the three worst cases carried the divider — has none at all, so every
+    guard premised on the attachment text having been cut is void for exactly
+    the messages where it was needed.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    if len(lines) < 6:
+        return False
+    cells = sum(1 for ln in lines
+                if len(ln) <= 60 and (_BARE_CELL.match(ln)
+                                      or _LABEL_WORDS.search(ln)))
+    return cells / len(lines) >= 0.25
 
 
 def signature_block(body: str) -> str:
@@ -247,8 +305,10 @@ _PLACE_WORDS = re.compile(
 # the list that tells them apart, and it is a list rather than a cleverer test
 # because the shape genuinely is the same and only the vocabulary differs.
 _LABEL_WORDS = re.compile(
-    r'(?<!\w)(?:gst|abn|acn|bsb|aud|nil|n/?a|total|totals|subtotal|invoice|'
-    r'invoiced|receipt|statement|summary|fee|fees|charge|charges|debt|'
+    r'(?<!\w)(?:gst|abn|acn|bsb|bpay|aud|nil|n/?a|total|totals|subtotal|'
+    r'invoice|'
+    r'invoiced|receipt|statement|statements|summary|details|detail|'
+    r'fee|fees|charge|charges|debt|'
     r'balance|amount|payment|payments|paid|payable|outstanding|arrears|'
     r'deposit|withdrawal|transfer|refund|credit|debit|interest|rate|rates|'
     r'levy|premium|excess|quote|quotation|estimate|folio|ledger|trust|'
@@ -267,6 +327,85 @@ _PROSE_WORDS = re.compile(
     r'is|are|was|were|be|been|this|that|these|those|there|here|and|but|'
     r'because|when|while|about|ensure|note|contact|visit|click|see)(?!\w)',
     re.I)
+
+# An organisation's name, sitting in the column meant for a person.
+#
+# This is the one the register cannot afford. `_provider_audience` reads
+# `personal.person` to decide which child a notice is about, and 30 of the
+# first 321 derived names were organisations: "Macquarie Bank", "Brisbane
+# City Council", "Alinta Energy", "Varsity College", "Firstmac Limited",
+# "Centre Of Movement", "Cancer Council", "South East Water". Every one would
+# have become a person who does not exist, with a provider's mail attributed
+# to them — the same objection `_ROLE_ACCOUNT` was written for, arriving
+# through the From display name instead of the local part.
+#
+# A line matching this is not thrown away. It is what it says it is, so
+# `extract_contact` files it as the organisation, which is better evidence
+# than squeezing the domain into "Propertytree".
+#
+# Street types are deliberately absent, though `_PLACE_WORDS` has them: "dr"
+# is a street and a doctor, and a rule that cannot tell "Smith Drive" from
+# "Dr Smith" must not be the rule that decides who a provider is.
+_NOT_A_PERSON = re.compile(
+    r'(?<!\w)(?:pty|ltd|limited|inc|llc|plc|holdings|enterprises|group|'
+    r'company|corporation|corp|bank|banking|insurance|energy|electricity|'
+    r'gas|water|telecom|media|council|shire|authority|commission|'
+    r'department|ministry|government|university|college|school|academy|'
+    r'institute|foundation|association|society|union|club|hospital|clinic|'
+    r'centre|center|surgery|practice|realty|property|properties|estate|'
+    r'mortgage|finance|financial|superannuation|mutual|nationwide|'
+    r'services|solutions|systems|regulation|research|copyright|'
+    r'tenancy|tenant|ownership|owner|licensee|landlord|lessee|lessor)(?!\w)',
+    re.I)
+
+_SURNAME_FIRST = re.compile(r'^([A-Z][A-Z\'-]+),\s*([A-Z][a-z\'-]+)')
+
+# A From name that names a function rather than a person. These must not reach
+# the register: `_provider_audience` would then attribute a provider's mail to
+# a person called "Accounts Department" who does not exist.
+_ROLE_ACCOUNT = re.compile(
+    r'(?<!\w)(?:no.?reply|do.?not.?reply|accounts?|billing|invoices?|info|'
+    r'admin|administration|support|help(?:desk)?|enquiries|enquiry|contact|'
+    r'team|department|notifications?|notice|service|services|office|'
+    r'mail|mailer|alerts?|newsletter|newsletters|updates?|bookings?|'
+    r'reception|information|communications|news|feedback|surveys|'
+    r'concierge|offers|rewards|marketing|membership|statements)(?!\w)',
+    re.I)
+
+
+def _local_part_words(from_address: str) -> set[str]:
+    """The words in an address's local part that its own domain does not repeat.
+
+    `felicia@lotussettlements.com.au` gives {"felicia"}: the local part names
+    somebody the domain does not. `nab@updates.nab.com.au` gives **nothing**,
+    because its local part only says the organisation's name again — and a
+    three-letter acronym that appears in its own domain will corroborate the
+    organisation's own name wherever it turns up, which is how "NAB Private
+    Wealth" became a person on the first attempt at this rule. An address
+    that repeats its domain is a departmental address, and it vouches for
+    nobody.
+
+    `emaildelivery@console.com.au` gives {"emaildelivery"}, which no line in
+    a statement will ever match, and that is the point.
+    """
+    addr = (from_address or "").lower()
+    local, _, domain = addr.partition("@")
+    words = {w for w in re.split(r'[^a-z]+', local) if len(w) > 2}
+    return words - {w for w in re.split(r'[^a-z]+', domain) if len(w) > 2}
+
+
+def _names_the_household(text: str, exclude_names: tuple[str, ...]) -> bool:
+    """Does this text name one of the household's own names, as a *word*?
+
+    As a word, which is the whole point. "West" is the family's surname and a
+    substring of "Westpac Banking Corp", so the plain `in` test this replaces
+    threw the bank out of the organisation column along with the family
+    trust. Word boundaries are the first thing *20-traps* asks for, and this
+    is the third call site to have wanted them.
+    """
+    lowered = (text or "").lower()
+    return any(re.search(r'(?<!\w)' + re.escape(n.lower()) + r'(?!\w)', lowered)
+               for n in exclude_names if n)
 
 
 def _looks_like_person_name(line: str, exclude_names: tuple[str, ...] = ()) -> bool:
@@ -287,7 +426,8 @@ def _looks_like_person_name(line: str, exclude_names: tuple[str, ...] = ()) -> b
     if _ROLE_RE.search(line) or _EMAIL.search(line) or _URL.search(line):
         return False
     if (_PLACE_WORDS.search(line) or _LABEL_WORDS.search(line)
-            or _PROSE_WORDS.search(line)):
+            or _PROSE_WORDS.search(line) or _NOT_A_PERSON.search(line)
+            or _ROLE_ACCOUNT.search(line)):
         return False
     # Nobody signs their name in capitals. The school shouts its From header
     # ("MAJOR, Holly") and `_display_name` handles that case, but a shouted
@@ -295,23 +435,9 @@ def _looks_like_person_name(line: str, exclude_names: tuple[str, ...] = ()) -> b
     # OVEN", "TOTAL".
     if line.upper() == line:
         return False
-    lowered = line.lower()
-    if any(n and n.lower() in lowered for n in exclude_names):
+    if _names_the_household(line, exclude_names):
         return False
     return all(w[:1].isalpha() and w[:1].isupper() for w in words)
-
-
-_SURNAME_FIRST = re.compile(r'^([A-Z][A-Z\'-]+),\s*([A-Z][a-z\'-]+)')
-
-# A From name that names a function rather than a person. These must not reach
-# the register: `_provider_audience` would then attribute a provider's mail to
-# a person called "Accounts Department" who does not exist.
-_ROLE_ACCOUNT = re.compile(
-    r'(?<!\w)(?:no.?reply|do.?not.?reply|accounts?|billing|invoices?|info|'
-    r'admin|administration|support|help(?:desk)?|enquiries|enquiry|contact|'
-    r'team|department|notifications?|notice|service|services|office|'
-    r'mail|mailer|alerts?|newsletter|updates?|bookings?|reception)(?!\w)',
-    re.I)
 
 
 def _display_name(from_name: str, exclude_names: tuple[str, ...] = ()) -> Optional[str]:
@@ -319,13 +445,17 @@ def _display_name(from_name: str, exclude_names: tuple[str, ...] = ()) -> Option
 
     Education Queensland sends "MAJOR, Holly (hmajo11)" — surname first,
     shouted, with the login in brackets. "Accounts Department" and "no-reply"
-    name no person and must not become one.
+    name no person and must not become one, and neither must "Macquarie
+    Bank": an organisation in the person column is a person who does not
+    exist. `_display_organisation` picks those up where they belong.
     """
     name = _tidy(from_name or "")
     name = re.sub(r'\s*\([^)]*\)\s*$', "", name)
     if not name or _EMAIL.fullmatch(name) or _ROLE_ACCOUNT.search(name):
         return None
-    if any(n and n.lower() in name.lower() for n in exclude_names):
+    if _NOT_A_PERSON.search(name) or _LABEL_WORDS.search(name):
+        return None
+    if _names_the_household(name, exclude_names):
         return None
     m = _SURNAME_FIRST.match(name)
     if m:
@@ -343,11 +473,47 @@ _ORG_SUFFIX = re.compile(
     r'clinic|centre|center|practice|surgery|lawyers|solicitors|conveyancing|'
     r'accountants|partners|associates|services|company|association|council|'
     r'institute|academy|studio|oshc|ymca|dance|therapy|health|physiotherapy|'
-    r'allied|realty|estate|finance|financial|bank|insurance)(?!\w)', re.I)
+    r'allied|realty|estate|finance|financial|bank|banking|insurance|'
+    r'corp|corporation|holdings|enterprises)(?!\w)', re.I)
+# `_ORG_SUFFIX` accepts an organisation and `_NOT_A_PERSON` refuses a person,
+# so the two are answering the same question from opposite sides. Where they
+# disagree, a line is neither — "Westpac Banking Corp" was refused as a
+# person by one and not recognised as an organisation by the other, and fell
+# out of both columns. Add a word to one, consider it for the other.
+
+
+def _display_organisation(from_name: str,
+                          exclude_names: tuple[str, ...] = ()) -> Optional[str]:
+    """The From display name, when it names an organisation and not a person.
+
+    PropertyTree sends every agency's statement from the one address and puts
+    the agency in the display name, so "Moneybags Property" arrives as the
+    sender of `propertytree@propertytree.com`. That is a true statement about
+    this message and a poor one about the address: next month's statement
+    carries a different agency. Saying what the message said is this
+    function's job; noticing that one address keeps naming different
+    organisations is the merge stage's, and *16-skill-contacts* says so.
+    """
+    name = _tidy(from_name or "")
+    name = re.sub(r'\s*\([^)]*\)\s*$', "", name)
+    if not name or _EMAIL.fullmatch(name) or _URL.search(name):
+        return None
+    if not 3 <= len(name) <= 60 or not 1 <= len(name.split()) <= 6:
+        return None
+    if any(ch.isdigit() for ch in name):
+        return None
+    if _LABEL_WORDS.search(name) or _PROSE_WORDS.search(name):
+        return None
+    if _ROLE_ACCOUNT.search(name) or _names_the_household(name, exclude_names):
+        return None
+    if not (_ORG_SUFFIX.search(name) or _NOT_A_PERSON.search(name)):
+        return None
+    return name.title() if name.isupper() else name
 
 
 def _organisation(lines: list[str], person_name: Optional[str],
-                  role: Optional[str]) -> Optional[str]:
+                  role: Optional[str],
+                  exclude_names: tuple[str, ...] = ()) -> Optional[str]:
     """The line that names an organisation rather than a person or a place.
 
     An organisation's name is written as a name: most of its words are
@@ -357,11 +523,21 @@ def _organisation(lines: list[str], person_name: Optional[str],
     service" — both of which were recorded as organisations before the test
     was added. Five words at most, for the same reason: an organisation's
     name is a name, not a sentence.
+
+    `exclude_names` is here for the same reason it is in
+    `_looks_like_person_name`, one column over. An agent's statement about
+    the family's own rental names the family's own trust — "West Investment
+    Property SMSF Pty Ltd as trustee for West Investment Property SMSF
+    Trust" — and that organisation is the reader, not the sender. Recorded
+    against the agent's address it is the "Dear Miss Olivia West" fault
+    exactly, in the organisation column instead of the person one.
     """
     for ln in lines:
         if ln in (person_name, role) or not 3 <= len(ln) <= 60:
             continue
         if _EMAIL.search(ln) or _URL.search(ln) or any(ch.isdigit() for ch in ln):
+            continue
+        if _names_the_household(ln, exclude_names):
             continue
         if _SALUTATION.match(ln) or not _ORG_SUFFIX.search(ln):
             continue
@@ -408,6 +584,36 @@ _HOST_NOISE = {"mail", "email", "edm", "mailer", "news", "post", "updates",
                "secure", "www", "info"}
 _HOST_PUBLIC = {"com", "net", "org", "au", "co", "gov", "edu", "info", "nz", "uk"}
 
+# A host that names the platform somebody's account sits on, not an
+# organisation the household deals with. This is the free-mail fault one
+# column over: `samthemerchant@gmail.com` — Glenn's own address — produced
+# the organisation "Gmail", and a Google Calendar invitation in Shannon's
+# mail produced "Calendar", because the only URL in the body was the RSVP
+# link. Neither is a thing anyone could ring. A value that looks calculated
+# does not get re-checked, so these say nothing rather than something tidy.
+_HOST_PLATFORM = {"google", "googlemail", "gmail", "calendar", "docs", "drive",
+                  "meet", "microsoft", "office365", "outlook", "sharepoint",
+                  "apple", "icloud", "docusign", "adobesign", "xero", "myob",
+                  "stripe", "paypal", "squareup", "eventbrite", "mailchimp",
+                  "campaign-archive", "surveymonkey", "zoom", "dropbox",
+                  "wetransfer", "canva", "linktr", "bit"}
+
+
+def _is_platform_host(host: str) -> bool:
+    """Is this host a platform rather than somebody we deal with?
+
+    `FREE_MAIL_DOMAINS` is defined above and read at call time; the two lists
+    answer the same question about different parts of an address, and they are
+    next to each other so that a domain added to one gets considered for the
+    other.
+    """
+    host = (host or "").lower().strip().strip(".")
+    if not host:
+        return False
+    if host in FREE_MAIL_DOMAINS:
+        return True
+    return any(p in _HOST_PLATFORM for p in host.split("."))
+
 
 def organisation_from_host(host: str) -> Optional[str]:
     """A readable organisation name out of a hostname, or None.
@@ -419,9 +625,13 @@ def organisation_from_host(host: str) -> Optional[str]:
     "Expected spend: $0" out of the digest keeps it out of here — a value
     that looks calculated does not get re-checked. The longest label wins,
     so "varsitycollege.eq.edu.au" gives "Varsitycollege" rather than "Eq".
+
+    A platform host gives None for the same reason: "Gmail" and "Calendar"
+    are not organisations, and an address on a platform says nothing about
+    who its owner is.
     """
     host = (host or "").lower().strip().strip(".")
-    if not host:
+    if not host or _is_platform_host(host):
         return None
     parts = [p for p in host.split(".") if p not in _HOST_PUBLIC]
     kept = [p for p in parts if p not in _HOST_NOISE] or parts
@@ -468,7 +678,8 @@ def extract_contact(body: str, from_name: str = "", from_address: str = "",
     # nothing but a team name. Safe because `strip_quoted` has already
     # removed the other party's signature and the attachment text, which is
     # where the ABNs, BSBs and invoice numbers live.
-    phones = find_phones(strip_quoted(body))
+    own = strip_quoted(body)
+    phones = find_phones(own)
     out["mobile"] = phones["mobile"][0] if phones["mobile"] else None
     out["landline"] = phones["landline"][0] if phones["landline"] else None
     out["national"] = phones["national"][0] if phones["national"] else None
@@ -498,11 +709,28 @@ def extract_contact(body: str, from_name: str = "", from_address: str = "",
 
     # The display name is the most reliable statement of who sent it and needs
     # no parsing; the signature only has to confirm or improve it.
+    #
+    # In a document the question is not which cell to take but whether to
+    # take one at all, because a table cell cannot be told from a name by
+    # shape. The answer is: only one the address itself corroborates.
+    # `felicia@lotussettlements.com.au` signs a settlement statement "Felicia
+    # Singkang", and the local part says so too, so that is a person. No cell
+    # in any of these statements matches its sender's local part — "Current
+    # Tenancy" does not look like `emaildelivery`, and a name in a bank's
+    # bulk mail does not look like `nab`. It is the same argument the
+    # resolver already makes in *16-skill-contacts*: the address is the only
+    # part of a signature that is unique and does not change spelling.
     out["person_name"] = _display_name(from_name, exclude_names)
+    document = looks_like_document(own)
+    corroborating = _local_part_words(from_address) if document else None
     for ln in lines:
-        if _looks_like_person_name(ln, exclude_names):
-            out["person_name"] = ln
-            break
+        if not _looks_like_person_name(ln, exclude_names):
+            continue
+        if corroborating is not None and not (
+                corroborating & {w.lower() for w in ln.split()}):
+            continue
+        out["person_name"] = ln
+        break
 
     for ln in lines:
         if (len(ln) <= 70 and len(ln.split()) <= 8 and _ROLE_RE.search(ln)
@@ -511,7 +739,8 @@ def extract_contact(body: str, from_name: str = "", from_address: str = "",
             out["role"] = ln
             break
 
-    out["organisation"] = _organisation(lines, out["person_name"], out["role"])
+    out["organisation"] = _organisation(lines, out["person_name"], out["role"],
+                                        exclude_names)
     if not out["organisation"] and out["role"]:
         # "Physiotherapist, Centre of Movement" is one line carrying both,
         # and the organisation it names is better than anything the domain
@@ -520,5 +749,11 @@ def extract_contact(body: str, from_name: str = "", from_address: str = "",
         tail = tail.strip()
         if tail and _ORG_SUFFIX.search(tail) and len(tail.split()) <= 6:
             out["role"], out["organisation"] = head.strip(), tail
+    if not out["organisation"]:
+        # The From display name, when it named an organisation and not a
+        # person. "Centre Of Movement" and "Brisbane City Council" were both
+        # being filed as people; this is where they belong, and it beats
+        # squeezing the domain into "Centreofmovement".
+        out["organisation"] = _display_organisation(from_name, exclude_names)
     out["evidence"] = block[:600] or None
     return out
