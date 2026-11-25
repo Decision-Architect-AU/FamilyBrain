@@ -465,6 +465,70 @@ export const FRM_SECTIONS: { slug: string; label: string; entities: string[] }[]
   { slug: 'routines', label: 'Routines', entities: ['routines'] },
 ];
 
+/**
+ * The calendar is a page here but not a register: it reads `personal.event`
+ * and writes nothing, so it has no field list and no row in FRM. It sits in
+ * its own list so the navigation can carry it without the index page
+ * claiming it is an eighth editable register.
+ */
+export const FRM_VIEWS: { slug: string; label: string; blurb: string }[] = [
+  {
+    slug: 'calendar',
+    label: 'Calendar',
+    blurb: 'every event in one month — appointments, recurring occurrences, jobs and internal rows',
+  },
+];
+
+/**
+ * The four kinds of thing `personal.event` holds, told apart by `event_type`.
+ *
+ * One table carries an appointment read out of an email, an occurrence a rule
+ * generated, a job somebody has to do, and internal bookkeeping that is
+ * deliberately never on a calendar. A calendar that showed them all as the
+ * same thing would put "Chase the signed lease" beside "Physio 8am" and an
+ * obligation row beside both, so the kind is worked out once, here, and both
+ * the SQL and the page read the same definition.
+ *
+ * `task` is the job type. The lower-case appointment types are what the
+ * decomposer writes; the SHOUTED ones are rule output, and there are too
+ * many to list — a new rule invents a new one — so anything upper-case is an
+ * occurrence by shape rather than by enumeration.
+ */
+export const EVENT_KINDS = ['appointment', 'occurrence', 'job', 'internal'] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+
+const APPOINTMENT_TYPES = ['inferred', 'family', 'medical'];
+const INTERNAL_TYPES = ['obligation', 'investigation', 'maintenance_request'];
+
+/** The same classification as a SQL expression, over the alias `e`. */
+export const EVENT_KIND_SQL = `
+  CASE WHEN e.event_type = 'task' THEN 'job'
+       WHEN e.event_type = ANY(ARRAY[${INTERNAL_TYPES.map((t) => `'${t}'`).join(', ')}]) THEN 'internal'
+       WHEN e.event_type = ANY(ARRAY[${APPOINTMENT_TYPES.map((t) => `'${t}'`).join(', ')}]) THEN 'appointment'
+       WHEN e.event_type = upper(e.event_type) THEN 'occurrence'
+       ELSE 'appointment' END`;
+
+export const EVENT_KIND_LABEL: Record<EventKind, string> = {
+  appointment: 'Appointments',
+  occurrence: 'Recurring',
+  job: 'Jobs',
+  internal: 'Internal',
+};
+
+/**
+ * Which register owns an asset of this type — so an occurrence on the
+ * calendar can link back to the routine or subscription that generated it.
+ * Derived from FRM_SECTIONS rather than listed again, so a new register is
+ * linkable the moment it is added.
+ */
+export function sectionForAssetType(assetType: string | null | undefined): string | null {
+  if (!assetType) return null;
+  const entity = Object.entries(FRM).find(([, e]) => e.assetType === assetType);
+  if (!entity) return null;
+  const section = FRM_SECTIONS.find((s) => s.entities.includes(entity[0]));
+  return section?.slug ?? null;
+}
+
 export function entityOrThrow(name: string): FrmEntity {
   const entity = FRM[name];
   if (!entity) throw new Error(`unknown entity ${name}`);
