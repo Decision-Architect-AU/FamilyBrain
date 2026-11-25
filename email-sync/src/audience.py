@@ -24,6 +24,8 @@ import re
 import psycopg2
 import psycopg2.extras
 
+from .contact_extract import FREE_MAIL_DOMAINS
+
 DB_URL = os.environ["DATABASE_URL"]
 
 # "3C", "1C", "Year 3", "Yr 1" — a class or year, which identifies the child
@@ -85,9 +87,24 @@ def _provider_audience(sender_address: str) -> list[int]:
         if not addr or "@" not in addr:
             continue
         their_domain = addr.rsplit("@", 1)[1]
-        if addr == sender or domain == their_domain or domain.endswith("." + their_domain):
-            if r["person_id"] not in out:
-                out.append(r["person_id"])
+        # The exact address always counts. The *domain* only counts when it
+        # identifies an organisation: a sole-trader tutor or a mobile
+        # therapist is often on gmail, and matching their domain would
+        # attribute all 1,655 ingested gmail messages — Shannon's own among
+        # them — to whichever child holds that asset. That is the same fault
+        # as the whole-school rule naming both children, arriving by a
+        # different door. Triage and the decomposer both guard this already;
+        # this one did not, which mattered the moment the register started
+        # being filled out from senders rather than by hand.
+        if addr == sender:
+            matched = True
+        elif their_domain in FREE_MAIL_DOMAINS:
+            matched = False
+        else:
+            matched = (domain == their_domain
+                       or domain.endswith("." + their_domain))
+        if matched and r["person_id"] not in out:
+            out.append(r["person_id"])
     return out
 
 

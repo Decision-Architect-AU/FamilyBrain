@@ -135,6 +135,31 @@ unrelated renewals landed on one square.
 `retired` takes someone off a register without deleting them. `speciality`
 says what a provider is *for*; `relationship` only says which list they are on.
 
+This table is **not an address book** — it is what decides who an email is
+about. `audience._provider_audience` attributes a provider's mail to whoever
+holds an active asset naming that sender, so a row here changes attribution
+rather than just recording a phone number. See *16-skill-contacts*.
+
+- **`mobile`** — kept apart from `phone`, because a signature usually carries
+  both and the difference matters to whoever is deciding whether to ring now.
+- **`last_contact_at`** — when we last actually heard from them, fed from the
+  source email's `received_at`. **Never** from `updated_at`, which moves
+  whenever anything internal touches a row.
+- **`contact_source`** — `email_signature`, `address_book`, `manual` or
+  `pipeline`, and the ordering is a trust ordering. A `manual` value is not
+  overwritten by a derived one; between two derived values the later
+  `received_at` wins. An address-book row carries no date and no provenance,
+  which is why the address book is an input and not the source of truth.
+- **`source_email_id`** — the message that said so, as `personal.note` and
+  `personal.asset` already do. A derived field nobody can trace is a field
+  nobody can argue with.
+
+`practitioner_matcher` created every practitioner with `relationship =
+'provider'` and `groups = '{}'` — a provider that the field deciding the
+register did not call a provider. Both are written now, and the fuzzy match
+reads both, or an existing provider recorded one way is invisible to a match
+made the other way and the node forks.
+
 ## personal.email_message / personal.note
 
 Mail metadata and bodies. `ingest_status` is `ingested`, `skipped`, `skip`,
@@ -191,6 +216,10 @@ change rather than quietly becoming wrong.
 - personal.person.groups
 - personal.person.speciality
 - personal.person.relationship
+- personal.person.mobile
+- personal.person.last_contact_at
+- personal.person.contact_source
+- personal.person.source_email_id
 - personal.email_message.ingest_status
 - personal.email_message.note_id
 - personal.email_filter.filter_type

@@ -383,6 +383,25 @@ def _organisation(lines: list[str], person_name: Optional[str],
     return None
 
 
+# A domain that says nothing about who the sender is.
+#
+# One provider recorded on gmail.com would otherwise make every gmail sender
+# that provider — 1,655 ingested messages at the last count, Shannon's own
+# address among them. `ingestor/src/triage.py` and
+# `email-sync/src/email_decomposer.py` each guard against this already and
+# each keeps its own copy, because they are built into separate images and
+# cannot import from one another. `audience.py` is in this image, so it
+# imports this one; triage's copy stays separate on purpose. If you add a
+# domain here, add it to triage's `_FREEMAIL_DOMAINS` too.
+FREE_MAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "hotmail.com", "hotmail.com.au",
+    "outlook.com", "outlook.com.au", "live.com", "live.com.au", "msn.com",
+    "yahoo.com", "yahoo.com.au", "ymail.com", "icloud.com", "me.com",
+    "mac.com", "aol.com", "bigpond.com", "bigpond.net.au",
+    "optusnet.com.au", "tpg.com.au", "iinet.net.au", "internode.on.net",
+    "proton.me", "protonmail.com",
+})
+
 _HOST_NOISE = {"mail", "email", "edm", "mailer", "news", "post", "updates",
                "e", "m", "notifications", "statements", "reply", "noreply",
                "no-reply", "smtp", "send", "sendgrid", "mailgun", "app", "my",

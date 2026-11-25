@@ -44,10 +44,18 @@ def resolve_practitioner(name: str, org_slug: str, service_type: str,
                 _link(exact["id"], org_slug, service_type, confidence=90)
                 return {"action": "linked", "person_id": exact["id"], "confidence": 90, "match_score": 1.0}
 
+            # Provider-ness is recorded in two places. `groups` is what
+            # 01-data-model says decides which register someone appears on,
+            # and `relationship` is what this module has always written. A
+            # match on only one of them cannot see a provider recorded the
+            # other way, and not seeing an existing provider is exactly how a
+            # near-duplicate person node gets forked — the thing the two-tier
+            # match exists to prevent. The dashboard's provider register
+            # already reads both (`frm.ts`), so this follows it.
             cur.execute(
                 """SELECT id, name, similarity(name, %s) AS sim
                    FROM personal.person
-                   WHERE relationship = 'provider'
+                   WHERE relationship = 'provider' OR 'provider' = ANY(groups)
                    ORDER BY sim DESC LIMIT 1""",
                 (name,),
             )
@@ -74,8 +82,16 @@ def resolve_practitioner(name: str, org_slug: str, service_type: str,
 def _create_person(name: str) -> int:
     with _conn() as conn:
         with conn.cursor() as cur:
+            # Both columns, not just `relationship`. Every practitioner this
+            # module has ever created carries `groups = '{}'`, and
+            # 01-data-model is explicit that `groups` is what decides which
+            # register someone appears on — so each of them was a provider
+            # that the register itself did not call a provider. Two rows
+            # arrived that way, Cindy Blignaut and Varsity College, and
+            # 79_a_provider_the_register_calls_one.sql fills them in.
             cur.execute(
-                "INSERT INTO personal.person (name, relationship) VALUES (%s, 'provider') RETURNING id",
+                """INSERT INTO personal.person (name, relationship, groups)
+                   VALUES (%s, 'provider', ARRAY['provider']) RETURNING id""",
                 (name,),
             )
             person_id = cur.fetchone()["id"]

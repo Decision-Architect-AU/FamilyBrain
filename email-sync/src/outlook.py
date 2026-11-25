@@ -74,6 +74,80 @@ def _headers(account: dict) -> dict:
     return {"Authorization": f"Bearer {_token(account)}", "Content-Type": "application/json"}
 
 
+# ── Contacts ──────────────────────────────────────────────────────────────────
+
+# Contacts has its own scope list, and it is deliberately NOT added to
+# OUTLOOK_SCOPES above.
+#
+# OUTLOOK_SCOPES is what `_token()` passes on every refresh, for mail and for
+# the calendar. A refresh token is authorised for the scopes the account
+# consented to at sign-in, and asking for one it was not authorised for does
+# not downgrade — it fails the whole request with `invalid_grant`. So adding
+# Contacts.Read to that list would have stopped all Outlook mail and calendar
+# sync for any account that had not signed in again, which is every account
+# until somebody does.
+#
+# Keeping it separate means the contacts reader is the only thing that breaks
+# when consent is missing, and `read_contacts` turns that break into a logged
+# skip rather than an exception. An absence is not an error message
+# (20-traps), so the skip says which scope is missing and what to run.
+CONTACT_SCOPES = ["https://graph.microsoft.com/Contacts.Read"]
+
+CONTACT_FIELDS = (
+    "id,displayName,givenName,surname,companyName,jobTitle,department,"
+    "emailAddresses,mobilePhone,businessPhones,homePhones,businessAddress,"
+    "homeAddress,personalNotes,categories,createdDateTime,lastModifiedDateTime"
+)
+
+
+def _contact_token(account: dict) -> Optional[str]:
+    """An access token for Contacts.Read, or None if consent is absent.
+
+    Not cached on the account row: `access_token` there is the mail token,
+    and overwriting it with a contacts-scoped one would break mail sync in a
+    way that looks like an auth outage.
+    """
+    app = msal.PublicClientApplication(
+        client_id=CLIENT_ID,
+        authority=f"https://login.microsoftonline.com/{TENANT_ID}",
+    )
+    result = app.acquire_token_by_refresh_token(
+        refresh_token=account["refresh_token"], scopes=CONTACT_SCOPES)
+    if "access_token" in result:
+        return result["access_token"]
+    print(f"[outlook] {account['email_address']}: no Contacts.Read consent "
+          f"({result.get('error')}). Contacts not read. To grant it: "
+          f"docker exec -it familybrain-email-sync python -m src.auth_helper "
+          f"--outlook --save-account {account['id']}")
+    return None
+
+
+def read_contacts(account: dict, page_size: int = 100) -> Optional[list[dict]]:
+    """Every contact in this account's default folder, or None if unreadable.
+
+    Read-only. Returns None — not [] — when the account cannot be read at
+    all, so a caller can tell "no consent" from "an empty address book";
+    those are very different answers and an empty list would make a missing
+    permission look like a household that knows nobody.
+    """
+    token = _contact_token(account)
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{GRAPH_BASE}/me/contacts?$top={page_size}&$select={CONTACT_FIELDS}"
+    out: list[dict] = []
+    while url:
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            print(f"[outlook] contacts read failed {resp.status_code}: "
+                  f"{resp.text[:200]}")
+            return None if not out else out
+        data = resp.json()
+        out.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+    return out
+
+
 def _strip_html(html: str) -> str:
     return _h2t.handle(html)
 

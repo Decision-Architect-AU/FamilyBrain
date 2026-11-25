@@ -30,6 +30,7 @@ here):
    | `familybrain/13-skill-property.md` | properties, leases, loans |
    | `familybrain/14-skill-nothing-is-appearing.md` | the pipeline has gone quiet |
    | `familybrain/15-skill-knowledge-and-pickup.md` | **how you are allowed to change things** — governs the rest |
+   | `familybrain/16-skill-contacts.md` | the register of providers and contacts, and who a notice is about |
    | `familybrain/20-traps.md` | the expensive mistakes, most of which recur |
 
 4. Repeat for `CommentOS`, where `commentos/PROJECT-INSTRUCTIONS.md` is the
