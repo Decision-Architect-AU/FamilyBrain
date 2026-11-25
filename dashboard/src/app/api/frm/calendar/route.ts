@@ -85,7 +85,35 @@ export async function GET(req: NextRequest) {
                WHERE ab.id = coalesce(e.gen_asset_id, e.asset_id)) AS about_name,
              (SELECT ab.asset_type FROM personal.asset ab
                WHERE ab.id = coalesce(e.gen_asset_id, e.asset_id)) AS about_type,
-             e.gen_rule_id, e.source_email_id, e.parent_event_id
+             e.gen_rule_id, e.source_email_id, e.parent_event_id,
+             e.occurrence_date,
+             -- Which calendar it actually landed on. calendar_route is
+             -- nearly always null (7 rows of 7,228), so the honest answer to
+             -- "which calendar" is the id it was written to, or none.
+             e.gcal_calendar_id,
+             -- The rule that made it, separately from what it is about. An
+             -- occurrence's asset is the routine it came *from*; a job's
+             -- asset is only what it was filed against, and conflating the
+             -- two would claim a rule generated rows nothing generated.
+             e.gen_asset_id,
+             (SELECT ab.name FROM personal.asset ab
+               WHERE ab.id = e.gen_asset_id) AS gen_asset_name,
+             (SELECT ab.asset_type FROM personal.asset ab
+               WHERE ab.id = e.gen_asset_id) AS gen_asset_type,
+             -- The rule itself, out of the asset's rules array, matched by
+             -- the name gen_rule_id holds. This is what lets the list say
+             -- "every Tuesday at 15:00" rather than only naming the rule.
+             (SELECT jsonb_strip_nulls(jsonb_build_object(
+                       'recurrence', r->>'recurrence',
+                       'day',        r->>'recurrence_day',
+                       'days',       r->>'recurrence_days',
+                       'nth',        r->>'recurrence_nth',
+                       'time',       r->>'start_time',
+                       'label',      r->>'event_label'))
+                FROM personal.asset ab, jsonb_array_elements(ab.rules) r
+               WHERE ab.id = e.gen_asset_id
+                 AND r->>'name' = e.gen_rule_id
+               LIMIT 1) AS gen_rule
         FROM personal.event e, span s
        WHERE ${DAY_SQL} >= s.from_day
          AND ${DAY_SQL} <  s.to_day

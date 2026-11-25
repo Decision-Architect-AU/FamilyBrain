@@ -475,7 +475,8 @@ export const FRM_VIEWS: { slug: string; label: string; blurb: string }[] = [
   {
     slug: 'calendar',
     label: 'Calendar',
-    blurb: 'every event in one month — appointments, recurring occurrences, jobs and internal rows',
+    blurb: 'every event in one month, as a list or a grid — what is on, which routine '
+      + 'generated it, and which calendar it reached',
   },
 ];
 
@@ -514,6 +515,74 @@ export const EVENT_KIND_LABEL: Record<EventKind, string> = {
   job: 'Jobs',
   internal: 'Internal',
 };
+
+/**
+ * A rule off an asset's `rules` array, as the calendar route returns it.
+ *
+ * Every field is optional because every field is optional in the data: the
+ * generator defaults a missing `recurrence` to `interval` and a missing
+ * `recurrence_days` to 30, so absence is normal rather than broken.
+ */
+export interface EventRule {
+  recurrence?: string | null;
+  day?: string | null;
+  days?: string | null;
+  nth?: string | null;
+  time?: string | null;
+  label?: string | null;
+}
+
+const ORDINAL = ['', 'first', 'second', 'third', 'fourth', 'fifth'];
+
+/**
+ * A rule's recurrence in words.
+ *
+ * The phrasing follows `_generate_dates` in `wa-agent/src/maintenance.py`
+ * rather than being invented here, because a page that said "every month" of
+ * a rule the generator reads as "every 30 days" would be lying about why two
+ * occurrences drifted apart. Anything the generator does not name falls
+ * through to the raw value — showing `monthly_day_of_month` is honest, and
+ * guessing at it is not.
+ */
+export function describeRecurrence(rule: EventRule | null | undefined): string | null {
+  if (!rule?.recurrence) return null;
+  const at = rule.time ? ` at ${rule.time}` : '';
+  switch (rule.recurrence) {
+    case 'weekly':
+      return `every ${rule.day ?? 'week'}${at}`;
+    case 'weekdays':
+      return `every weekday${at}`;
+    case 'interval':
+      return `every ${rule.days ?? 30} days${at}`;
+    case 'annual':
+      return `once a year${at}`;
+    case 'once':
+      return `once${at}`;
+    case 'monthly_nth_weekday':
+      return `the ${ORDINAL[Number(rule.nth ?? 1)] ?? `${rule.nth}th`} ${
+        rule.day ?? 'weekday'} of each month${at}`;
+    case 'before_fact':
+      return 'a fixed time before a date in the record';
+    default:
+      return rule.recurrence;
+  }
+}
+
+/**
+ * Which calendar an entry was written to.
+ *
+ * Google's own display names are not stored anywhere — `gcal_calendar_id` is
+ * all there is — so a calendar is named by its id and nothing more. `primary`
+ * and the `family…` id say what they are; the two hashed group ids do not,
+ * and are shown truncated rather than given a label invented here, on the
+ * same reasoning as "a placeholder is not a name".
+ */
+export function calendarLabel(id: string | null | undefined): string {
+  if (!id) return 'not written';
+  if (id === 'primary') return 'primary';
+  if (id.startsWith('family')) return 'family';
+  return `${id.slice(0, 8)}…`;
+}
 
 /**
  * Which register owns an asset of this type — so an occurrence on the

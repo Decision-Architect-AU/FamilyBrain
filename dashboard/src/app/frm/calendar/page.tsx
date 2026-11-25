@@ -24,6 +24,12 @@ export default function Page() {
         investigations the system keeps for itself and deliberately never writes out.
         Days are Brisbane days.
       </p>
+      <p className="max-w-3xl text-xs text-gray-500">
+        The <span className="text-gray-300">list</span> names the routine behind each entry
+        and which calendar it reached; the <span className="text-gray-300">grid</span> shows
+        the shape of the month. Both count the same rows, so the breakdown above the list
+        always adds up to the list under it.
+      </p>
       <FrmCalendar />
     </div>
   );
