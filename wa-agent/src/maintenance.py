@@ -3830,12 +3830,29 @@ def task_track_insurance_policies(days: int = 200) -> dict:
                       f"Last letter: {info['subject']} ({info['seen']}).\n"
                       f"This closes itself when the payment advice arrives.")
             with conn.cursor() as cur:
+                # Any state, not only open — and keyed on the due date, so
+                # next year's premium is still a new job.
+                #
+                # This clause used to read `task_status IN ('open',
+                # 'in_progress')`, and task_settle_paid_policies below ticks
+                # the new job off within half a second of its being made. So
+                # every run found nothing, made another, and had it closed
+                # again: 4,040 copies of one Terri Scheer premium, one every
+                # five minutes from 9 November to 26 November. All of them
+                # `done`, which is why none of them ever showed up on the
+                # to-do list to give the game away.
+                #
+                # A settled job is still a job that exists. If the answer to
+                # "is this already raised" is yes in any state, do not raise
+                # it again — a wrongly-closed job is a bug to fix where it is
+                # closed, not a reason to write a second copy.
                 cur.execute(
                     """SELECT id FROM personal.event
                         WHERE event_type = 'task' AND title = %s
-                          AND coalesce(task_status, 'open') IN ('open', 'in_progress')
+                          AND effective_date IS NOT DISTINCT FROM %s
+                          AND status NOT IN ('cancelled', 'superseded')
                         LIMIT 1""",
-                    (title,),
+                    (title, info["due_date"]),
                 )
                 if cur.fetchone():
                     continue
@@ -3942,6 +3959,26 @@ def task_settle_paid_policies(days: int = 60) -> dict:
                 covered_from = _au_date(period.group(1))
                 covered_to = _au_date(period.group(2))
 
+            # Which debt this document is about. These letters all carry a
+            # "DUE DATE", and it is the due date of the amount on that letter:
+            # a renewal quotes what is now owed, a confirmation quotes what
+            # has just been paid. task_track_insurance_policies takes a job's
+            # effective_date from the renewal's due date with this same
+            # regex, so the two are directly comparable, and comparing them
+            # is the whole difference between settling a debt and settling a
+            # different year's.
+            #
+            # The Terri Scheer policy on 23 Henry Street had both letters in
+            # the record: a January 2026 confirmation of the premium due
+            # 28/12/2025, and a November 2026 renewal for $1,610.11 due
+            # 28/12/2026. Matching on the policy number alone, the receipt
+            # for the first closed the job for the second, every five
+            # minutes, while $1,610.11 stayed genuinely owed.
+            paid_due = None
+            paid_due_match = _DUE_DATE_RE.search(body)
+            if paid_due_match:
+                paid_due = _au_date(paid_due_match.group(1))
+
             for number in numbers:
                 evidence = (f"{note['subject'] or 'payment confirmation'} "
                             f"names policy {number} as paid"
@@ -3991,8 +4028,33 @@ def task_settle_paid_policies(days: int = 60) -> dict:
                             WHERE event_type = 'task'
                               AND coalesce(task_status, 'open') IN ('open', 'in_progress')
                               AND (title ILIKE %s OR coalesce(notes, '') ILIKE %s)
+                              -- Only the debt this document is about. The
+                              -- appointment branch below has always had this
+                              -- guard; the job branch did not, and that is
+                              -- the difference a receipt for last year's
+                              -- premium exploited for 4,040 rows.
+                              AND (CASE
+                                     -- The letter names a due date. A job's
+                                     -- effective_date came from a renewal's
+                                     -- due date through the same regex, so
+                                     -- these compare like with like.
+                                     WHEN %s::date IS NOT NULL
+                                       THEN effective_date IS NULL
+                                            OR effective_date = %s::date
+                                     -- No due date on the letter: fall back
+                                     -- to the period it covers, the window
+                                     -- the appointment branch uses.
+                                     WHEN %s::date IS NOT NULL
+                                       THEN effective_date IS NULL
+                                            OR effective_date <= %s::date + 31
+                                     ELSE true
+                                   END)
                         RETURNING id, title""",
-                        (evidence, f"%{number}%", f"%{number}%"),
+                        (evidence, f"%{number}%", f"%{number}%",
+                         paid_due.isoformat() if paid_due else None,
+                         paid_due.isoformat() if paid_due else None,
+                         covered_from.isoformat() if covered_from else None,
+                         covered_from.isoformat() if covered_from else None),
                     )
                     for row in cur.fetchall():
                         closed_tasks += 1
