@@ -239,8 +239,15 @@ export default function RadarPage() {
     setDaysState(d); setSel(null);
     try { localStorage.setItem('radar.postDays', d == null ? 'any' : String(d)); } catch {}
   };
-  const params = [targetsOnly && 'targets=1', targetsOnly && segment && `segment=${segment}`,
-                  days && `days=${days}`].filter(Boolean).join('&');
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  // A search is answered server-side across every thread and every comment
+  // body, and deliberately ignores the date window and the target filter:
+  // the reason to search is that the thing is not where the filters look.
+  const params = query
+    ? `q=${encodeURIComponent(query)}`
+    : [targetsOnly && 'targets=1', targetsOnly && segment && `segment=${segment}`,
+       days && `days=${days}`].filter(Boolean).join('&');
   const { data: captures, mutate: mutList } = useSWR(
     `/api/commentos/captures${params ? `?${params}` : ''}`, fetcher, { refreshInterval: 15000 });
   const { data: detail, mutate: mutDetail } = useSWR(sel ? `/api/commentos/captures?id=${sel}` : null, fetcher, { refreshInterval: 15000 });
@@ -285,11 +292,26 @@ export default function RadarPage() {
   };
   const isNew = (c: any) =>
     c.first_seen_at && Date.now() - new Date(c.first_seen_at).getTime() < 48 * 3600e3;
-  let shown = captures.filter((c: any) => (!channel || c.platform === channel) && withinWindow(c, days));
+  let shown = captures.filter((c: any) =>
+    (!channel || c.platform === channel) && (!!query || withinWindow(c, days)));
   if (newOnly)
     shown = shown.filter(isNew).sort((a: any, b: any) =>
       +new Date(b.first_seen_at) - +new Date(a.first_seen_at));
   const newCount = captures.filter((c: any) => isNew(c) && withinWindow(c, days)).length;
+  // How many threads this window is holding back, and how many of those have
+  // arrived recently.
+  //
+  // The window is on when the POST was published, not when a comment on it
+  // came in — which is deliberate, and is also why a reply can be impossible
+  // to find. Somebody comments today on a post from last week and at the
+  // default 2d it is simply not on the page: 262 of the 504 comments seen in
+  // one week were on posts older than two days. Nothing said so. The list
+  // just looked short, and the "no captures yet" message below only renders
+  // when the window is already Any, so the one state that explains itself is
+  // the one state where there is nothing to explain.
+  const hiddenByWindow = query ? [] : captures.filter(
+    (c: any) => !withinWindow(c, days) && (!channel || c.platform === channel));
+  const hiddenRecent = hiddenByWindow.filter(isNew).length;
   const platforms = Array.from(new Set(captures.map((c: any) => c.platform))) as string[];
   const groups: Record<string, string[]> = {};
   for (const pf of platforms) {
@@ -337,6 +359,72 @@ export default function RadarPage() {
           </span>
         ))}
       </div>
+
+      <form
+        onSubmit={(e) => { e.preventDefault(); setQuery(search.trim()); setSel(null); }}
+        className="mb-3 flex gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Find a comment — author, handle, or words they used"
+          className="flex-1 rounded border border-gray-700 bg-gray-900/60 px-3 py-1.5 text-sm text-gray-200 placeholder:text-gray-600"
+        />
+        <button type="submit"
+          className="rounded border border-cyan-700 px-3 py-1.5 text-xs text-cyan-300 hover:bg-cyan-900/30">
+          Search
+        </button>
+        {query && (
+          <button type="button"
+            onClick={() => { setSearch(''); setQuery(''); setSel(null); }}
+            className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800">
+            Clear
+          </button>
+        )}
+      </form>
+
+      {query && (
+        <p className="mb-3 text-xs text-cyan-300">
+          {captures.length} thread{captures.length === 1 ? '' : 's'} matching
+          “{query}” — searched across every comment, ignoring the date window
+          and the target filter.
+        </p>
+      )}
+
+      {!query && captures.length >= 100 && (
+        <p className="mb-3 text-xs text-gray-500">
+          Showing the first 100 threads by impact and freshness. If what you
+          want is not here, search for it — the list is capped, so scrolling
+          will not reach it.
+        </p>
+      )}
+
+      {hiddenByWindow.length > 0 && (
+        <div className="mb-3 flex items-center gap-2 rounded border border-amber-800/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+          <span>
+            {hiddenByWindow.length} thread{hiddenByWindow.length === 1 ? '' : 's'} hidden by
+            the {days}d window
+            {hiddenRecent > 0 && <strong> — {hiddenRecent} had new activity in the last 48h</strong>}.
+            The window is on when the <em>post</em> was published, so a fresh comment on an
+            older post is not shown.
+          </span>
+          <button onClick={() => setDays(30)}
+            className="ml-auto whitespace-nowrap rounded border border-amber-600/60 px-2 py-0.5 hover:bg-amber-900/40">
+            Widen to 30d
+          </button>
+          <button onClick={() => setDays(null)}
+            className="whitespace-nowrap rounded border border-amber-600/60 px-2 py-0.5 hover:bg-amber-900/40">
+            Any
+          </button>
+        </div>
+      )}
+
+      {shown.length === 0 && captures.length > 0 && (
+        <div className="mb-3 rounded border border-gray-700 bg-gray-900/40 px-3 py-6 text-center text-sm text-gray-400">
+          Nothing matches the current filters — {captures.length} thread
+          {captures.length === 1 ? '' : 's'} are loaded.
+        </div>
+      )}
+
     <div className={`grid gap-4 ${replyTo ? 'grid-cols-[280px_1fr_360px]' : 'grid-cols-[300px_1fr]'}`}>
       {/* captures list */}
       <div className="space-y-2 max-h-[calc(100vh-160px)] overflow-y-auto pr-1">

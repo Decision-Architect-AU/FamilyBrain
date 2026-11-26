@@ -52,6 +52,46 @@ export async function GET(req: NextRequest) {
   // Filtering here, not in the client, so the LIMIT can't push brand-new
   // unscored threads off the list.
   const days = Number(req.nextUrl.searchParams.get('days')) || null;
+  // ?q= searches for a thread by who said something or what they said.
+  //
+  // Without it there is no way to reach a particular comment. The list is
+  // capped at 100 and ordered by impact and freshness, and the window filters
+  // on when the POST was published — so a reply worth answering, left on a
+  // post from last week by someone outside the top hundred, is not on the
+  // page and no amount of scrolling finds it. 262 of the 504 comments seen in
+  // one week were on posts older than two days.
+  //
+  // Searched server-side and across the comment bodies, not just the post
+  // title, because the thing being looked for is usually the comment: "that
+  // bloke who asked about the forecast", not the post he asked it under. A
+  // search ignores `days` for the same reason — if you are searching, you
+  // already know it is not in the default window.
+  const qText = (req.nextUrl.searchParams.get('q') || '').trim();
+  if (qText) {
+    const rows = await q(`
+      SELECT c.*, t.followers AS target_followers, t.role AS target_role,
+        t.sector AS target_sector, t.segment AS target_segment,
+        (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id) AS n_comments,
+        (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage='relevant') AS n_relevant,
+        (SELECT count(*) FROM decision_os.co_comment cm WHERE cm.capture_id=c.id AND cm.triage IS NULL) AS n_pending,
+        (SELECT count(DISTINCT ss.signal_id) FROM decision_os.co_signal_source ss
+          JOIN decision_os.co_comment cm ON cm.id=ss.comment_id WHERE cm.capture_id=c.id) AS n_signals
+      FROM decision_os.co_capture c
+      LEFT JOIN decision_os.co_target t ON t.id=c.target_id AND t.status='active'
+      WHERE c.status='active'
+        AND (
+          c.post_author ILIKE '%' || $1 || '%'
+          OR c.post_title ILIKE '%' || $1 || '%'
+          OR EXISTS (SELECT 1 FROM decision_os.co_comment cm
+                      WHERE cm.capture_id = c.id
+                        AND (cm.author_name ILIKE '%' || $1 || '%'
+                             OR cm.author_handle ILIKE '%' || $1 || '%'
+                             OR cm.body ILIKE '%' || $1 || '%'))
+        )
+      ORDER BY c.first_seen_at DESC
+      LIMIT 100`, [qText]);
+    return NextResponse.json(rows);
+  }
   // ?targets=1: posts by target people over their segment's follower
   // threshold, ranked by reach and recency — log10(followers) loses a point
   // for each day of age. &segment= narrows to one segment.
