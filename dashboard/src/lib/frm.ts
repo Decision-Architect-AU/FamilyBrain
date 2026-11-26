@@ -89,6 +89,62 @@ const COST_FIELDS: FrmField[] = [
  * this one: a dance class has a price and no balance, and an empty "Balance
  * / value" box on every routine invites somebody to put the term fee in it.
  */
+/**
+ * Whose books it belongs to.
+ *
+ * Taken from the loan schedule, which is the only place this was written
+ * down: Personal, the SMSF, and four trusts. It matters for a forecast
+ * because the entities do not share a bank account — a total that mixes
+ * Trust2's loan with the household's subscriptions answers a question nobody
+ * asked.
+ */
+const ENTITY: FrmField = {
+  key: 'entity', label: 'Entity', kind: 'select', source: 'fact',
+  options: ['Personal', 'SMSF', 'Trust1', 'Trust2', 'Trust3', 'Trust4'],
+};
+
+/**
+ * What kind of spend it is, for grouping a forecast.
+ *
+ * A select rather than free text, because the whole value of this field is
+ * that two rows meaning the same thing add up together, and "Utilities",
+ * "utilities" and "Power" do not. Short on purpose: a taxonomy nobody can
+ * hold in their head gets filled in at random, and a budget grouped at
+ * random is worse than one not grouped at all.
+ */
+const SPEND_AREA: FrmField = {
+  key: 'spend_area', label: 'Spend area', kind: 'select', source: 'fact',
+  options: [
+    'Debt', 'Property costs', 'Rates & taxes', 'Insurance', 'Utilities',
+    'Children', 'Health', 'Household', 'Vehicles', 'Business', 'Software',
+    'Professional fees', 'Rental income', 'Employment income', 'Other income',
+    'Other',
+  ],
+};
+
+/**
+ * A finer grouping than spend area, free text because it is the family's own
+ * vocabulary — a property name, a child, a company. Left blank is fine;
+ * spend area is the one the forecast groups by.
+ */
+const COST_CENTRE: FrmField = {
+  key: 'cost_centre', label: 'Cost centre', kind: 'text', source: 'fact',
+};
+
+/**
+ * How to recognise this line when the money actually moves.
+ *
+ * The text that shows up on a statement or an invoice — "ERGON ENERGY QLD",
+ * "YARD RESIMAC 4471". A forecast is only half the job: without something to
+ * match against, nobody can tell a budgeted expense from an unbudgeted one,
+ * and every reconciliation starts from scratch.
+ */
+const MATCH_TEXT: FrmField = {
+  key: 'match_text', label: 'Shows on statement as', kind: 'text', source: 'fact',
+};
+
+const BUDGET_FIELDS: FrmField[] = [ENTITY, SPEND_AREA, COST_CENTRE, MATCH_TEXT];
+
 const MONEY_FIELDS: FrmField[] = [
   ...COST_FIELDS,
   { key: 'balance', label: 'Balance / value', kind: 'money', source: 'column' },
@@ -226,6 +282,7 @@ export const FRM: Record<string, FrmEntity> = {
       STATUS,
       { key: 'payer', label: 'Paid by', kind: 'text', source: 'fact' },
       { key: 'paid_to', label: 'Paid into', kind: 'text', source: 'fact' },
+      ...BUDGET_FIELDS,
       ...MONEY_FIELDS,
       GROUPS,
       NOTES,
@@ -246,6 +303,7 @@ export const FRM: Record<string, FrmEntity> = {
       { key: 'secured_against', label: 'Secured against', kind: 'text', source: 'fact' },
       { key: 'interest_rate', label: 'Rate %', kind: 'number', source: 'fact' },
       { key: 'loan_type', label: 'Type', kind: 'text', source: 'fact' },
+      ...BUDGET_FIELDS,
       { key: 'fixed_until', label: 'Fixed until', kind: 'date', source: 'fact' },
       ...MONEY_FIELDS,
       GROUPS,
@@ -284,6 +342,7 @@ export const FRM: Record<string, FrmEntity> = {
       STATUS,
       { key: 'provider', label: 'Provider', kind: 'text', source: 'fact' },
       { key: 'plan', label: 'Plan', kind: 'text', source: 'fact' },
+      ...BUDGET_FIELDS,
       ...MONEY_FIELDS,
       { key: 'next_event_date', label: 'Next billed', kind: 'date', source: 'column', readOnly: true },
       { key: 'payment_method', label: 'Billed to', kind: 'text', source: 'fact' },
@@ -455,12 +514,23 @@ export const FRM_SECTIONS: { slug: string; label: string; entities: string[] }[]
   {
     slug: 'assets',
     label: 'Assets, companies & trusts',
-    entities: ['properties', 'vehicles', 'companies', 'trusts', 'income', 'loans', 'investments'],
+    // Income and loans moved to Budgeting. They are the money side, and the
+    // question asked of them — what does next month look like — is a
+    // budgeting question, not a "what do we own" one. Investments stay here:
+    // they are held, not spent.
+    entities: ['properties', 'vehicles', 'companies', 'trusts', 'investments'],
+  },
+  {
+    slug: 'budgeting',
+    label: 'Budgeting',
+    // The three registers a forecast is made of: what comes in, what goes
+    // out on a subscription, and what goes out on a loan. Together with
+    // spend area and entity on each, this is the forecast budget.
+    entities: ['income', 'subscriptions', 'loans'],
   },
   { slug: 'family', label: 'Family contacts', entities: ['family'] },
   { slug: 'providers', label: 'Providers', entities: ['providers'] },
   { slug: 'contacts', label: 'Contacts', entities: ['contacts'] },
-  { slug: 'subscriptions', label: 'Subscriptions', entities: ['subscriptions'] },
   { slug: 'todos', label: 'To-do', entities: ['todos'] },
   { slug: 'routines', label: 'Routines', entities: ['routines'] },
 ];
