@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { FRM_SECTIONS } from '@/lib/frm';
+import { FRM_SECTIONS, FRM_VIEWS } from '@/lib/frm';
 
 /**
  * FRM — the family's own relationship management: what we own, who we deal
@@ -24,6 +24,18 @@ export default function FrmLayout({ children }: { children: React.ReactNode }) {
                 className="rounded px-3 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-sky-300"
               >
                 {s.label}
+              </Link>
+            ))}
+            {/* The views read and do not write, so they sit apart from the
+                registers rather than looking like one more of them. */}
+            <span className="mx-1 self-center text-gray-700">|</span>
+            {FRM_VIEWS.map((v) => (
+              <Link
+                key={v.slug}
+                href={`/frm/${v.slug}`}
+                className="rounded px-3 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-sky-300"
+              >
+                {v.label}
               </Link>
             ))}
           </nav>

@@ -56,6 +56,14 @@ the standing rules below.
 | graph-api | 4003 | the Apache AGE knowledge graph |
 | dashboard | 3000 | Next.js UI, including FRM at `/frm` |
 
+The FRM registers are editable, one per kind of thing. Beside them sits one
+read-only view, `/frm/calendar`, which puts the whole of `personal.event` on
+one page in Brisbane days — as a list (the default) or a month grid. The list
+names, for every entry, the rule and the asset that generated it and how often
+that rule fires, and says which Google calendar the entry reached, or that it
+reached none. It is the quickest answer to "why does this keep appearing":
+most of what it shows was never written to a calendar at all.
+
 Maintenance tasks are Python functions in `wa-agent/src/maintenance.py` and can
 be run one at a time:
 
