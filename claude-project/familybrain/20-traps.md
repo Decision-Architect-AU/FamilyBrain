@@ -57,6 +57,41 @@ rewrote 220 events at each other indefinitely. When two writers share a
 column, record which of them last had a claim on it — that is what
 `generated_title` is for.
 
+## A "does this already exist" check that only looks at open rows
+
+`task_track_insurance_policies` raises a job to pay a premium.
+`task_settle_paid_policies` ticks one off when a payment confirmation
+arrives. The first asked "is there already an **open** job for this?", and
+the second had marked the new one `done` within half a second — so the
+answer was always no. **4,040 copies** of one Terri Scheer premium, one
+every five minutes from 9 to 26 November 2026, every one of them `done` and
+therefore invisible on the to-do list the whole time it grew.
+
+Two faults, and both matter:
+
+- **Existence is not openness.** A settled row is still a row. If something
+  asks whether it has already done a thing, the answer must not depend on
+  what happened to the result afterwards. Key the check on identity — here
+  the title *and* the due date, so next year's premium is still a new job —
+  and let it see every state.
+- **A document settles only the debt it names.** The confirmation was real:
+  the premium due 28/12/2025 had been paid. It closed the job for the
+  renewal due 28/12/2026, because the match was on the policy number alone
+  and that number appears on both letters. The asset said `status:
+  outstanding`, `amount_due: 1610.11` and `paid: yes` at the same time and
+  nobody noticed, because nothing reads a contradiction.
+
+The guard already existed for calendar entries a few lines further down —
+*"settles the renewal at the start of that period, never the one at the
+end"* — and had never been applied to the jobs. **When you write a rule
+about which rows a document may touch, check whether the same function
+touches other kinds of row and leaves them unguarded.**
+
+A third relative of this is in `task_sync.push_outbound`: deleting a remote
+task dropped the mapping, which made the row look never-pushed, which
+re-created it. 71 copies of "Attend Year 3 Assembly". The shape recurs — a
+cleanup step that erases the evidence the dedupe check depends on.
+
 ## Timezones
 
 Everything is stored UTC; the household is Brisbane (UTC+10, no DST). A 9am
