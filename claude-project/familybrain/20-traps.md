@@ -110,6 +110,35 @@ task dropped the mapping, which made the row look never-pushed, which
 re-created it. 71 copies of "Attend Year 3 Assembly". The shape recurs — a
 cleanup step that erases the evidence the dedupe check depends on.
 
+## A read that leaves a trace on somebody's account
+
+`pull_tasks` called `_ensure_task_list`, which creates the FamilyBrain list
+when it cannot find one. So *looking* at an account's tasks made a list on
+it. One read of Shannon's account, to find out what had been pushed there,
+left an empty FamilyBrain list in her Google Tasks — and she had never been
+part of the Google Tasks sync at all.
+
+"Reads need no permission" is only true of reads that read. Before using a
+helper in a diagnostic, check what it writes: a find-or-create is a write
+wearing a reader's name, and so is anything that touches `last_synced_at`,
+a cursor or a cache on the far side. `_ensure_task_list` now takes
+`create`, and `pull_tasks` passes `False` and returns `[]` — the honest
+answer for an account that has never been pushed to.
+
+## Building from the main checkout tests the main checkout
+
+`docker compose` must be run from `C:\Users\Glenn\ClaudeCode\openclaw`,
+because the compose project name comes from the directory and a worktree
+would start a second stack. But the build then uses **main's** files, not
+your branch's. Editing in a worktree, building from the main checkout and
+testing gives a pass or a fail for code you did not write.
+
+It is not a subtle failure once you look for it: the fix above was tested
+this way and the thing it was meant to prevent happened anyway, which is
+the good case. **Merge to main before building, and confirm the change is
+in the container** — `docker exec <container> grep -c '<new line>'
+/app/src/<file>.py` — before believing any test of it.
+
 ## Timezones
 
 Everything is stored UTC; the household is Brisbane (UTC+10, no DST). A 9am
