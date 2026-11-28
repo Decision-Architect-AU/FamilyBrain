@@ -3783,11 +3783,37 @@ def task_track_insurance_policies(days: int = 200) -> dict:
                     keep = dict(existing["facts"] or {})
                     if keep.get("paid") == "yes" and not owed:
                         continue
+
+                    # And when a letter does say money is owed again, take the
+                    # old `paid: yes` off instead of writing `outstanding`
+                    # beside it. `paid` came from a payment confirmation and
+                    # means "paid for the period that confirmation covered" —
+                    # it carries no expiry of its own, so once a premium falls
+                    # due at or after the end of that cover the word has
+                    # outlived what it was true of. Asset 127 read
+                    # `status: outstanding`, `amount_due: 1610.11` and
+                    # `paid: yes` at the same time for nineteen days, the
+                    # January receipt still answering for the December
+                    # renewal. Two answers in one record is worse than the
+                    # stale one alone, because whoever reads it cannot tell
+                    # which is current. The confirmation is still in the mail
+                    # if anyone wants the date it was paid.
+                    drop: list[str] = []
+                    if keep.get("paid") == "yes":
+                        covered_to = keep.get("covered_to")
+                        due = info["due_date"].isoformat() if info["due_date"] else None
+                        if not covered_to or not due or due >= covered_to:
+                            drop = ["paid", "paid_evidence", "paid_confirmed_on"]
+                            print(f"[maintenance] policy {number}: ${info['amount_due']} "
+                                  f"now due{f' {due}' if due else ''}, cover ran to "
+                                  f"{covered_to or 'an unrecorded date'} — clearing "
+                                  f"the earlier paid confirmation")
                     cur.execute(
                         """UPDATE personal.asset
-                              SET facts = facts || %s::jsonb, updated_at = now()
+                              SET facts = (facts - %s::text[]) || %s::jsonb,
+                                  updated_at = now()
                             WHERE id = %s""",
-                        (json.dumps(facts), existing["id"]),
+                        (drop, json.dumps(facts), existing["id"]),
                     )
                     asset_id, name = existing["id"], existing["name"]
                     updated += 1

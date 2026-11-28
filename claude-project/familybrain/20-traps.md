@@ -80,6 +80,15 @@ Two faults, and both matter:
   and that number appears on both letters. The asset said `status:
   outstanding`, `amount_due: 1610.11` and `paid: yes` at the same time and
   nobody noticed, because nothing reads a contradiction.
+- **A fact written from a document inherits that document's period, and
+  nothing stores it.** `paid: yes` means "paid for the cover this
+  confirmation bought", but the word carries no expiry, so it goes on
+  answering for premiums it was never about. The tracker now drops `paid`,
+  `paid_evidence` and `paid_confirmed_on` when a letter names a premium
+  falling due at or after `covered_to`, rather than writing `outstanding`
+  beside them. **If a fact is only true of a period, either store the period
+  with it or remove the fact when the period lapses — never leave a record
+  holding two answers, because the reader cannot tell which is current.**
 
 The guard already existed for calendar entries a few lines further down —
 *"settles the renewal at the start of that period, never the one at the
