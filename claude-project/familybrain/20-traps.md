@@ -89,6 +89,15 @@ Two faults, and both matter:
   beside them. **If a fact is only true of a period, either store the period
   with it or remove the fact when the period lapses — never leave a record
   holding two answers, because the reader cannot tell which is current.**
+- **Two fixes can cancel each other out.** What had stopped the settle task
+  re-writing `paid: yes` was a guard comparing `paid_evidence` against the
+  text it was about to write. Clearing a stale `paid` necessarily clears the
+  evidence with it, so the guard passed again, and the two tasks flipped the
+  flag back and forth on every cycle — the register's answer depending on
+  which had run most recently. Both now ask the same question, *what is the
+  last due date this letter can speak for*. **After changing what one task
+  writes, run the tasks that read it, alternately, and check the answer
+  stops moving.**
 
 The guard already existed for calendar entries a few lines further down —
 *"settles the renewal at the start of that period, never the one at the
