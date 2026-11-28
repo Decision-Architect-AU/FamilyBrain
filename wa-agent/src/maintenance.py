@@ -4005,6 +4005,20 @@ def task_settle_paid_policies(days: int = 60) -> dict:
             if paid_due_match:
                 paid_due = _au_date(paid_due_match.group(1))
 
+            # The last due date this letter can speak for. A confirmation
+            # buys cover up to `covered_to`, so a premium falling due *on*
+            # that date opens the next period and is not the one that was
+            # paid — the January receipt covered to 28/12/2026 and the
+            # premium now owed falls due 28/12/2026, which is the following
+            # year's, not the one it paid. Where a letter names no period,
+            # the due date it quotes is the debt it settles and nothing
+            # after it.
+            settles_through = None
+            if covered_to:
+                settles_through = covered_to - timedelta(days=1)
+            elif paid_due:
+                settles_through = paid_due
+
             for number in numbers:
                 evidence = (f"{note['subject'] or 'payment confirmation'} "
                             f"names policy {number} as paid"
@@ -4029,13 +4043,30 @@ def task_settle_paid_policies(days: int = 60) -> dict:
                               AND (%s::text IS NULL
                                    OR coalesce(facts->>'covered_to', '') = ''
                                    OR (facts->>'covered_to') <= %s::text)
+                              -- And never mark a policy paid on a receipt for
+                              -- a period that a later premium has already
+                              -- overtaken. The job branch below has kept the
+                              -- receipt off the wrong debt since the 4,040
+                              -- rows; the policy itself went on being marked
+                              -- paid from the same year-old letter, so `paid:
+                              -- yes` and `status: outstanding` sat side by
+                              -- side on asset 127 — and once the tracker
+                              -- started clearing the stale flag, the two
+                              -- tasks flipped it back and forth every cycle.
+                              AND NOT (%s::date IS NOT NULL
+                                       AND coalesce(facts->>'status', '') = 'outstanding'
+                                       AND coalesce(facts->>'amount_due', '') NOT IN ('', '0', '0.00')
+                                       AND coalesce(facts->>'due_date', '') <> ''
+                                       AND (facts->>'due_date')::date > %s::date)
                         RETURNING id, name""",
                         (str(note["received_at"] or date.today())[:10], evidence,
                          covered_to.isoformat() if covered_to else None,
                          covered_to.isoformat() if covered_to else None,
                          number, evidence,
                          covered_to.isoformat() if covered_to else None,
-                         covered_to.isoformat() if covered_to else None),
+                         covered_to.isoformat() if covered_to else None,
+                         settles_through.isoformat() if settles_through else None,
+                         settles_through.isoformat() if settles_through else None),
                     )
                     for row in cur.fetchall():
                         settled_assets += 1
