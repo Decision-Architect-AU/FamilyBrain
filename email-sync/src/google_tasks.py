@@ -22,9 +22,20 @@ def _tasks_service(account: dict):
     return _cached_service(account, "tasks", "v1")
 
 
-def _ensure_task_list(account: dict, svc) -> str:
-    """Find-or-create the dedicated FamilyBrain task list. Cached per account
-    for the process lifetime — mirrors gmail.py's _label_cache idiom."""
+def _ensure_task_list(account: dict, svc, create: bool = True) -> str | None:
+    """Find the dedicated FamilyBrain task list, creating it only when asked.
+    Cached per account for the process lifetime — mirrors gmail.py's
+    _label_cache idiom.
+
+    `create=False` returns None rather than making the list. Reading somebody
+    else's tasks used to create a FamilyBrain list on their account as a side
+    effect: one look at Shannon's account to find out what had been pushed
+    there left an empty list sitting in her Google Tasks, and she had never
+    been part of this sync at all. A read must not leave a trace on an
+    account, least of all on an account belonging to someone who did not ask
+    for it — so pull_tasks asks for no creation and reports an empty list
+    when there is nothing to read.
+    """
     account_id = account["id"]
     if account_id in _list_id_cache:
         return _list_id_cache[account_id]
@@ -34,6 +45,9 @@ def _ensure_task_list(account: dict, svc) -> str:
         if tl.get("title") == TASK_LIST_TITLE:
             _list_id_cache[account_id] = tl["id"]
             return tl["id"]
+
+    if not create:
+        return None
 
     created = svc.tasklists().insert(body={"title": TASK_LIST_TITLE}).execute()
     _list_id_cache[account_id] = created["id"]
@@ -70,10 +84,15 @@ def pull_tasks(account: dict) -> list[dict]:
     """
     List every (non-deleted) task in the FamilyBrain list, including
     completed ones (showCompleted — the sync loop needs to see completions,
-    not just open items). Returns raw Google Tasks resources.
+    not just open items). Returns raw Google Tasks resources, or nothing at
+    all if the account has no FamilyBrain list: an account that has never
+    been pushed to has no tasks to read, and saying so is the honest answer.
+    Creating the list to read it is not.
     """
     svc = _tasks_service(account)
-    list_id = _ensure_task_list(account, svc)
+    list_id = _ensure_task_list(account, svc, create=False)
+    if list_id is None:
+        return []
 
     items: list[dict] = []
     page_token = None
